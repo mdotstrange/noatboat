@@ -28,3 +28,4 @@ None of the current note taking apps, free or paid work the way I want to so I m
 It's inspired by Notational Velocity and SimpleNote.
 I don't want to have to make an account or have my note taking app do my taxes with AI so I made this.
 
+*Made in Portugal
