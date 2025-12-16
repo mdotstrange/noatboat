@@ -22,3 +22,8 @@ You just point it at a local folder and that is what it uses to store/display yo
 # What do the buttons do?
 ![alt text](https://github.com/mdotstrange/noatboat/blob/main/bar.png "Noat Boat Bar Image")
 
+# Why another note taking app?!
+I'm a creative that doesn't use a Mobile Phone and I work on Mac and Windows machines at the same time.
+None of the current note taking apps, free or paid work the way I want to so I made this one.
+It's inspired by Notational Velocity and SimpleNote.
+
