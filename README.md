@@ -1,7 +1,7 @@
 ![alt text](https://github.com/mdotstrange/noatboat/blob/main/noatboatIcon1.png "Noat Boat Main Image")
 
 
-A minimalistic note taking application
+A minimalistic note taking application for Computers(smart phones suck)
 
 ![alt text](https://github.com/mdotstrange/noatboat/blob/main/NoatBoatScreen.png "Noat Boat Screen Shot")
 
