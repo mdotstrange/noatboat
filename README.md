@@ -1,5 +1,10 @@
-# Noat Boat
+![alt text](https://github.com/mdotstrange/noatboat/blob/main/noatboatIcon1.png "Noat Boat Main Image")
+
+
 A minimalistic note taking application
+
+![alt text](https://github.com/mdotstrange/noatboat/blob/main/NoatBoatScreen.png "Noat Boat Screen Shot")
+
 
 # How to install?  
 Download a portable version from the Releases over there-->
