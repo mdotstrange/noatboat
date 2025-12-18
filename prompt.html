@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Input</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      margin: 0;
+      padding: 16px;
+      background: #f2f2f2;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+    label {
+      font-size: 13px;
+      margin-bottom: 8px;
+      display: block;
+    }
+    input {
+      width: 100%;
+      padding: 8px 10px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font-size: 14px;
+      margin-bottom: 16px;
+      outline: none;
+    }
+    input:focus {
+      border-color: #007bff;
+      box-shadow: 0 0 0 3px rgba(0,123,255,0.15);
+    }
+    .buttons {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    button {
+      padding: 8px 16px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      background: #fff;
+    }
+    button:hover {
+      background: #f8f8f8;
+    }
+    button.primary {
+      background: #007bff;
+      color: white;
+      border-color: #007bff;
+    }
+    button.primary:hover {
+      background: #0056b3;
+    }
+  </style>
+</head>
+<body>
+  <label id="message">New note title:</label>
+  <input type="text" id="input" autofocus>
+  <div class="buttons">
+    <button id="cancelBtn">Cancel</button>
+    <button id="okBtn" class="primary">OK</button>
+  </div>
+  <script>
+    const input = document.getElementById('input');
+    const okBtn = document.getElementById('okBtn');
+    const cancelBtn = document.getElementById('cancelBtn');
+    const messageEl = document.getElementById('message');
+
+    window.promptAPI.onSetPrompt((msg, defaultVal) => {
+      messageEl.textContent = msg;
+      input.value = defaultVal;
+      input.select();
+    });
+
+    function submit() {
+      window.promptAPI.sendResponse(input.value);
+    }
+
+    function cancel() {
+      window.promptAPI.sendResponse(null);
+    }
+
+    okBtn.addEventListener('click', submit);
+    cancelBtn.addEventListener('click', cancel);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submit();
+      if (e.key === 'Escape') cancel();
+    });
+  </script>
+</body>
+</html>
