@@ -975,21 +975,21 @@ function clearThumb() {
 
 // --- Fabric.js Canvas Functions ---
 
-// Base canvas dimension - height calculated dynamically based on container aspect ratio
-const CANVAS_BASE = 1200;
+// Canvas dimensions - set dynamically to match container
 let CANVAS_WIDTH = 1200;
-let CANVAS_HEIGHT = 1200;
+let CANVAS_HEIGHT = 1600;
 
 function initFabricCanvas() {
   if (fabricCanvas) return;
   
-  // Calculate canvas dimensions based on container aspect ratio
+  // Set canvas dimensions to match container exactly
   const container = els.canvasContainer;
   const rect = container.getBoundingClientRect();
   if (rect.width > 0 && rect.height > 0) {
-    const aspectRatio = rect.height / rect.width;
-    CANVAS_WIDTH = CANVAS_BASE;
-    CANVAS_HEIGHT = Math.round(CANVAS_BASE * aspectRatio);
+    // Use container dimensions directly (or scaled up for higher resolution)
+    const scale = 2; // 2x for crisp rendering
+    CANVAS_WIDTH = Math.round(rect.width * scale);
+    CANVAS_HEIGHT = Math.round(rect.height * scale);
   }
   
   fabricCanvas = new fabric.Canvas('fabricCanvas', {
@@ -1029,7 +1029,7 @@ function resizeFabricCanvas() {
   const rect = container.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return;
   
-  // Calculate scale to fit container (canvas fills container completely)
+  // Scale canvas to fit container exactly
   const scaleX = rect.width / CANVAS_WIDTH;
   const scaleY = rect.height / CANVAS_HEIGHT;
   const scale = Math.min(scaleX, scaleY);
@@ -1078,7 +1078,9 @@ function onCanvasModified() {
 function updateDropZoneVisibility() {
   if (!fabricCanvas) return;
   const hasObjects = fabricCanvas.getObjects().length > 0;
-  els.dropZone.classList.toggle('empty', !hasObjects);
+  // Hide drop zone if there are objects OR if in drawing mode
+  const shouldHide = hasObjects || canvasDrawingMode;
+  els.dropZone.classList.toggle('empty', !shouldHide);
 }
 
 function updateCanvasStatus(text) {
@@ -1097,6 +1099,8 @@ function setCanvasDrawingMode(enabled) {
   }
   els.canvasSelectBtn.classList.toggle('active', !enabled);
   els.canvasDrawBtn.classList.toggle('active', enabled);
+  // Hide drop zone when in drawing mode so user can draw on empty canvas
+  updateDropZoneVisibility();
 }
 
 function setupCanvasDragDrop() {
