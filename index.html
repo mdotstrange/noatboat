@@ -1050,8 +1050,8 @@ function resizeFabricCanvas() {
   }
 }
 
-function screenToCanvasCoords(screenX, screenY) {
-  // Convert screen coordinates to canvas coordinates accounting for CSS scale
+function screenToCanvasCoords(clientX, clientY) {
+  // Convert client coordinates to canvas coordinates accounting for CSS scale
   const container = els.canvasContainer;
   const rect = container.getBoundingClientRect();
   const scaleX = rect.width / CANVAS_WIDTH;
@@ -1063,9 +1063,13 @@ function screenToCanvasCoords(screenX, screenY) {
   const offsetX = (rect.width - scaledWidth) / 2;
   const offsetY = (rect.height - scaledHeight) / 2;
   
+  // Convert from client coords to container-relative, then to canvas coords
+  const containerX = clientX - rect.left;
+  const containerY = clientY - rect.top;
+  
   return {
-    x: (screenX - offsetX) / scale,
-    y: (screenY - offsetY) / scale
+    x: (containerX - offsetX) / scale,
+    y: (containerY - offsetY) / scale
   };
 }
 
@@ -1130,11 +1134,11 @@ function setupCanvasDragDrop() {
     const files = e.dataTransfer.files;
     const items = e.dataTransfer.items;
     
-    // Handle dropped files
+    // Handle dropped files - use clientX/clientY for proper positioning
     if (files && files.length > 0) {
       for (const file of files) {
         if (file.type.startsWith('image/')) {
-          await addImageFileToCanvas(file, e.offsetX, e.offsetY);
+          await addImageFileToCanvas(file, e.clientX, e.clientY);
         }
       }
     }
@@ -1143,9 +1147,11 @@ function setupCanvasDragDrop() {
     if (items) {
       for (const item of items) {
         if (item.type === 'text/uri-list' || item.type === 'text/plain') {
+          const clientX = e.clientX;
+          const clientY = e.clientY;
           item.getAsString(async (url) => {
             if (url.match(/\.(png|jpg|jpeg|gif|webp)$/i) || url.startsWith('data:image')) {
-              await addImageUrlToCanvas(url, e.offsetX, e.offsetY);
+              await addImageUrlToCanvas(url, clientX, clientY);
             }
           });
         }
@@ -1190,12 +1196,17 @@ async function addImageFileToCanvas(file, x, y) {
           img.scale(scale);
         }
         
-        // Position image (convert screen coords to canvas coords if provided)
+        // Position image
         if (x !== undefined && y !== undefined) {
+          // Convert screen coords to canvas coords for drop position
           const canvasCoords = screenToCanvasCoords(x, y);
           img.set({ left: canvasCoords.x - (img.getScaledWidth() / 2), top: canvasCoords.y - (img.getScaledHeight() / 2) });
         } else {
-          img.set({ left: 50, top: 50 });
+          // Center image on canvas for paste/load
+          img.set({ 
+            left: (CANVAS_WIDTH - img.getScaledWidth()) / 2, 
+            top: (CANVAS_HEIGHT - img.getScaledHeight()) / 2 
+          });
         }
         
         fabricCanvas.add(img);
@@ -1226,12 +1237,17 @@ async function addImageUrlToCanvas(url, x, y) {
         img.scale(scale);
       }
       
-      // Position image (convert screen coords to canvas coords if provided)
+      // Position image
       if (x !== undefined && y !== undefined) {
+        // Convert screen coords to canvas coords for drop position
         const canvasCoords = screenToCanvasCoords(x, y);
         img.set({ left: canvasCoords.x - (img.getScaledWidth() / 2), top: canvasCoords.y - (img.getScaledHeight() / 2) });
       } else {
-        img.set({ left: 50, top: 50 });
+        // Center image on canvas for paste/load
+        img.set({ 
+          left: (CANVAS_WIDTH - img.getScaledWidth()) / 2, 
+          top: (CANVAS_HEIGHT - img.getScaledHeight()) / 2 
+        });
       }
       
       fabricCanvas.add(img);
@@ -1543,15 +1559,19 @@ async function saveDrawingAsAttachment() {
     // Add drawing to fabric canvas as an image
     fabric.Image.fromURL(dataUrl, (img) => {
       // Scale to fit canvas
-      const maxWidth = fabricCanvas.width * 0.9;
-      const maxHeight = fabricCanvas.height * 0.9;
+      const maxWidth = CANVAS_WIDTH * 0.9;
+      const maxHeight = CANVAS_HEIGHT * 0.9;
       
       if (img.width > maxWidth || img.height > maxHeight) {
         const scale = Math.min(maxWidth / img.width, maxHeight / img.height);
         img.scale(scale);
       }
       
-      img.set({ left: 20, top: 20 });
+      // Center the drawing on canvas
+      img.set({ 
+        left: (CANVAS_WIDTH - img.getScaledWidth()) / 2, 
+        top: (CANVAS_HEIGHT - img.getScaledHeight()) / 2 
+      });
       fabricCanvas.add(img);
       fabricCanvas.setActiveObject(img);
       fabricCanvas.renderAll();
