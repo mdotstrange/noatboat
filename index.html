@@ -2729,19 +2729,98 @@ window.addEventListener('keydown', (e) => {
     return;
   }
 
-  // Tab key in editor - insert tab character instead of changing focus
+   // Tab key in editor - indent with spaces (and indent selection by lines)
   if (e.key === 'Tab' && document.activeElement === els.editor) {
     e.preventDefault();
+
     const editor = els.editor;
+    const INDENT = '  '; // change to '    ' for 4 spaces
+
+    const value = editor.value;
     const start = editor.selectionStart;
     const end = editor.selectionEnd;
-    const value = editor.value;
-    editor.value = value.substring(0, start) + '\t' + value.substring(end);
-    editor.selectionStart = editor.selectionEnd = start + 1;
-    // Trigger input event to mark as dirty
+
+    const lineStart = (pos) => value.lastIndexOf('\n', pos - 1) + 1;
+
+    // Shift+Tab = outdent
+    if (e.shiftKey) {
+      const startLS = lineStart(start);
+      const endLS = lineStart(end);
+
+      // Outdent single line (no selection)
+      if (start === end) {
+        const prefix = value.slice(startLS, startLS + INDENT.length);
+        if (prefix === INDENT) {
+          editor.value = value.slice(0, startLS) + value.slice(startLS + INDENT.length);
+          const newPos = Math.max(start - INDENT.length, startLS);
+          editor.selectionStart = editor.selectionEnd = newPos;
+          editor.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        return;
+      }
+
+      // Outdent all touched lines
+      const blockStart = startLS;
+      const blockEnd = end; // keep end as-is; we’ll process line by line
+      const block = value.slice(blockStart, blockEnd);
+      const lines = block.split('\n');
+
+      let removedFirstLine = 0;
+      let removedTotal = 0;
+
+      const outdented = lines.map((ln, i) => {
+        if (ln.startsWith(INDENT)) {
+          removedTotal += INDENT.length;
+          if (i === 0) removedFirstLine = INDENT.length;
+          return ln.slice(INDENT.length);
+        }
+        // also support literal tab characters if older notes contain them
+        if (ln.startsWith('\t')) {
+          removedTotal += 1;
+          if (i === 0) removedFirstLine = 1;
+          return ln.slice(1);
+        }
+        return ln;
+      }).join('\n');
+
+      editor.value = value.slice(0, blockStart) + outdented + value.slice(blockEnd);
+
+      // Adjust selection
+      editor.selectionStart = Math.max(start - removedFirstLine, blockStart);
+      editor.selectionEnd = Math.max(end - removedTotal, editor.selectionStart);
+
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      return;
+    }
+
+    // Tab (no Shift): indent
+    // If selection spans multiple lines, indent all touched lines.
+    if (start !== end) {
+      const startLS = lineStart(start);
+      const blockStart = startLS;
+      const blockEnd = end;
+
+      const block = value.slice(blockStart, blockEnd);
+      const lines = block.split('\n');
+      const indented = lines.map(ln => INDENT + ln).join('\n');
+
+      editor.value = value.slice(0, blockStart) + indented + value.slice(blockEnd);
+
+      const lineCount = lines.length;
+      editor.selectionStart = start + INDENT.length;                 // selection shifts right by first-line indent
+      editor.selectionEnd = end + (INDENT.length * lineCount);       // plus one indent per line
+
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      return;
+    }
+
+    // No selection: just insert indent at caret (pushes the word to the right)
+    editor.value = value.substring(0, start) + INDENT + value.substring(end);
+    editor.selectionStart = editor.selectionEnd = start + INDENT.length;
     editor.dispatchEvent(new Event('input', { bubbles: true }));
     return;
   }
+
 
   // Ctrl/Cmd + Shift + D - Toggle dictation
   if (e.key === 'd' && (e.ctrlKey || e.metaKey) && e.shiftKey) {
