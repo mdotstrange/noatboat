@@ -176,7 +176,9 @@ ipcMain.handle('get-preferences', async () => {
   const config = loadConfig();
   return {
     theme: config.theme || 'light',
-    focusStrength: config.focusStrength !== undefined ? config.focusStrength : 70
+    focusStrength: config.focusStrength !== undefined ? config.focusStrength : 70,
+    autoFixEnabled: config.autoFixEnabled || false,
+    openAIKey: config.openAIKey || ''
   };
 });
 
@@ -185,6 +187,8 @@ ipcMain.handle('save-preferences', async (event, prefs) => {
   const config = loadConfig();
   if (prefs.theme !== undefined) config.theme = prefs.theme;
   if (prefs.focusStrength !== undefined) config.focusStrength = prefs.focusStrength;
+  if (prefs.autoFixEnabled !== undefined) config.autoFixEnabled = prefs.autoFixEnabled;
+  if (prefs.openAIKey !== undefined) config.openAIKey = prefs.openAIKey;
   saveConfig(config);
   return true;
 });
