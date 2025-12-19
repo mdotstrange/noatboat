@@ -35,6 +35,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   savePreferences: (prefs) => ipcRenderer.invoke('save-preferences', prefs),
   onOpenPreferences: (callback) => ipcRenderer.on('open-preferences', callback),
   
+  // Local LLM
+  openModelDialog: () => ipcRenderer.invoke('open-model-dialog'),
+  runLocalLLM: (modelPath, text) => ipcRenderer.invoke('run-local-llm', modelPath, text),
+  
   // Dialog operations
   showPrompt: (message, defaultValue) => ipcRenderer.invoke('show-prompt', message, defaultValue),
   showConfirm: (message) => ipcRenderer.invoke('show-confirm', message),

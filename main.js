@@ -178,7 +178,9 @@ ipcMain.handle('get-preferences', async () => {
     theme: config.theme || 'light',
     focusStrength: config.focusStrength !== undefined ? config.focusStrength : 70,
     autoFixEnabled: config.autoFixEnabled || false,
-    openAIKey: config.openAIKey || ''
+    autoFixProvider: config.autoFixProvider || 'openai',
+    openAIKey: config.openAIKey || '',
+    localModelPath: config.localModelPath || ''
   };
 });
 
@@ -188,9 +190,96 @@ ipcMain.handle('save-preferences', async (event, prefs) => {
   if (prefs.theme !== undefined) config.theme = prefs.theme;
   if (prefs.focusStrength !== undefined) config.focusStrength = prefs.focusStrength;
   if (prefs.autoFixEnabled !== undefined) config.autoFixEnabled = prefs.autoFixEnabled;
+  if (prefs.autoFixProvider !== undefined) config.autoFixProvider = prefs.autoFixProvider;
   if (prefs.openAIKey !== undefined) config.openAIKey = prefs.openAIKey;
+  if (prefs.localModelPath !== undefined) config.localModelPath = prefs.localModelPath;
   saveConfig(config);
   return true;
+});
+
+// Open model file picker dialog
+ipcMain.handle('open-model-dialog', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters: [
+      { name: 'GGUF Models', extensions: ['gguf'] },
+      { name: 'All Files', extensions: ['*'] }
+    ]
+  });
+  
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+  
+  return result.filePaths[0];
+});
+
+// Run local LLM inference
+let llamaInstance = null;
+let llamaModel = null;
+let llamaModelPath = null;
+
+ipcMain.handle('run-local-llm', async (event, modelPath, text) => {
+  try {
+    // Dynamically import node-llama-cpp (ES module)
+    const { getLlama, LlamaChatSession } = await import('node-llama-cpp');
+    
+    // Load or reload model if path changed
+    if (llamaModelPath !== modelPath || !llamaModel) {
+      if (llamaModel) {
+        // Dispose old model
+        try {
+          await llamaModel.dispose();
+        } catch (_e) {}
+      }
+      
+      console.log('Loading GGUF model:', modelPath);
+      llamaInstance = await getLlama();
+      llamaModel = await llamaInstance.loadModel({ modelPath });
+      llamaModelPath = modelPath;
+      console.log('Model loaded successfully');
+    }
+    
+    const context = await llamaModel.createContext();
+    
+    // System prompt needs to be in the constructor for node-llama-cpp v3
+    const session = new LlamaChatSession({
+      contextSequence: context.getSequence(),
+      systemPrompt: 'You fix spelling and grammar errors. Output only the corrected text, nothing else.'
+    });
+    
+    // Simple, direct prompt for small models
+    const prompt = `Fix any spelling and grammar errors in this text. Return ONLY the corrected text:\n\n${text}`;
+    
+    console.log('Running inference...');
+    const response = await session.prompt(prompt, {
+      maxTokens: Math.min(text.length * 2, 2048),
+      temperature: 0.1
+    });
+    console.log('Inference complete, response length:', response?.length);
+    
+    await context.dispose();
+    
+    // Clean up the response - remove any extra whitespace or quotes
+    let cleanedResponse = response?.trim() || '';
+    
+    // Remove surrounding quotes if present
+    if ((cleanedResponse.startsWith('"') && cleanedResponse.endsWith('"')) ||
+        (cleanedResponse.startsWith("'") && cleanedResponse.endsWith("'"))) {
+      cleanedResponse = cleanedResponse.slice(1, -1);
+    }
+    
+    // If response is empty or way too different in length, return original
+    if (!cleanedResponse || cleanedResponse.length < text.length * 0.3 || cleanedResponse.length > text.length * 3) {
+      console.log('Response seems invalid, returning original text');
+      return { success: true, text: text };
+    }
+    
+    return { success: true, text: cleanedResponse };
+  } catch (err) {
+    console.error('Local LLM error:', err);
+    return { success: false, error: err.message };
+  }
 });
 
 // Open folder picker dialog

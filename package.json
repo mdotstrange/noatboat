@@ -5,6 +5,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "postinstall": "electron-rebuild",
     "build-win": "electron-builder --win",
     "build-mac": "electron-builder --mac",
     "build-mac-intel": "electron-builder --mac --x64",
@@ -22,6 +23,9 @@
     "files": [
       "**/*",
       "!dist/**"
+    ],
+    "asarUnpack": [
+      "node_modules/node-llama-cpp/**"
     ],
     "win": {
       "target": [
@@ -69,8 +73,12 @@
   "keywords": ["notes", "markdown"],
   "author": "Some Other Guy",
   "license": "MIT",
+  "dependencies": {
+    "node-llama-cpp": "^3.2.0"
+  },
   "devDependencies": {
     "electron": "^39.2.7",
-    "electron-builder": "^24.9.1"
+    "electron-builder": "^24.9.1",
+    "electron-rebuild": "^3.2.9"
   }
 }

@@ -763,7 +763,14 @@
             <button id="autoFixOffBtn" class="themeBtn active">Off</button>
             <button id="autoFixOnBtn" class="themeBtn">On</button>
           </div>
-          <div class="prefHint">Fix spelling and grammar as you type (requires OpenAI API key)</div>
+          <div class="prefHint">Fix spelling and grammar as you type</div>
+        </div>
+        <div class="prefItem" id="autoFixProviderItem" style="display:none;">
+          <label class="prefLabel">Auto-Fix Provider</label>
+          <div class="prefControl">
+            <button id="providerOpenAIBtn" class="themeBtn active">OpenAI API</button>
+            <button id="providerLocalBtn" class="themeBtn">Local LLM</button>
+          </div>
         </div>
         <div class="prefItem" id="openAIKeyItem" style="display:none;">
           <label class="prefLabel">OpenAI API Key</label>
@@ -771,6 +778,20 @@
             <input type="password" id="openAIKeyInput" class="search" style="max-width:100%;flex:1;" placeholder="sk-...">
           </div>
           <div class="prefHint">Your key is stored locally and never shared</div>
+        </div>
+        <div class="prefItem" id="localModelItem" style="display:none;">
+          <label class="prefLabel">GGUF Model File</label>
+          <div class="prefControl" style="gap:8px;">
+            <input type="text" id="localModelPath" class="search" style="max-width:100%;flex:1;" placeholder="Select a .gguf model file..." readonly>
+            <button id="browseModelBtn" class="btn">Browse</button>
+          </div>
+          <div class="prefHint">Use a local GGUF model (e.g., Llama-3.2-1B-Instruct-Q4_K_M.gguf)</div>
+        </div>
+        <div class="prefItem" id="localModelStatusItem" style="display:none;">
+          <label class="prefLabel">Model Status</label>
+          <div class="prefControl">
+            <span id="localModelStatus" style="font-size:12px;color:var(--muted);">Not loaded</span>
+          </div>
         </div>
       </div>
     </div>
@@ -834,8 +855,16 @@ const els = {
   focusStrengthValue: document.getElementById('focusStrengthValue'),
   autoFixOffBtn: document.getElementById('autoFixOffBtn'),
   autoFixOnBtn: document.getElementById('autoFixOnBtn'),
+  autoFixProviderItem: document.getElementById('autoFixProviderItem'),
+  providerOpenAIBtn: document.getElementById('providerOpenAIBtn'),
+  providerLocalBtn: document.getElementById('providerLocalBtn'),
   openAIKeyItem: document.getElementById('openAIKeyItem'),
   openAIKeyInput: document.getElementById('openAIKeyInput'),
+  localModelItem: document.getElementById('localModelItem'),
+  localModelPath: document.getElementById('localModelPath'),
+  browseModelBtn: document.getElementById('browseModelBtn'),
+  localModelStatusItem: document.getElementById('localModelStatusItem'),
+  localModelStatus: document.getElementById('localModelStatus'),
   // Canvas workspace elements
   canvasWorkspace: document.getElementById('canvasWorkspace'),
   canvasContainer: document.getElementById('canvasContainer'),
@@ -1746,7 +1775,9 @@ let prefsIsOpen = false;
 let currentTheme = 'light';
 let currentFocusStrength = 70;
 let autoFixEnabled = false;
+let autoFixProvider = 'openai'; // 'openai' or 'local'
 let openAIKey = '';
+let localModelPath = '';
 let autoFixTimer = null;
 let isAutoFixing = false;
 const AUTO_FIX_DEBOUNCE_MS = 1500; // Wait 1.5s after typing stops before fixing
@@ -1773,8 +1804,20 @@ function updatePrefsUI() {
   els.focusStrengthValue.textContent = `${currentFocusStrength}%`;
   els.autoFixOffBtn.classList.toggle('active', !autoFixEnabled);
   els.autoFixOnBtn.classList.toggle('active', autoFixEnabled);
-  els.openAIKeyItem.style.display = autoFixEnabled ? 'flex' : 'none';
+  
+  // Show provider selection when auto-fix is enabled
+  els.autoFixProviderItem.style.display = autoFixEnabled ? 'flex' : 'none';
+  els.providerOpenAIBtn.classList.toggle('active', autoFixProvider === 'openai');
+  els.providerLocalBtn.classList.toggle('active', autoFixProvider === 'local');
+  
+  // Show OpenAI key field when using OpenAI
+  els.openAIKeyItem.style.display = (autoFixEnabled && autoFixProvider === 'openai') ? 'flex' : 'none';
   els.openAIKeyInput.value = openAIKey;
+  
+  // Show local model fields when using local LLM
+  els.localModelItem.style.display = (autoFixEnabled && autoFixProvider === 'local') ? 'flex' : 'none';
+  els.localModelStatusItem.style.display = (autoFixEnabled && autoFixProvider === 'local') ? 'flex' : 'none';
+  els.localModelPath.value = localModelPath || '';
 }
 
 function applyTheme(theme) {
@@ -1797,14 +1840,32 @@ function setAutoFixEnabled(enabled) {
   updatePrefsUI();
 }
 
+function setAutoFixProvider(provider) {
+  autoFixProvider = provider;
+  api.savePreferences({ autoFixProvider: provider });
+  updatePrefsUI();
+}
+
 function saveOpenAIKey(key) {
   openAIKey = key;
   api.savePreferences({ openAIKey: key });
 }
 
-// Auto-fix text using OpenAI API
+async function browseForModel() {
+  const result = await api.openModelDialog();
+  if (result) {
+    localModelPath = result;
+    api.savePreferences({ localModelPath: result });
+    updatePrefsUI();
+    updateLocalModelStatus();
+  }
+}
+
+// Auto-fix text using OpenAI API or Local LLM
 async function autoFixText() {
-  if (!autoFixEnabled || !openAIKey || isAutoFixing) return;
+  if (!autoFixEnabled || isAutoFixing) return;
+  if (autoFixProvider === 'openai' && !openAIKey) return;
+  if (autoFixProvider === 'local' && !localModelPath) return;
   if (currentIndex == null || !notes[currentIndex]) return;
   
   const editor = els.editor;
@@ -1816,39 +1877,19 @@ async function autoFixText() {
   els.saveState.textContent = 'fixing...';
   
   try {
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${openAIKey}`
-      },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        messages: [
-          {
-            role: 'system',
-            content: 'You are a text correction assistant. Fix spelling, grammar, and typos in the user\'s text. Keep the exact same meaning, tone, and structure. Only fix obvious errors. Return ONLY the corrected text with no explanations or quotes. If the text has no errors, return it unchanged.'
-          },
-          {
-            role: 'user',
-            content: text
-          }
-        ],
-        temperature: 0.1,
-        max_tokens: 4096
-      })
-    });
+    let fixedText;
     
-    if (!response.ok) {
-      console.error('OpenAI API error:', response.status);
-      els.saveState.textContent = originalSaveState;
-      return;
+    console.log('Auto-fix starting, provider:', autoFixProvider);
+    
+    if (autoFixProvider === 'openai') {
+      fixedText = await fixTextWithOpenAI(text);
+    } else {
+      fixedText = await fixTextWithLocalLLM(text);
     }
     
-    const data = await response.json();
-    const fixedText = data.choices?.[0]?.message?.content;
+    console.log('Auto-fix result:', fixedText ? 'got response' : 'no response');
     
-    if (fixedText && fixedText !== text) {
+    if (fixedText && fixedText.trim() !== text.trim()) {
       // Preserve cursor position as best we can
       const cursorPos = editor.selectionStart;
       const cursorRatio = cursorPos / text.length;
@@ -1862,20 +1903,123 @@ async function autoFixText() {
       const newCursorPos = Math.min(Math.round(cursorRatio * fixedText.length), fixedText.length);
       editor.selectionStart = editor.selectionEnd = newCursorPos;
       
-      els.saveState.textContent = 'fixed';
+      els.saveState.textContent = 'fixed ✓';
+      console.log('Text was fixed');
+    } else if (fixedText) {
+      // Response came back but no changes
+      els.saveState.textContent = 'no fixes needed';
+      console.log('No fixes needed - text unchanged');
+      setTimeout(() => {
+        if (els.saveState.textContent === 'no fixes needed') {
+          els.saveState.textContent = originalSaveState;
+        }
+      }, 2000);
     } else {
-      els.saveState.textContent = originalSaveState;
+      // No response or error
+      els.saveState.textContent = 'fix failed';
+      console.log('Fix failed - no response');
+      setTimeout(() => {
+        if (els.saveState.textContent === 'fix failed') {
+          els.saveState.textContent = originalSaveState;
+        }
+      }, 2000);
     }
   } catch (err) {
     console.error('Auto-fix error:', err);
-    els.saveState.textContent = originalSaveState;
+    els.saveState.textContent = 'fix error';
+    setTimeout(() => {
+      if (els.saveState.textContent === 'fix error') {
+        els.saveState.textContent = originalSaveState;
+      }
+    }, 2000);
   } finally {
     isAutoFixing = false;
   }
 }
 
+async function fixTextWithOpenAI(text) {
+  const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${openAIKey}`
+    },
+    body: JSON.stringify({
+      model: 'gpt-4o-mini',
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a text correction assistant. Fix spelling, grammar, and typos in the user\'s text. Keep the exact same meaning, tone, and structure. Only fix obvious errors. Return ONLY the corrected text with no explanations or quotes. If the text has no errors, return it unchanged.'
+        },
+        {
+          role: 'user',
+          content: text
+        }
+      ],
+      temperature: 0.1,
+      max_tokens: 4096
+    })
+  });
+  
+  if (!response.ok) {
+    console.error('OpenAI API error:', response.status);
+    return null;
+  }
+  
+  const data = await response.json();
+  return data.choices?.[0]?.message?.content || null;
+}
+
+async function fixTextWithLocalLLM(text) {
+  try {
+    console.log('Calling local LLM with text length:', text.length);
+    const result = await api.runLocalLLM(localModelPath, text);
+    console.log('Local LLM result:', result.success, 'response length:', result.text?.length);
+    if (result.success) {
+      // Log if there were changes
+      if (result.text !== text) {
+        console.log('Text was modified by local LLM');
+      } else {
+        console.log('Text unchanged by local LLM');
+      }
+      return result.text;
+    } else {
+      console.error('Local LLM error:', result.error);
+      return null;
+    }
+  } catch (err) {
+    console.error('Local LLM error:', err);
+    return null;
+  }
+}
+
+async function updateLocalModelStatus() {
+  if (!localModelPath) {
+    els.localModelStatus.textContent = 'No model selected';
+    return;
+  }
+  
+  try {
+    const exists = await api.fileExists(localModelPath);
+    if (exists) {
+      els.localModelStatus.textContent = 'Model file found ✓';
+      els.localModelStatus.style.color = '#2a5';
+    } else {
+      els.localModelStatus.textContent = 'Model file not found';
+      els.localModelStatus.style.color = 'var(--danger)';
+    }
+  } catch (_e) {
+    els.localModelStatus.textContent = 'Error checking model';
+    els.localModelStatus.style.color = 'var(--danger)';
+  }
+}
+
 function scheduleAutoFix() {
-  if (!autoFixEnabled || !openAIKey) return;
+  if (!autoFixEnabled) return;
+  // Check if we have the required config for the selected provider
+  if (autoFixProvider === 'openai' && !openAIKey) return;
+  if (autoFixProvider === 'local' && !localModelPath) return;
+  
   if (autoFixTimer) clearTimeout(autoFixTimer);
   autoFixTimer = setTimeout(() => autoFixText(), AUTO_FIX_DEBOUNCE_MS);
 }
@@ -1886,9 +2030,16 @@ async function loadPreferences() {
     currentTheme = prefs.theme || 'light';
     currentFocusStrength = prefs.focusStrength !== undefined ? prefs.focusStrength : 70;
     autoFixEnabled = prefs.autoFixEnabled || false;
+    autoFixProvider = prefs.autoFixProvider || 'openai';
     openAIKey = prefs.openAIKey || '';
+    localModelPath = prefs.localModelPath || '';
     document.body.classList.toggle('dark-mode', currentTheme === 'dark');
     document.documentElement.style.setProperty('--focus-strength', (currentFocusStrength / 100).toFixed(2));
+    
+    // Check model status if local LLM is configured
+    if (localModelPath) {
+      updateLocalModelStatus();
+    }
   } catch (_e) {
     // ignore
   }
@@ -2366,8 +2517,11 @@ els.themeDarkBtn.addEventListener('click', () => applyTheme('dark'));
 els.focusStrengthSlider.addEventListener('input', (e) => applyFocusStrength(parseInt(e.target.value, 10)));
 els.autoFixOffBtn.addEventListener('click', () => setAutoFixEnabled(false));
 els.autoFixOnBtn.addEventListener('click', () => setAutoFixEnabled(true));
+els.providerOpenAIBtn.addEventListener('click', () => setAutoFixProvider('openai'));
+els.providerLocalBtn.addEventListener('click', () => setAutoFixProvider('local'));
 els.openAIKeyInput.addEventListener('change', (e) => saveOpenAIKey(e.target.value));
 els.openAIKeyInput.addEventListener('blur', (e) => saveOpenAIKey(e.target.value));
+els.browseModelBtn.addEventListener('click', () => browseForModel());
 
 // Listen for menu open-preferences event
 api.onOpenPreferences(() => openPrefsModal());
