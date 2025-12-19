@@ -2241,6 +2241,20 @@ window.addEventListener('keydown', (e) => {
     return;
   }
 
+  // Tab key in editor - insert tab character instead of changing focus
+  if (e.key === 'Tab' && document.activeElement === els.editor) {
+    e.preventDefault();
+    const editor = els.editor;
+    const start = editor.selectionStart;
+    const end = editor.selectionEnd;
+    const value = editor.value;
+    editor.value = value.substring(0, start) + '\t' + value.substring(end);
+    editor.selectionStart = editor.selectionEnd = start + 1;
+    // Trigger input event to mark as dirty
+    editor.dispatchEvent(new Event('input', { bubbles: true }));
+    return;
+  }
+
   // Canvas keyboard shortcuts (only when not in text editor or modals)
   const inTextInput = document.activeElement === els.editor || document.activeElement === els.searchInput;
   const canvasVisible = els.canvasWorkspace.style.display !== 'none' && currentIndex != null;
