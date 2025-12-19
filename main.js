@@ -122,6 +122,8 @@ function createWindow() {
     height: 800,
     minWidth: 600,
     minHeight: 400,
+    fullscreen: true,
+    show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -132,12 +134,15 @@ function createWindow() {
     title: 'Noat Boat'
   });
 
-  createMenu();
   mainWindow.loadFile('index.html');
-  
-  // Uncomment to open DevTools for debugging
-  // mainWindow.webContents.openDevTools();
+
+  mainWindow.once('ready-to-show', () => {
+    // Some environments behave more reliably if you call it here too:
+    mainWindow.setFullScreen(true);
+    mainWindow.show();
+  });
 }
+npm
 
 app.whenReady().then(() => {
   createWindow();
