@@ -2264,7 +2264,8 @@ els.editor.addEventListener('input', () => {
   dirty = true;
   els.saveState.textContent = 'modified';
   scheduleSave();
-  renderList();
+  // Don't call renderList() here - it's expensive and causes UI stutter
+  // The list will update after save completes
   setFocusMode(true);
 });
 
