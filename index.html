@@ -835,8 +835,13 @@ let folderPath = null;
 let notes = [];
 let currentIndex = null;
 let saveTimer = null;
+let maxSaveTimer = null;
 let isSaving = false;
 let dirty = false;
+
+// Autosave timing constants (industry standard)
+const SAVE_DEBOUNCE_MS = 1000;      // Wait 1s after user stops typing
+const SAVE_MAX_INTERVAL_MS = 10000; // Force save every 10s during continuous typing
 let currentImageURL = null;
 let listNavActive = false;
 let currentListOrder = [];
@@ -1965,6 +1970,10 @@ async function flushSaveIfNeeded() {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
+  if (maxSaveTimer) {
+    clearTimeout(maxSaveTimer);
+    maxSaveTimer = null;
+  }
   if (dirty && !isSaving) {
     await saveCurrentNow();
   }
@@ -2022,6 +2031,11 @@ async function saveCurrentNow() {
     n.size = result.size;
     n.lastModified = result.lastModified;
     dirty = false;
+    // Clear max interval timer since we just saved
+    if (maxSaveTimer) {
+      clearTimeout(maxSaveTimer);
+      maxSaveTimer = null;
+    }
     els.saveState.textContent = `saved ${fmtDate(n.lastModified)}`;
     renderList();
   } catch (err) {
@@ -2033,8 +2047,36 @@ async function saveCurrentNow() {
 }
 
 function scheduleSave() {
+  // Clear existing debounce timer and restart it
   if (saveTimer) clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => { saveCurrentNow(); }, 350);
+  
+  // Schedule save after user stops typing (debounced)
+  const doSave = () => {
+    // Use requestIdleCallback if available for smoother saves
+    if (window.requestIdleCallback) {
+      requestIdleCallback(() => saveCurrentNow(), { timeout: 2000 });
+    } else {
+      saveCurrentNow();
+    }
+  };
+  
+  saveTimer = setTimeout(doSave, SAVE_DEBOUNCE_MS);
+  
+  // Start max interval timer if not already running
+  // This ensures we save even during continuous typing
+  if (!maxSaveTimer && dirty) {
+    maxSaveTimer = setTimeout(() => {
+      maxSaveTimer = null;
+      if (dirty && !isSaving) {
+        // Clear debounce timer since we're forcing a save
+        if (saveTimer) {
+          clearTimeout(saveTimer);
+          saveTimer = null;
+        }
+        doSave();
+      }
+    }, SAVE_MAX_INTERVAL_MS);
+  }
 }
 
 async function newNote() {
@@ -2300,6 +2342,31 @@ window.addEventListener('beforeunload', (e) => {
     }
     e.preventDefault();
     e.returnValue = '';
+  }
+});
+
+// Save immediately when user switches away from window or app goes to background
+window.addEventListener('blur', () => {
+  if (dirty && !isSaving) {
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+    if (maxSaveTimer) { clearTimeout(maxSaveTimer); maxSaveTimer = null; }
+    saveCurrentNow();
+  }
+  if (canvasDirty && fabricCanvas) {
+    saveCanvasState();
+  }
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) {
+    if (dirty && !isSaving) {
+      if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+      if (maxSaveTimer) { clearTimeout(maxSaveTimer); maxSaveTimer = null; }
+      saveCurrentNow();
+    }
+    if (canvasDirty && fabricCanvas) {
+      saveCanvasState();
+    }
   }
 });
 
