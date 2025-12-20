@@ -129,21 +129,6 @@
       background:#eaf8ef;
       color:#1e6b2a;
     }
-    .btn.dictating{
-      border-color:#ff6b6b;
-      background:#ffe0e0;
-      color:#c00;
-      animation: pulse-dictate 1.5s infinite;
-    }
-    @keyframes pulse-dictate {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0.6; }
-    }
-    body.dark-mode .btn.dictating {
-      border-color:#ff6b6b;
-      background:#4a2020;
-      color:#ff8080;
-    }
     .spacer{ flex:1; }
     .gapBtn{ flex:0 0 96px; width:96px; }
     .gapWide{ width:96px; }
@@ -656,7 +641,6 @@
     <button id="refreshBtn" class="btn" disabled aria-label="Refresh"><span class="ico" aria-hidden="true">⟳</span></button>
     <div class="gapWide"></div>
     <button id="newBtn" class="btn newTint" disabled aria-label="New note"><span class="ico" aria-hidden="true">📄</span></button>
-    <button id="dictateBtn" class="btn" disabled aria-label="Dictate" title="Dictate note (speech to text)"><span class="ico" aria-hidden="true">🎙️</span></button>
     <div class="gapBtn"></div>
     <button id="drawBtn" class="btn" disabled aria-label="Draw"><span class="ico" aria-hidden="true">✏️</span></button>
     <button id="attachBtn" class="btn" disabled aria-label="Attach image"><span class="ico" aria-hidden="true">🖼️</span></button>
@@ -831,7 +815,6 @@ const els = {
   openBtn: document.getElementById('openBtn'),
   searchInput: document.getElementById('searchInput'),
   newBtn: document.getElementById('newBtn'),
-  dictateBtn: document.getElementById('dictateBtn'),
   refreshBtn: document.getElementById('refreshBtn'),
   drawBtn: document.getElementById('drawBtn'),
   attachBtn: document.getElementById('attachBtn'),
@@ -963,7 +946,6 @@ function setEditorEnabled(enabled) {
   els.attachBtn.disabled = !enabled;
   els.drawBtn.disabled = !enabled;
   els.audioBtn.disabled = !enabled;
-  els.dictateBtn.disabled = !enabled;
 }
 
 function fmtDate(ts) {
@@ -1788,148 +1770,6 @@ async function deleteAudioFile() {
   renderList();
 }
 
-// --- Dictation (Speech-to-Text) ---
-let isDictating = false;
-let recognition = null;
-
-function initSpeechRecognition() {
-  // Check for browser support
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) {
-    console.warn('Speech recognition not supported in this browser');
-    return null;
-  }
-  
-  const rec = new SpeechRecognition();
-  rec.continuous = true; // Keep listening until stopped
-  rec.interimResults = true; // Show results as user speaks
-  rec.lang = navigator.language || 'en-US'; // Use system language
-  
-  rec.onstart = () => {
-    console.log('Dictation started');
-    isDictating = true;
-    els.dictateBtn.classList.add('dictating');
-    els.dictateBtn.title = 'Stop dictation';
-  };
-  
-  rec.onend = () => {
-    console.log('Dictation ended');
-    // If we're still supposed to be dictating, restart (browser may stop after silence)
-    if (isDictating) {
-      try {
-        rec.start();
-      } catch (e) {
-        // Already started or other error
-        stopDictation();
-      }
-    } else {
-      els.dictateBtn.classList.remove('dictating');
-      els.dictateBtn.title = 'Dictate note (speech to text)';
-    }
-  };
-  
-  rec.onerror = (event) => {
-    console.error('Dictation error:', event.error);
-    if (event.error === 'not-allowed') {
-      showBanner('Microphone access denied. Please allow microphone access in your system settings.');
-    } else if (event.error === 'no-speech') {
-      // No speech detected, this is normal - just continue
-    } else {
-      showBanner(`Dictation error: ${event.error}`);
-    }
-    if (event.error !== 'no-speech') {
-      stopDictation();
-    }
-  };
-  
-  rec.onresult = (event) => {
-    if (currentIndex == null || !notes[currentIndex]) return;
-    
-    const editor = els.editor;
-    let finalTranscript = '';
-    let interimTranscript = '';
-    
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      const result = event.results[i];
-      if (result.isFinal) {
-        finalTranscript += result[0].transcript;
-      } else {
-        interimTranscript += result[0].transcript;
-      }
-    }
-    
-    // Insert final transcript at cursor position
-    if (finalTranscript) {
-      const start = editor.selectionStart;
-      const end = editor.selectionEnd;
-      const value = editor.value;
-      
-      // Add a space before if we're not at the start and there's no space
-      let textToInsert = finalTranscript;
-      if (start > 0 && value[start - 1] !== ' ' && value[start - 1] !== '\n') {
-        textToInsert = ' ' + textToInsert;
-      }
-      
-      editor.value = value.substring(0, start) + textToInsert + value.substring(end);
-      editor.selectionStart = editor.selectionEnd = start + textToInsert.length;
-      
-      // Update note content and trigger save
-      notes[currentIndex].content = editor.value;
-      dirty = true;
-      els.saveState.textContent = 'modified';
-      scheduleSave();
-    }
-  };
-  
-  return rec;
-}
-
-function startDictation() {
-  if (!recognition) {
-    recognition = initSpeechRecognition();
-  }
-  
-  if (!recognition) {
-    showBanner('Speech recognition is not supported in this browser.');
-    return;
-  }
-  
-  if (currentIndex == null || !notes[currentIndex]) {
-    showBanner('Please select a note first.');
-    return;
-  }
-  
-  try {
-    isDictating = true;
-    recognition.start();
-    els.editor.focus();
-  } catch (e) {
-    console.error('Failed to start dictation:', e);
-    isDictating = false;
-  }
-}
-
-function stopDictation() {
-  isDictating = false;
-  if (recognition) {
-    try {
-      recognition.stop();
-    } catch (e) {
-      // Ignore - may already be stopped
-    }
-  }
-  els.dictateBtn.classList.remove('dictating');
-  els.dictateBtn.title = 'Dictate note (speech to text)';
-}
-
-function toggleDictation() {
-  if (isDictating) {
-    stopDictation();
-  } else {
-    startDictation();
-  }
-}
-
 // --- Preferences functions ---
 let prefsIsOpen = false;
 let currentTheme = 'light';
@@ -2427,7 +2267,6 @@ async function openNoteByIndex(idx, opts = {}) {
   if (idx == null || !notes[idx]) return;
   closeLightbox();
   stopAudio();
-  stopDictation();
   
   // Save current canvas before switching
   if (canvasDirty && fabricCanvas && currentIndex != null) {
@@ -2640,7 +2479,6 @@ async function attachImage() {
 // Events
 els.openBtn.addEventListener('click', () => { setFocusMode(false); openFolder(); });
 els.newBtn.addEventListener('click', newNote);
-els.dictateBtn.addEventListener('click', toggleDictation);
 els.refreshBtn.addEventListener('click', refreshNotes);
 els.deleteBtn.addEventListener('click', deleteCurrent);
 els.attachBtn.addEventListener('click', addImageFromDialog);
@@ -2721,7 +2559,6 @@ window.addEventListener('resize', () => {
 
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    if (isDictating) { stopDictation(); return; }
     if (prefsIsOpen) { closePrefsModal(); return; }
     if (audioIsOpen) { closeAudioModal(); return; }
     if (drawIsOpen) { closeDrawModal(); return; }
@@ -2818,16 +2655,6 @@ window.addEventListener('keydown', (e) => {
     editor.value = value.substring(0, start) + INDENT + value.substring(end);
     editor.selectionStart = editor.selectionEnd = start + INDENT.length;
     editor.dispatchEvent(new Event('input', { bubbles: true }));
-    return;
-  }
-
-
-  // Ctrl/Cmd + Shift + D - Toggle dictation
-  if (e.key === 'd' && (e.ctrlKey || e.metaKey) && e.shiftKey) {
-    e.preventDefault();
-    if (!els.dictateBtn.disabled) {
-      toggleDictation();
-    }
     return;
   }
 
