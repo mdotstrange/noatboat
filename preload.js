@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 const path = require('path');
 
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -43,6 +43,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   showPrompt: (message, defaultValue) => ipcRenderer.invoke('show-prompt', message, defaultValue),
   showConfirm: (message) => ipcRenderer.invoke('show-confirm', message),
   showAlert: (message) => ipcRenderer.invoke('show-alert', message),
+  
+  // File drag and drop - get path from File object
+  getPathForFile: (file) => webUtils.getPathForFile(file),
   
   // Path utilities
   joinPath: (...parts) => path.join(...parts),

@@ -2551,6 +2551,52 @@ els.editor.addEventListener('input', () => {
   setFocusMode(true);
 });
 
+// Drag and drop file paths into editor
+els.editor.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+});
+
+els.editor.addEventListener('drop', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  
+  if (currentIndex == null || !notes[currentIndex]) return;
+  
+  const files = e.dataTransfer.files;
+  if (files.length === 0) return;
+  
+  // Build string of file paths (one per line if multiple)
+  const paths = [];
+  for (let i = 0; i < files.length; i++) {
+    // Use Electron's webUtils to get the actual file path
+    const filePath = api.getPathForFile(files[i]);
+    if (filePath) {
+      paths.push(filePath);
+    }
+  }
+  
+  if (paths.length === 0) return;
+  
+  const pathString = paths.join('\n');
+  
+  // Insert at cursor position
+  const editor = els.editor;
+  const start = editor.selectionStart;
+  const end = editor.selectionEnd;
+  const value = editor.value;
+  
+  editor.value = value.substring(0, start) + pathString + value.substring(end);
+  editor.selectionStart = editor.selectionEnd = start + pathString.length;
+  
+  // Update note and trigger save
+  notes[currentIndex].content = editor.value;
+  dirty = true;
+  els.saveState.textContent = 'modified';
+  scheduleSave();
+  editor.focus();
+});
+
 els.thumb.addEventListener('click', openLightbox);
 els.lightbox.addEventListener('click', closeLightbox);
 window.addEventListener('resize', () => {
