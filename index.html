@@ -2136,7 +2136,7 @@ async function exportToPdf() {
     }
     
     showExportProgress('Writing PDF...');
-    const result = await api.exportPdf(savePath, notesData, currentTheme === 'dark');
+    const result = await api.exportPdf(savePath, notesData, currentTheme === 'dark', api.basename(folderPath));
     
     if (result.success) {
       await api.showAlert(`PDF exported successfully to:\n${savePath}`);

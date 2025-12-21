@@ -47,7 +47,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   showSaveDialog: (options) => ipcRenderer.invoke('show-save-dialog', options),
   
   // Export operations
-  exportPdf: (savePath, notesData, isDark) => ipcRenderer.invoke('export-pdf', savePath, notesData, isDark),
+  exportPdf: (savePath, notesData, isDark, bookTitle) => ipcRenderer.invoke('export-pdf', savePath, notesData, isDark, bookTitle),
   exportPng: (filePath, noteData, isDark) => ipcRenderer.invoke('export-png', filePath, noteData, isDark),
   exportEpub: (savePath, bookTitle, notesData, isDark) => ipcRenderer.invoke('export-epub', savePath, bookTitle, notesData, isDark),
   exportHtml: (saveDir, bookTitle, notesData, assets, isDark) => ipcRenderer.invoke('export-html', saveDir, bookTitle, notesData, assets, isDark),

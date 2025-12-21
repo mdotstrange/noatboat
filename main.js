@@ -604,10 +604,11 @@ function escapeHtml(str) {
 }
 
 // Export to PDF using Electron's printToPDF
-ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark) => {
+// Export to PDF using Electron's printToPDF
+ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark, bookTitle) => {
   let tempPath = null;
   let pdfWindow = null;
-  
+
   try {
     // Create a hidden window for rendering
     pdfWindow = new BrowserWindow({
@@ -620,20 +621,39 @@ ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark) => {
         backgroundThrottling: false // Important for background rendering
       }
     });
-    
+
+    // Title (folder name)
+    let title = (bookTitle && String(bookTitle).trim()) ? String(bookTitle).trim() : '';
+    if (!title) {
+      const base = path.basename(savePath || '', path.extname(savePath || ''));
+      title = base.replace(/-notes$/i, '') || base || 'Notes';
+    }
+
     // Generate HTML content for all notes
     const bgColor = isDark ? '#1a1a1a' : '#ffffff';
     const textColor = isDark ? '#e0e0e0' : '#111111';
     const mutedColor = isDark ? '#999999' : '#666666';
     const borderColor = isDark ? '#3a3a3a' : '#d9d9d9';
     const contentBg = isDark ? '#252525' : '#f5f5f5';
-    
+
     let pagesHtml = '';
-    
+
+    // --- Title Page ---
+    const exportDate = new Date().toLocaleString();
+    pagesHtml += `
+      <div class="page title-page">
+        <div class="title-wrap">
+          <div class="title">${escapeHtml(title)}</div>
+          <div class="subtitle">${escapeHtml(exportDate)}</div>
+          <div class="subtitle">${escapeHtml(String(notesData?.length || 0))} notes</div>
+        </div>
+      </div>
+    `;
+
     for (let i = 0; i < notesData.length; i++) {
       const note = notesData[i];
       const dateStr = note.lastModified ? new Date(note.lastModified).toLocaleString() : '';
-      
+
       // Text page
       pagesHtml += `
         <div class="page">
@@ -642,7 +662,7 @@ ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark) => {
           <div class="content">${escapeHtml(note.content || '(empty)')}</div>
         </div>
       `;
-      
+
       // Image page if exists
       if (note.imageDataUrl) {
         pagesHtml += `
@@ -652,7 +672,7 @@ ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark) => {
         `;
       }
     }
-    
+
     const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -673,6 +693,27 @@ ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark) => {
       background: ${bgColor};
     }
     .page:last-child { page-break-after: auto; }
+    .title-page {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .title-wrap {
+      text-align: center;
+      width: 100%;
+    }
+    .title {
+      font-size: 40px;
+      font-family: ui-monospace, monospace;
+      margin-bottom: 14px;
+      word-break: break-word;
+    }
+    .subtitle {
+      font-size: 12px;
+      color: ${mutedColor};
+      font-family: ui-monospace, monospace;
+      margin-top: 8px;
+    }
     h1 {
       font-size: 24px;
       font-family: ui-monospace, monospace;
@@ -709,24 +750,24 @@ ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark) => {
 </head>
 <body>${pagesHtml}</body>
 </html>`;
-    
+
     // Write HTML to temp file to avoid URL length limits
     tempPath = path.join(os.tmpdir(), `noatboat-pdf-${Date.now()}.html`);
     fs.writeFileSync(tempPath, html);
-    
+
     await pdfWindow.loadFile(tempPath);
-    
+
     // Wait for images to load using a small buffer
     await new Promise(resolve => setTimeout(resolve, 1000));
-    
+
     const pdfData = await pdfWindow.webContents.printToPDF({
       printBackground: true,
       pageSize: 'A4',
       margins: { top: 0, bottom: 0, left: 0, right: 0 }
     });
-    
+
     fs.writeFileSync(savePath, pdfData);
-    
+
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };
@@ -742,12 +783,15 @@ ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark) => {
 ipcMain.handle('export-png', async (event, filePath, noteData, isDark) => {
   let tempPath = null;
   let pngWindow = null;
-  
+
   try {
+    const WIDTH = 1800;
+    const HEIGHT = 1000;
+
     // Create a hidden window for rendering
     pngWindow = new BrowserWindow({
-      width: 1200,
-      height: 1600,
+      width: WIDTH,
+      height: HEIGHT,
       show: false,
       webPreferences: {
         nodeIntegration: false,
@@ -756,18 +800,22 @@ ipcMain.handle('export-png', async (event, filePath, noteData, isDark) => {
         offscreen: true // Encourages rendering even when hidden
       }
     });
-    
+
     const bgColor = isDark ? '#1a1a1a' : '#f2f2f2';
     const panelColor = isDark ? '#252525' : '#ffffff';
     const textColor = isDark ? '#e0e0e0' : '#111111';
     const mutedColor = isDark ? '#999999' : '#666666';
     const borderColor = isDark ? '#3a3a3a' : '#d9d9d9';
     const contentBg = isDark ? '#1e1e1e' : '#ffffff';
-    
+    const gridMinor = isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.03)';
+    const gridMajor = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
+
     const dateStr = noteData.lastModified ? new Date(noteData.lastModified).toLocaleString() : '';
-    
-    const hasImage = !!noteData.imageDataUrl;
-    
+
+    const imageHtml = noteData.imageDataUrl
+      ? '<img src="' + noteData.imageDataUrl + '" />'
+      : '<div class="placeholder">(no image)</div>';
+
     const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -778,82 +826,139 @@ ipcMain.handle('export-png', async (event, filePath, noteData, isDark) => {
       font-family: system-ui, -apple-system, sans-serif;
       background: ${bgColor};
       color: ${textColor};
-      width: 1200px;
-      height: 1600px;
-      padding: 40px;
+      width: ${WIDTH}px;
+      height: ${HEIGHT}px;
+      padding: 36px;
     }
     .panel {
       background: ${panelColor};
       border: 1px solid ${borderColor};
       border-radius: 16px;
-      padding: 30px;
+      padding: 28px;
       height: 100%;
       display: flex;
       flex-direction: column;
+      gap: 18px;
     }
-    h1 {
-      font-size: 32px;
+    .header h1 {
+      font-size: 28px;
       font-family: ui-monospace, monospace;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
+      word-break: break-word;
     }
     .meta {
-      font-size: 14px;
+      font-size: 13px;
       color: ${mutedColor};
       font-family: ui-monospace, monospace;
-      margin-bottom: 24px;
     }
-    .content {
-      font-size: 16px;
+    .split {
+      flex: 1;
+      min-height: 0;
+      display: flex;
+      gap: 18px;
+    }
+    .col {
+      flex: 1;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .colTitle {
+      font-size: 12px;
+      color: ${mutedColor};
+      font-family: ui-monospace, monospace;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    .box {
+      flex: 1;
+      min-height: 0;
+      border: 1px solid ${borderColor};
+      border-radius: 12px;
+      background: ${contentBg};
+      overflow: hidden;
+      position: relative;
+    }
+    .textBox {
+      padding: 16px 18px;
+      height: 100%;
+      overflow: auto;
+      font-size: 14px;
       font-family: ui-monospace, monospace;
       white-space: pre-wrap;
-      line-height: 1.6;
-      background: ${contentBg};
-      padding: 20px;
-      border-radius: 10px;
-      border: 1px solid ${borderColor};
-      flex: ${hasImage ? '0 0 auto' : '1'};
-      max-height: ${hasImage ? '400px' : 'none'};
-      overflow: hidden;
+      line-height: 1.55;
+      background:
+        linear-gradient(${gridMinor} 1px, transparent 1px),
+        linear-gradient(90deg, ${gridMinor} 1px, transparent 1px),
+        linear-gradient(${gridMajor} 1px, transparent 1px),
+        linear-gradient(90deg, ${gridMajor} 1px, transparent 1px);
+      background-size: 24px 24px, 24px 24px, 120px 120px, 120px 120px;
+      background-position: 0 0, 0 0, 0 0, 0 0;
     }
-    .image-wrap {
-      flex: 1;
-      margin-top: 24px;
+    .textBox::-webkit-scrollbar { width: 0; height: 0; }
+    .imageBox {
+      height: 100%;
       display: flex;
       align-items: center;
       justify-content: center;
-      min-height: 0;
+      padding: 12px;
+      background: ${contentBg};
     }
-    .image-wrap img {
+    .imageBox img {
       max-width: 100%;
       max-height: 100%;
       object-fit: contain;
-      border-radius: 12px;
+      border-radius: 10px;
       border: 1px solid ${borderColor};
+    }
+    .placeholder {
+      font-size: 13px;
+      color: ${mutedColor};
+      font-family: ui-monospace, monospace;
+      text-align: center;
+      padding: 20px;
     }
   </style>
 </head>
 <body>
   <div class="panel">
-    <h1>${escapeHtml(noteData.title)}</h1>
-    <div class="meta">${escapeHtml(dateStr)}</div>
-    <div class="content">${escapeHtml(noteData.content || '(empty)')}</div>
-    ${noteData.imageDataUrl ? `<div class="image-wrap"><img src="${noteData.imageDataUrl}" /></div>` : ''}
+    <div class="header">
+      <h1>${escapeHtml(noteData.title)}</h1>
+      <div class="meta">${escapeHtml(dateStr)}</div>
+    </div>
+
+    <div class="split">
+      <div class="col">
+        <div class="colTitle">Text</div>
+        <div class="box">
+          <div class="textBox">${escapeHtml(noteData.content || '(empty)')}</div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="colTitle">Canvas / Image</div>
+        <div class="box">
+          <div class="imageBox">${imageHtml}</div>
+        </div>
+      </div>
+    </div>
   </div>
 </body>
 </html>`;
-    
+
     // Write HTML to temp file
     tempPath = path.join(os.tmpdir(), `noatboat-png-${Date.now()}.html`);
     fs.writeFileSync(tempPath, html);
-    
+
     await pngWindow.loadFile(tempPath);
-    
+
     // Wait for images to load
     await new Promise(resolve => setTimeout(resolve, 800));
-    
+
     const image = await pngWindow.webContents.capturePage();
     fs.writeFileSync(filePath, image.toPNG());
-    
+
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };
