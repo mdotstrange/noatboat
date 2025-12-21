@@ -573,3 +573,1205 @@ ipcMain.handle('create-folder', async (event, folderPath) => {
     return { success: false, error: e.message };
   }
 });
+
+// Show save dialog
+ipcMain.handle('show-save-dialog', async (event, options) => {
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: options.title || 'Save File',
+    defaultPath: options.defaultPath,
+    filters: options.filters || []
+  });
+  
+  if (result.canceled) {
+    return null;
+  }
+  
+  return result.filePath;
+});
+
+
+// ============ Export Handlers ============
+
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Export to PDF using Electron's printToPDF
+ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark) => {
+  try {
+    // Create a hidden window for rendering
+    const pdfWindow = new BrowserWindow({
+      width: 794,  // A4 at 96 DPI
+      height: 1123,
+      show: false,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true
+      }
+    });
+    
+    // Generate HTML content for all notes
+    const bgColor = isDark ? '#1a1a1a' : '#ffffff';
+    const textColor = isDark ? '#e0e0e0' : '#111111';
+    const mutedColor = isDark ? '#999999' : '#666666';
+    const borderColor = isDark ? '#3a3a3a' : '#d9d9d9';
+    const contentBg = isDark ? '#252525' : '#f5f5f5';
+    
+    let pagesHtml = '';
+    
+    for (let i = 0; i < notesData.length; i++) {
+      const note = notesData[i];
+      const dateStr = note.lastModified ? new Date(note.lastModified).toLocaleString() : '';
+      
+      // Text page
+      pagesHtml += `
+        <div class="page">
+          <h1>${escapeHtml(note.title)}</h1>
+          <div class="meta">${escapeHtml(dateStr)}</div>
+          <div class="content">${escapeHtml(note.content || '(empty)')}</div>
+        </div>
+      `;
+      
+      // Image page if exists
+      if (note.imageDataUrl) {
+        pagesHtml += `
+          <div class="page image-page">
+            <img src="${note.imageDataUrl}" />
+          </div>
+        `;
+      }
+    }
+    
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    @page { size: A4; margin: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: ${bgColor};
+      color: ${textColor};
+    }
+    .page {
+      width: 210mm;
+      min-height: 297mm;
+      padding: 20mm;
+      page-break-after: always;
+      background: ${bgColor};
+    }
+    .page:last-child { page-break-after: auto; }
+    h1 {
+      font-size: 24px;
+      font-family: ui-monospace, monospace;
+      margin-bottom: 8px;
+    }
+    .meta {
+      font-size: 11px;
+      color: ${mutedColor};
+      font-family: ui-monospace, monospace;
+      margin-bottom: 20px;
+    }
+    .content {
+      font-size: 12px;
+      font-family: ui-monospace, monospace;
+      white-space: pre-wrap;
+      line-height: 1.6;
+      background: ${contentBg};
+      padding: 15px;
+      border-radius: 8px;
+      border: 1px solid ${borderColor};
+    }
+    .image-page {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .image-page img {
+      max-width: 100%;
+      max-height: 257mm;
+      object-fit: contain;
+      border-radius: 8px;
+    }
+  </style>
+</head>
+<body>${pagesHtml}</body>
+</html>`;
+    
+    await pdfWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    
+    // Wait for images to load
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    const pdfData = await pdfWindow.webContents.printToPDF({
+      printBackground: true,
+      pageSize: 'A4',
+      margins: { top: 0, bottom: 0, left: 0, right: 0 }
+    });
+    
+    fs.writeFileSync(savePath, pdfData);
+    pdfWindow.close();
+    
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+// Export to PNG using Electron's capturePage
+ipcMain.handle('export-png', async (event, filePath, noteData, isDark) => {
+  try {
+    // Create a hidden window for rendering
+    const pngWindow = new BrowserWindow({
+      width: 1200,
+      height: 1600,
+      show: false,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true
+      }
+    });
+    
+    const bgColor = isDark ? '#1a1a1a' : '#f2f2f2';
+    const panelColor = isDark ? '#252525' : '#ffffff';
+    const textColor = isDark ? '#e0e0e0' : '#111111';
+    const mutedColor = isDark ? '#999999' : '#666666';
+    const borderColor = isDark ? '#3a3a3a' : '#d9d9d9';
+    const contentBg = isDark ? '#1e1e1e' : '#ffffff';
+    
+    const dateStr = noteData.lastModified ? new Date(noteData.lastModified).toLocaleString() : '';
+    
+    const hasImage = !!noteData.imageDataUrl;
+    
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: ${bgColor};
+      color: ${textColor};
+      width: 1200px;
+      height: 1600px;
+      padding: 40px;
+    }
+    .panel {
+      background: ${panelColor};
+      border: 1px solid ${borderColor};
+      border-radius: 16px;
+      padding: 30px;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+    }
+    h1 {
+      font-size: 32px;
+      font-family: ui-monospace, monospace;
+      margin-bottom: 8px;
+    }
+    .meta {
+      font-size: 14px;
+      color: ${mutedColor};
+      font-family: ui-monospace, monospace;
+      margin-bottom: 24px;
+    }
+    .content {
+      font-size: 16px;
+      font-family: ui-monospace, monospace;
+      white-space: pre-wrap;
+      line-height: 1.6;
+      background: ${contentBg};
+      padding: 20px;
+      border-radius: 10px;
+      border: 1px solid ${borderColor};
+      flex: ${hasImage ? '0 0 auto' : '1'};
+      max-height: ${hasImage ? '400px' : 'none'};
+      overflow: hidden;
+    }
+    .image-wrap {
+      flex: 1;
+      margin-top: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 0;
+    }
+    .image-wrap img {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      border-radius: 12px;
+      border: 1px solid ${borderColor};
+    }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <h1>${escapeHtml(noteData.title)}</h1>
+    <div class="meta">${escapeHtml(dateStr)}</div>
+    <div class="content">${escapeHtml(noteData.content || '(empty)')}</div>
+    ${noteData.imageDataUrl ? `<div class="image-wrap"><img src="${noteData.imageDataUrl}" /></div>` : ''}
+  </div>
+</body>
+</html>`;
+    
+    await pngWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    
+    // Wait for images to load
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    const image = await pngWindow.webContents.capturePage();
+    fs.writeFileSync(filePath, image.toPNG());
+    pngWindow.close();
+    
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+// Export to EPUB3 using built-in zlib (no external deps)
+ipcMain.handle('export-epub', async (event, savePath, bookTitle, notesData, isDark) => {
+  try {
+    const zlib = require('zlib');
+    
+    // Simple ZIP file creator using raw buffers
+    const files = [];
+    
+    // Helper to add file to zip
+    function addFile(name, content, compress = true) {
+      const data = Buffer.isBuffer(content) ? content : Buffer.from(content, 'utf8');
+      files.push({ name, data, compress });
+    }
+    
+    // EPUB structure
+    addFile('mimetype', 'application/epub+zip', false);
+    
+    // META-INF/container.xml
+    addFile('META-INF/container.xml', `<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>`);
+    
+    // Generate unique ID
+    const bookId = 'noatboat-' + Date.now();
+    
+    // Build manifest and spine items
+    const manifestItems = [];
+    const spineItems = [];
+    
+    // CSS
+    const bgColor = isDark ? '#1a1a1a' : '#ffffff';
+    const textColor = isDark ? '#e0e0e0' : '#111111';
+    const mutedColor = isDark ? '#999999' : '#666666';
+    const contentBg = isDark ? '#252525' : '#f5f5f5';
+    
+    const cssContent = `
+body {
+  font-family: Georgia, serif;
+  margin: 1em;
+  background: ${bgColor};
+  color: ${textColor};
+}
+h1 { font-size: 1.5em; margin-bottom: 0.5em; }
+.meta { font-size: 0.85em; color: ${mutedColor}; margin-bottom: 1em; }
+.content {
+  font-family: "Courier New", monospace;
+  white-space: pre-wrap;
+  line-height: 1.6;
+  padding: 1em;
+  background: ${contentBg};
+  border-radius: 8px;
+}
+.note-image { max-width: 100%; margin: 1em 0; border-radius: 8px; }
+audio { width: 100%; margin: 1em 0; }`;
+    
+    addFile('OEBPS/styles.css', cssContent);
+    manifestItems.push('<item id="css" href="styles.css" media-type="text/css"/>');
+    
+    // Generate chapter files
+    for (let i = 0; i < notesData.length; i++) {
+      const note = notesData[i];
+      const chapterId = `chapter${i}`;
+      const chapterFile = `${chapterId}.xhtml`;
+      
+      let imageTag = '';
+      let audioTag = '';
+      
+      // Handle image
+      if (note.imageDataUrl) {
+        const match = note.imageDataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
+        if (match) {
+          const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
+          const imgFileName = `img${i}.${ext}`;
+          const imgBuffer = Buffer.from(match[2], 'base64');
+          addFile(`OEBPS/images/${imgFileName}`, imgBuffer);
+          
+          const mimeType = `image/${match[1]}`;
+          manifestItems.push(`<item id="img${i}" href="images/${imgFileName}" media-type="${mimeType}"/>`);
+          imageTag = `<p><img class="note-image" src="images/${imgFileName}" alt="${escapeHtml(note.title)}"/></p>`;
+        }
+      }
+      
+      // Handle audio
+      if (note.audioDataUrl) {
+        const match = note.audioDataUrl.match(/^data:audio\/([^;]+);base64,(.+)$/);
+        if (match) {
+          let ext = match[1];
+          if (ext === 'mpeg') ext = 'mp3';
+          if (ext === 'mp4') ext = 'm4a';
+          const audioFileName = `audio${i}.${ext}`;
+          const audioBuffer = Buffer.from(match[2], 'base64');
+          addFile(`OEBPS/audio/${audioFileName}`, audioBuffer);
+          
+          const mimeType = `audio/${match[1]}`;
+          manifestItems.push(`<item id="audio${i}" href="audio/${audioFileName}" media-type="${mimeType}"/>`);
+          audioTag = `<p><audio controls src="audio/${audioFileName}">Audio</audio></p>`;
+        }
+      }
+      
+      const dateStr = note.lastModified ? new Date(note.lastModified).toLocaleString() : '';
+      
+      const chapterContent = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head>
+  <title>${escapeHtml(note.title)}</title>
+  <link rel="stylesheet" type="text/css" href="styles.css"/>
+</head>
+<body>
+  <h1>${escapeHtml(note.title)}</h1>
+  <p class="meta">${escapeHtml(dateStr)}</p>
+  <div class="content">${escapeHtml(note.content || '(empty)')}</div>
+  ${imageTag}
+  ${audioTag}
+</body>
+</html>`;
+      
+      addFile(`OEBPS/${chapterFile}`, chapterContent);
+      manifestItems.push(`<item id="${chapterId}" href="${chapterFile}" media-type="application/xhtml+xml"/>`);
+      spineItems.push(`<itemref idref="${chapterId}"/>`);
+    }
+    
+    // Navigation document
+    let navItems = '';
+    for (let i = 0; i < notesData.length; i++) {
+      navItems += `<li><a href="chapter${i}.xhtml">${escapeHtml(notesData[i].title)}</a></li>\n`;
+    }
+    
+    const navContent = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head>
+  <title>Table of Contents</title>
+  <link rel="stylesheet" type="text/css" href="styles.css"/>
+</head>
+<body>
+  <nav epub:type="toc">
+    <h1>Table of Contents</h1>
+    <ol>${navItems}</ol>
+  </nav>
+</body>
+</html>`;
+    
+    addFile('OEBPS/nav.xhtml', navContent);
+    manifestItems.push('<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>');
+    
+    // content.opf
+    const opfContent = `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="BookId">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="BookId">${bookId}</dc:identifier>
+    <dc:title>${escapeHtml(bookTitle)}</dc:title>
+    <dc:creator>Noat Boat</dc:creator>
+    <dc:language>en</dc:language>
+    <meta property="dcterms:modified">${new Date().toISOString().split('.')[0]}Z</meta>
+  </metadata>
+  <manifest>
+    ${manifestItems.join('\n    ')}
+  </manifest>
+  <spine>
+    ${spineItems.join('\n    ')}
+  </spine>
+</package>`;
+    
+    addFile('OEBPS/content.opf', opfContent);
+    
+    // Create ZIP file manually
+    const zipBuffer = createZipBuffer(files);
+    fs.writeFileSync(savePath, zipBuffer);
+    
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+// Simple ZIP file creator (no external dependencies)
+function createZipBuffer(files) {
+  const zlib = require('zlib');
+  const localHeaders = [];
+  const centralHeaders = [];
+  let offset = 0;
+  
+  for (const file of files) {
+    const nameBuffer = Buffer.from(file.name, 'utf8');
+    const data = file.data;
+    const compressed = file.compress ? zlib.deflateRawSync(data) : data;
+    const useCompression = file.compress && compressed.length < data.length;
+    const finalData = useCompression ? compressed : data;
+    
+    // CRC32
+    const crc = crc32(data);
+    
+    // Local file header
+    const localHeader = Buffer.alloc(30 + nameBuffer.length);
+    localHeader.writeUInt32LE(0x04034b50, 0); // signature
+    localHeader.writeUInt16LE(20, 4); // version needed
+    localHeader.writeUInt16LE(0, 6); // flags
+    localHeader.writeUInt16LE(useCompression ? 8 : 0, 8); // compression
+    localHeader.writeUInt16LE(0, 10); // mod time
+    localHeader.writeUInt16LE(0, 12); // mod date
+    localHeader.writeUInt32LE(crc, 14); // crc32
+    localHeader.writeUInt32LE(finalData.length, 18); // compressed size
+    localHeader.writeUInt32LE(data.length, 22); // uncompressed size
+    localHeader.writeUInt16LE(nameBuffer.length, 26); // name length
+    localHeader.writeUInt16LE(0, 28); // extra length
+    nameBuffer.copy(localHeader, 30);
+    
+    localHeaders.push({ header: localHeader, data: finalData, offset });
+    
+    // Central directory header
+    const centralHeader = Buffer.alloc(46 + nameBuffer.length);
+    centralHeader.writeUInt32LE(0x02014b50, 0); // signature
+    centralHeader.writeUInt16LE(20, 4); // version made by
+    centralHeader.writeUInt16LE(20, 6); // version needed
+    centralHeader.writeUInt16LE(0, 8); // flags
+    centralHeader.writeUInt16LE(useCompression ? 8 : 0, 10); // compression
+    centralHeader.writeUInt16LE(0, 12); // mod time
+    centralHeader.writeUInt16LE(0, 14); // mod date
+    centralHeader.writeUInt32LE(crc, 16); // crc32
+    centralHeader.writeUInt32LE(finalData.length, 20); // compressed size
+    centralHeader.writeUInt32LE(data.length, 24); // uncompressed size
+    centralHeader.writeUInt16LE(nameBuffer.length, 28); // name length
+    centralHeader.writeUInt16LE(0, 30); // extra length
+    centralHeader.writeUInt16LE(0, 32); // comment length
+    centralHeader.writeUInt16LE(0, 34); // disk number
+    centralHeader.writeUInt16LE(0, 36); // internal attr
+    centralHeader.writeUInt32LE(0, 38); // external attr
+    centralHeader.writeUInt32LE(offset, 42); // local header offset
+    nameBuffer.copy(centralHeader, 46);
+    
+    centralHeaders.push(centralHeader);
+    
+    offset += localHeader.length + finalData.length;
+  }
+  
+  // Build final buffer
+  const centralOffset = offset;
+  let centralSize = 0;
+  for (const ch of centralHeaders) {
+    centralSize += ch.length;
+  }
+  
+  // End of central directory
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0); // signature
+  eocd.writeUInt16LE(0, 4); // disk number
+  eocd.writeUInt16LE(0, 6); // disk with central dir
+  eocd.writeUInt16LE(files.length, 8); // entries on disk
+  eocd.writeUInt16LE(files.length, 10); // total entries
+  eocd.writeUInt32LE(centralSize, 12); // central dir size
+  eocd.writeUInt32LE(centralOffset, 16); // central dir offset
+  eocd.writeUInt16LE(0, 20); // comment length
+  
+  // Concatenate all parts
+  const parts = [];
+  for (const lh of localHeaders) {
+    parts.push(lh.header);
+    parts.push(lh.data);
+  }
+  for (const ch of centralHeaders) {
+    parts.push(ch);
+  }
+  parts.push(eocd);
+  
+  return Buffer.concat(parts);
+}
+
+// CRC32 calculation
+function crc32(buffer) {
+  let crc = 0xFFFFFFFF;
+  const table = getCrc32Table();
+  
+  for (let i = 0; i < buffer.length; i++) {
+    crc = (crc >>> 8) ^ table[(crc ^ buffer[i]) & 0xFF];
+  }
+  
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+let crc32Table = null;
+function getCrc32Table() {
+  if (crc32Table) return crc32Table;
+  
+  crc32Table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let j = 0; j < 8; j++) {
+      c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    crc32Table[i] = c;
+  }
+  
+  return crc32Table;
+}
+
+// Export to HTML
+ipcMain.handle('export-html', async (event, saveDir, bookTitle, notesData, assets, isDark) => {
+  try {
+    // Create assets folder
+    const assetsDir = path.join(saveDir, 'assets');
+    if (!fs.existsSync(assetsDir)) {
+      fs.mkdirSync(assetsDir, { recursive: true });
+    }
+    
+    // Write assets
+    for (const asset of assets) {
+      const match = asset.dataUrl.match(/^data:[^;]+;base64,(.+)$/);
+      if (match) {
+        const buffer = Buffer.from(match[1], 'base64');
+        fs.writeFileSync(path.join(assetsDir, asset.name), buffer);
+      }
+    }
+    
+    // Generate notes JSON for the app
+    const notesJson = notesData.map(n => ({
+      id: n.id,
+      title: n.title,
+      name: n.name,
+      content: n.content,
+      lastModified: n.lastModified,
+      canvasJson: n.canvasJson || null,
+      canvasImage: n.canvasImage ? `assets/${n.canvasImage}` : null,
+      image: n.image ? `assets/${n.image}` : null,
+      audio: n.audio ? `assets/${n.audio}` : null
+    }));
+    
+    // CSS styles
+    const cssContent = generateExportCss(isDark);
+    
+    // JavaScript for the app
+    const jsContent = generateExportJs();
+    
+    // Main HTML
+    const htmlContent = generateExportHtml(bookTitle, notesJson, cssContent, jsContent, isDark);
+    
+    fs.writeFileSync(path.join(saveDir, 'index.html'), htmlContent);
+    
+    // Copy fabric.min.js if it exists
+    const fabricPath = path.join(__dirname, 'fabric.min.js');
+    if (fs.existsSync(fabricPath)) {
+      fs.copyFileSync(fabricPath, path.join(saveDir, 'fabric.min.js'));
+    }
+    
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+function generateExportCss(isDark) {
+  const bgColor = isDark ? '#1a1a1a' : '#f2f2f2';
+  const panelColor = isDark ? '#252525' : '#ffffff';
+  const textColor = isDark ? '#e0e0e0' : '#111';
+  const mutedColor = isDark ? '#999' : '#666';
+  const borderColor = isDark ? '#3a3a3a' : '#d9d9d9';
+  const hoverBg = isDark ? '#2d2d2d' : '#fafafa';
+  const activeBg = isDark ? '#1e3a5f' : '#eef5ff';
+  const activeBorder = isDark ? '#2d5a8a' : '#c9dcff';
+  const editorBg = isDark ? '#1e1e1e' : '#fff';
+  
+  return `
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background: ${bgColor};
+      color: ${textColor};
+      height: 100vh;
+      overflow: hidden;
+    }
+    .topbar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      padding: 10px;
+      border-bottom: 1px solid ${borderColor};
+      background: linear-gradient(${isDark ? '#2a2a2a' : '#f7f7f7'}, ${isDark ? '#222' : '#efefef'});
+    }
+    .btn {
+      appearance: none;
+      border: 1px solid ${borderColor};
+      background: ${isDark ? '#333' : '#fff'};
+      padding: 7px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      color: ${textColor};
+    }
+    .btn:hover { background: ${hoverBg}; }
+    .search {
+      flex: 1;
+      min-width: 180px;
+      max-width: 400px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid ${borderColor};
+      font-size: 14px;
+      background: ${isDark ? '#333' : '#fff'};
+      color: ${textColor};
+      outline: none;
+    }
+    .main {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      height: calc(100vh - 52px);
+    }
+    .left {
+      border-right: 1px solid ${borderColor};
+      background: ${panelColor};
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+    .list {
+      overflow: auto;
+      padding: 6px;
+      flex: 1;
+    }
+    .noteItem {
+      border: 1px solid transparent;
+      border-radius: 8px;
+      padding: 8px 10px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .noteItem:hover {
+      background: ${hoverBg};
+      border-color: ${borderColor};
+    }
+    .noteItem.active {
+      background: ${activeBg};
+      border-color: ${activeBorder};
+    }
+    .noteTitle {
+      font-size: 13px;
+      font-weight: 600;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .noteMeta {
+      font-size: 11px;
+      color: ${mutedColor};
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: ui-monospace, monospace;
+    }
+    .right {
+      background: ${panelColor};
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .editorHeader {
+      padding: 10px 12px;
+      border-bottom: 1px solid ${borderColor};
+      display: flex;
+      align-items: baseline;
+      gap: 10px;
+    }
+    .currentTitle {
+      font-size: 14px;
+      font-weight: 700;
+      font-family: ui-monospace, monospace;
+      flex: 1;
+    }
+    .saveState {
+      font-size: 12px;
+      color: ${mutedColor};
+      font-family: ui-monospace, monospace;
+    }
+    .empty {
+      padding: 20px;
+      color: ${mutedColor};
+      font-size: 14px;
+    }
+    .editorWrap {
+      position: relative;
+      flex: 1;
+      overflow: hidden;
+      display: flex;
+      align-items: stretch;
+      gap: 18px;
+      padding: 12px 14px;
+      min-height: 0;
+    }
+    textarea {
+      border: 0;
+      resize: none;
+      padding: 14px 16px;
+      outline: none;
+      font-size: 14px;
+      line-height: 1.55;
+      font-family: ui-monospace, monospace;
+      flex: 1 1 50%;
+      min-width: 200px;
+      max-width: 50%;
+      background: ${editorBg};
+      color: ${textColor};
+      border-radius: 8px;
+    }
+    .canvasWrap {
+      flex: 1 1 50%;
+      min-width: 200px;
+      border: 1px solid ${borderColor};
+      border-radius: 18px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      background: ${editorBg};
+    }
+    .canvasToolbar {
+      display: flex;
+      gap: 6px;
+      padding: 8px 10px;
+      border-bottom: 1px solid ${borderColor};
+      background: linear-gradient(${isDark ? '#2a2a2a' : '#f7f7f7'}, ${isDark ? '#222' : '#efefef'});
+    }
+    .canvasToolbar .btn { padding: 5px 8px; font-size: 12px; }
+    .canvasToolbar .btn.active { background: ${activeBg}; border-color: ${activeBorder}; }
+    .canvasContainer {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+      background: ${editorBg};
+      min-height: 0;
+    }
+    .canvasContainer canvas { display: block; }
+    .canvasContainer .canvas-container { 
+      position: absolute !important;
+      width: 100% !important;
+      height: 100% !important;
+    }
+    .audioPlayer {
+      padding: 10px;
+      border-top: 1px solid ${borderColor};
+    }
+    .audioPlayer audio { width: 100%; }
+    @media (max-width: 820px) {
+      .main { grid-template-columns: 1fr; }
+      .left { height: 40vh; border-right: 0; border-bottom: 1px solid ${borderColor}; }
+    }
+  `;
+}
+
+function generateExportJs() {
+  return `
+    let notes = window.NOTES_DATA || [];
+    let currentIndex = null;
+    let fabricCanvas = null;
+    let dirty = false;
+    
+    function fmtDate(ts) {
+      if (!ts) return '';
+      const d = new Date(ts);
+      return d.toLocaleString(undefined, {year:'2-digit', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+    }
+    
+    function renderList(filter) {
+      const list = document.getElementById('list');
+      list.innerHTML = '';
+      
+      const q = (filter || '').toLowerCase();
+      const filtered = notes
+        .map((n, idx) => ({n, idx}))
+        .filter(({n}) => {
+          if (!q) return true;
+          return n.title.toLowerCase().includes(q) || (n.content || '').toLowerCase().includes(q);
+        })
+        .sort((a,b) => (b.n.lastModified - a.n.lastModified));
+      
+      if (filtered.length === 0) {
+        list.innerHTML = '<div class="empty">No matches.</div>';
+        return;
+      }
+      
+      for (const {n, idx} of filtered) {
+        const item = document.createElement('div');
+        item.className = 'noteItem' + (idx === currentIndex ? ' active' : '');
+        
+        const title = document.createElement('div');
+        title.className = 'noteTitle';
+        title.textContent = n.title;
+        
+        const meta = document.createElement('div');
+        meta.className = 'noteMeta';
+        const firstLine = (n.content || '').split(/\\n/)[0]?.trim() || '';
+        const excerpt = firstLine ? firstLine.slice(0, 60) : '(empty)';
+        const hasCanvas = n.canvasJson || n.canvasImage || n.image;
+        const hasAudio = n.audio;
+        let marks = '';
+        if (hasCanvas) marks += '  ·  [img]';
+        if (hasAudio) marks += '  ·  [audio]';
+        meta.textContent = fmtDate(n.lastModified) + '  ·  ' + excerpt + marks;
+        
+        item.appendChild(title);
+        item.appendChild(meta);
+        item.onclick = () => openNote(idx);
+        list.appendChild(item);
+      }
+    }
+    
+    function saveNote() {
+      if (currentIndex === null) return;
+      const editor = document.getElementById('editor');
+      notes[currentIndex].content = editor.value;
+      notes[currentIndex].lastModified = Date.now();
+      dirty = false;
+      document.getElementById('saveState').textContent = 'saved ' + fmtDate(Date.now());
+      renderList(document.getElementById('searchInput').value);
+      
+      // Save to localStorage for persistence
+      try {
+        localStorage.setItem('noatboat_notes', JSON.stringify(notes));
+      } catch(e) {}
+    }
+    
+    function openNote(idx) {
+      // Save current note first
+      if (currentIndex !== null && dirty) {
+        saveNote();
+      }
+      
+      currentIndex = idx;
+      const n = notes[idx];
+      dirty = false;
+      
+      document.getElementById('currentTitle').textContent = n.name || n.title;
+      document.getElementById('editor').value = n.content || '';
+      document.getElementById('saveState').textContent = '';
+      document.getElementById('editorWrap').style.display = 'flex';
+      document.getElementById('empty').style.display = 'none';
+      
+      // Handle canvas
+      const canvasWrap = document.getElementById('canvasWrap');
+      
+      if (n.canvasJson || n.canvasImage || n.image) {
+        canvasWrap.style.display = 'flex';
+        
+        // Delay canvas init to allow layout
+        setTimeout(() => {
+          initCanvas();
+          loadCanvasContent(n);
+        }, 100);
+      } else {
+        canvasWrap.style.display = 'none';
+        if (fabricCanvas) {
+          fabricCanvas.clear();
+        }
+      }
+      
+      // Handle audio
+      const audioWrap = document.getElementById('audioPlayer');
+      const audio = document.getElementById('audio');
+      if (n.audio) {
+        audioWrap.style.display = 'block';
+        audio.src = n.audio;
+      } else {
+        audioWrap.style.display = 'none';
+        audio.src = '';
+      }
+      
+      renderList(document.getElementById('searchInput').value);
+    }
+    
+    function loadCanvasContent(n) {
+      if (!fabricCanvas) return;
+      
+      fabricCanvas.clear();
+      
+      if (n.canvasJson) {
+        try {
+          fabricCanvas.loadFromJSON(n.canvasJson, () => {
+            // Scale content to fit
+            scaleCanvasContent();
+            fabricCanvas.renderAll();
+          });
+        } catch (e) {
+          console.error('Failed to load canvas JSON:', e);
+          loadCanvasImage(n);
+        }
+      } else {
+        loadCanvasImage(n);
+      }
+    }
+    
+    function loadCanvasImage(n) {
+      const imgSrc = n.canvasImage || n.image;
+      if (!imgSrc || !fabricCanvas) return;
+      
+      fabric.Image.fromURL(imgSrc, (img) => {
+        if (!fabricCanvas || !img) return;
+        
+        const canvasWidth = fabricCanvas.width;
+        const canvasHeight = fabricCanvas.height;
+        
+        // Scale image to fit within canvas with padding
+        const maxWidth = canvasWidth * 0.9;
+        const maxHeight = canvasHeight * 0.9;
+        
+        let scale = 1;
+        if (img.width > maxWidth || img.height > maxHeight) {
+          scale = Math.min(maxWidth / img.width, maxHeight / img.height);
+        }
+        
+        img.scale(scale);
+        img.set({
+          left: (canvasWidth - img.getScaledWidth()) / 2,
+          top: (canvasHeight - img.getScaledHeight()) / 2,
+          selectable: true
+        });
+        
+        fabricCanvas.add(img);
+        fabricCanvas.renderAll();
+      }, null, { crossOrigin: 'anonymous' });
+    }
+    
+    function scaleCanvasContent() {
+      if (!fabricCanvas) return;
+      
+      const objects = fabricCanvas.getObjects();
+      if (objects.length === 0) return;
+      
+      // Get bounding box of all objects
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      
+      objects.forEach(obj => {
+        const bound = obj.getBoundingRect();
+        minX = Math.min(minX, bound.left);
+        minY = Math.min(minY, bound.top);
+        maxX = Math.max(maxX, bound.left + bound.width);
+        maxY = Math.max(maxY, bound.top + bound.height);
+      });
+      
+      const contentWidth = maxX - minX;
+      const contentHeight = maxY - minY;
+      
+      if (contentWidth <= 0 || contentHeight <= 0) return;
+      
+      const canvasWidth = fabricCanvas.width;
+      const canvasHeight = fabricCanvas.height;
+      
+      // Check if content is larger than canvas
+      if (contentWidth > canvasWidth * 0.95 || contentHeight > canvasHeight * 0.95) {
+        const scale = Math.min(
+          (canvasWidth * 0.85) / contentWidth,
+          (canvasHeight * 0.85) / contentHeight
+        );
+        
+        // Scale all objects
+        const centerX = canvasWidth / 2;
+        const centerY = canvasHeight / 2;
+        const contentCenterX = minX + contentWidth / 2;
+        const contentCenterY = minY + contentHeight / 2;
+        
+        objects.forEach(obj => {
+          const objCenterX = obj.left + (obj.width * obj.scaleX) / 2;
+          const objCenterY = obj.top + (obj.height * obj.scaleY) / 2;
+          
+          const newCenterX = centerX + (objCenterX - contentCenterX) * scale;
+          const newCenterY = centerY + (objCenterY - contentCenterY) * scale;
+          
+          obj.scaleX *= scale;
+          obj.scaleY *= scale;
+          obj.left = newCenterX - (obj.width * obj.scaleX) / 2;
+          obj.top = newCenterY - (obj.height * obj.scaleY) / 2;
+          obj.setCoords();
+        });
+      }
+    }
+    
+    function initCanvas() {
+      const container = document.getElementById('canvasContainer');
+      const rect = container.getBoundingClientRect();
+      
+      const width = Math.max(Math.floor(rect.width), 400);
+      const height = Math.max(Math.floor(rect.height), 300);
+      
+      if (fabricCanvas) {
+        // Resize existing canvas
+        fabricCanvas.setDimensions({ width: width, height: height });
+        fabricCanvas.renderAll();
+        return;
+      }
+      
+      const canvasEl = document.getElementById('fabricCanvas');
+      canvasEl.width = width;
+      canvasEl.height = height;
+      
+      fabricCanvas = new fabric.Canvas('fabricCanvas', {
+        width: width,
+        height: height,
+        backgroundColor: null,
+        selection: true,
+        preserveObjectStacking: true
+      });
+      
+      fabricCanvas.freeDrawingBrush.width = 3;
+      fabricCanvas.freeDrawingBrush.color = '#000000';
+    }
+    
+    function setDrawingMode(on) {
+      if (!fabricCanvas) return;
+      fabricCanvas.isDrawingMode = on;
+      document.getElementById('selectBtn').classList.toggle('active', !on);
+      document.getElementById('drawBtn').classList.toggle('active', on);
+    }
+    
+    // Handle window resize
+    let resizeTimer = null;
+    window.addEventListener('resize', () => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        if (fabricCanvas && currentIndex !== null) {
+          const container = document.getElementById('canvasContainer');
+          const rect = container.getBoundingClientRect();
+          if (rect.width > 0 && rect.height > 0) {
+            fabricCanvas.setDimensions({ width: rect.width, height: rect.height });
+            // Reload content to rescale
+            const n = notes[currentIndex];
+            if (n) loadCanvasContent(n);
+          }
+        }
+      }, 200);
+    });
+    
+    document.addEventListener('DOMContentLoaded', () => {
+      // Try to load saved notes from localStorage
+      try {
+        const saved = localStorage.getItem('noatboat_notes');
+        if (saved) {
+          const savedNotes = JSON.parse(saved);
+          // Merge: keep content changes but preserve original structure
+          notes = notes.map((n, i) => {
+            const savedNote = savedNotes.find(s => s.id === n.id || s.title === n.title);
+            if (savedNote) {
+              return { ...n, content: savedNote.content, lastModified: savedNote.lastModified };
+            }
+            return n;
+          });
+        }
+      } catch(e) {}
+      
+      renderList();
+      
+      const searchInput = document.getElementById('searchInput');
+      searchInput.addEventListener('input', (e) => {
+        renderList(e.target.value);
+      });
+      
+      const editor = document.getElementById('editor');
+      editor.addEventListener('input', () => {
+        if (currentIndex === null) return;
+        dirty = true;
+        document.getElementById('saveState').textContent = 'modified';
+      });
+      
+      // Auto-save on blur
+      editor.addEventListener('blur', () => {
+        if (dirty) saveNote();
+      });
+      
+      // Auto-save periodically
+      setInterval(() => {
+        if (dirty) saveNote();
+      }, 5000);
+      
+      document.getElementById('selectBtn')?.addEventListener('click', () => setDrawingMode(false));
+      document.getElementById('drawBtn')?.addEventListener('click', () => setDrawingMode(true));
+      
+      if (notes.length > 0) {
+        openNote(0);
+      }
+    });
+  `;
+}
+
+function generateExportHtml(title, notesJson, css, js, isDark) {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(title)} - Noat Boat Export</title>
+  <script src="fabric.min.js"></script>
+  <style>${css}</style>
+</head>
+<body class="${isDark ? 'dark' : ''}">
+  <div class="topbar">
+    <input id="searchInput" class="search" placeholder="Search notes..." />
+    <span style="flex:1;"></span>
+    <span style="font-size:13px;color:${isDark ? '#999' : '#666'};">📓 ${escapeHtml(title)}</span>
+  </div>
+  
+  <div class="main">
+    <div class="left">
+      <div class="list" id="list"></div>
+    </div>
+    <div class="right">
+      <div class="editorHeader">
+        <div id="currentTitle" class="currentTitle">Select a note</div>
+        <div id="saveState" class="saveState"></div>
+      </div>
+      <div id="empty" class="empty">Select a note from the list.</div>
+      <div id="editorWrap" class="editorWrap" style="display:none;">
+        <textarea id="editor" spellcheck="false"></textarea>
+        <div id="canvasWrap" class="canvasWrap" style="display:none;">
+          <div class="canvasToolbar">
+            <button id="selectBtn" class="btn active" title="Select/Move">🖱️</button>
+            <button id="drawBtn" class="btn" title="Draw">✏️</button>
+          </div>
+          <div id="canvasContainer" class="canvasContainer">
+            <canvas id="fabricCanvas"></canvas>
+          </div>
+          <div id="audioPlayer" class="audioPlayer" style="display:none;">
+            <audio id="audio" controls loop></audio>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <script>
+    window.NOTES_DATA = ${JSON.stringify(notesJson)};
+    ${js}
+  </script>
+</body>
+</html>`;
+}

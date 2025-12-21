@@ -44,6 +44,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   showPrompt: (message, defaultValue) => ipcRenderer.invoke('show-prompt', message, defaultValue),
   showConfirm: (message) => ipcRenderer.invoke('show-confirm', message),
   showAlert: (message) => ipcRenderer.invoke('show-alert', message),
+  showSaveDialog: (options) => ipcRenderer.invoke('show-save-dialog', options),
+  
+  // Export operations
+  exportPdf: (savePath, notesData, isDark) => ipcRenderer.invoke('export-pdf', savePath, notesData, isDark),
+  exportPng: (filePath, noteData, isDark) => ipcRenderer.invoke('export-png', filePath, noteData, isDark),
+  exportEpub: (savePath, bookTitle, notesData, isDark) => ipcRenderer.invoke('export-epub', savePath, bookTitle, notesData, isDark),
+  exportHtml: (saveDir, bookTitle, notesData, assets, isDark) => ipcRenderer.invoke('export-html', saveDir, bookTitle, notesData, assets, isDark),
   
   // File drag and drop - get path from File object
   getPathForFile: (file) => webUtils.getPathForFile(file),

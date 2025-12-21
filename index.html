@@ -623,6 +623,79 @@
       box-shadow:0 2px 4px rgba(0,0,0,.2);
     }
     .sliderValue{ font-size:12px; color:var(--muted); font-family:var(--mono); text-align:right; }
+    .exportModal{
+      position:fixed;
+      inset:0;
+      background:rgba(0,0,0,.45);
+      display:none;
+      align-items:center;
+      justify-content:center;
+      z-index:10002;
+      padding:18px;
+    }
+    .exportModal.open{ display:flex; }
+    .exportDialog{
+      width:min(500px, 90vw);
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:16px;
+      overflow:hidden;
+      box-shadow:0 16px 50px rgba(0,0,0,.25);
+      display:flex;
+      flex-direction:column;
+    }
+    .exportTop{
+      padding:10px 12px;
+      border-bottom:1px solid var(--border);
+      background:linear-gradient(var(--topbar-gradient-start),var(--topbar-gradient-end));
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+    }
+    .exportTitle{ font-size:14px; font-weight:700; font-family:var(--mono); color:var(--text); }
+    .exportBody{ padding:20px; display:flex; flex-direction:column; gap:12px; }
+    .exportOption{
+      padding:16px;
+      border:1px solid var(--border);
+      border-radius:10px;
+      cursor:pointer;
+      background:var(--btn-bg);
+      transition:all .15s ease;
+      display:flex;
+      flex-direction:column;
+      gap:4px;
+    }
+    .exportOption:hover{
+      background:var(--note-active-bg);
+      border-color:var(--note-active-border);
+    }
+    .exportOption.disabled{
+      opacity:0.5;
+      cursor:not-allowed;
+    }
+    .exportOption.disabled:hover{
+      background:var(--btn-bg);
+      border-color:var(--border);
+    }
+    .exportOptionTitle{
+      font-size:14px;
+      font-weight:600;
+      color:var(--text);
+      display:flex;
+      align-items:center;
+      gap:8px;
+    }
+    .exportOptionDesc{
+      font-size:12px;
+      color:var(--muted);
+    }
+    .exportProgress{
+      padding:16px;
+      text-align:center;
+      font-size:13px;
+      color:var(--muted);
+      font-family:var(--mono);
+    }
     @keyframes gridScrollUp{
       from{ background-position: 0px 0px, 0px 0px, 0px 0px, 0px 0px; }
       to{ background-position: 0px -240px, 0px -240px, 0px -1200px, 0px -1200px; }
@@ -687,6 +760,8 @@
     <button id="audioBtn" class="btn" disabled aria-label="Audio"><span class="ico" aria-hidden="true">🔊</span></button>
     <div class="spacer"></div>
     <div id="status" class="status" style="display:none"></div>
+    <button id="exportBtn" class="btn" disabled aria-label="Export"><span class="ico" aria-hidden="true">📤</span></button>
+    <div class="gapBtn"></div>
     <button id="deleteBtn" class="btn danger" disabled aria-label="Delete"><span class="ico" aria-hidden="true">🗑️</span></button>
   </div>
 
@@ -839,6 +914,38 @@
     </div>
   </div>
 
+  <div id="exportModal" class="exportModal" aria-hidden="true">
+    <div class="exportDialog" role="dialog" aria-modal="true" aria-label="Export">
+      <div class="exportTop">
+        <div class="exportTitle">Export Notes</div>
+        <button id="exportCloseBtn" class="btn">✕</button>
+      </div>
+      <div class="exportBody">
+        <div id="exportOptions">
+          <div class="exportOption" id="exportPdfBtn">
+            <div class="exportOptionTitle">📄 PDF Document</div>
+            <div class="exportOptionDesc">Export all notes as a PDF with text and images on separate pages</div>
+          </div>
+          <div class="exportOption" id="exportPngBtn">
+            <div class="exportOptionTitle">🖼️ PNG Images</div>
+            <div class="exportOptionDesc">Export each note as a PNG image preserving the layout</div>
+          </div>
+          <div class="exportOption" id="exportEpubBtn">
+            <div class="exportOptionTitle">📚 EPUB3 Book</div>
+            <div class="exportOptionDesc">Export as an e-book with text, images, and audio</div>
+          </div>
+          <div class="exportOption" id="exportHtmlBtn">
+            <div class="exportOptionTitle">🌐 HTML Website</div>
+            <div class="exportOptionDesc">Export as a standalone interactive HTML version</div>
+          </div>
+        </div>
+        <div id="exportProgress" class="exportProgress" style="display:none;">
+          Exporting... <span id="exportProgressText">0%</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <pre id="asciiBoat" class="asciiBoat">   .  o ..                  
      o . o o.o                
           ...oo               
@@ -924,6 +1031,17 @@ const els = {
   canvasAddImageBtn: document.getElementById('canvasAddImageBtn'),
   canvasDeleteObjBtn: document.getElementById('canvasDeleteObjBtn'),
   canvasClearBtn: document.getElementById('canvasClearBtn'),
+  // Export elements
+  exportBtn: document.getElementById('exportBtn'),
+  exportModal: document.getElementById('exportModal'),
+  exportCloseBtn: document.getElementById('exportCloseBtn'),
+  exportOptions: document.getElementById('exportOptions'),
+  exportPdfBtn: document.getElementById('exportPdfBtn'),
+  exportPngBtn: document.getElementById('exportPngBtn'),
+  exportEpubBtn: document.getElementById('exportEpubBtn'),
+  exportHtmlBtn: document.getElementById('exportHtmlBtn'),
+  exportProgress: document.getElementById('exportProgress'),
+  exportProgressText: document.getElementById('exportProgressText'),
 };
 
 let folderPath = null;
@@ -988,6 +1106,7 @@ function setEnabled(enabled) {
   els.newBtn.disabled = !enabled;
   els.newFolderBtn.disabled = !enabled;
   els.refreshBtn.disabled = !enabled;
+  els.exportBtn.disabled = !enabled;
 }
 
 function setEditorEnabled(enabled) {
@@ -1846,6 +1965,435 @@ function openPrefsModal() {
 
 function closePrefsModal() {
   setPrefsModalOpen(false);
+}
+
+// --- Export functions ---
+let exportIsOpen = false;
+let isExporting = false;
+
+function setExportModalOpen(on) {
+  exportIsOpen = !!on;
+  els.exportModal.classList.toggle('open', exportIsOpen);
+  els.exportModal.setAttribute('aria-hidden', exportIsOpen ? 'false' : 'true');
+  els.exportOptions.style.display = on ? 'block' : 'none';
+  els.exportProgress.style.display = 'none';
+}
+
+function openExportModal() {
+  if (!folderPath || notes.length === 0) {
+    api.showAlert('No notes to export. Please open a folder with notes first.');
+    return;
+  }
+  setExportModalOpen(true);
+}
+
+function closeExportModal() {
+  if (isExporting) return; // Don't close while exporting
+  setExportModalOpen(false);
+}
+
+function showExportProgress(text) {
+  els.exportOptions.style.display = 'none';
+  els.exportProgress.style.display = 'block';
+  els.exportProgressText.textContent = text;
+}
+
+function hideExportProgress() {
+  els.exportOptions.style.display = 'block';
+  els.exportProgress.style.display = 'none';
+}
+
+// Get CSS styles for export
+function getExportStyles(isDark) {
+  const bgColor = isDark ? '#1a1a1a' : '#f2f2f2';
+  const panelColor = isDark ? '#252525' : '#ffffff';
+  const textColor = isDark ? '#e0e0e0' : '#111';
+  const mutedColor = isDark ? '#999' : '#666';
+  const borderColor = isDark ? '#3a3a3a' : '#d9d9d9';
+  const editorBg = isDark ? '#1e1e1e' : '#fff';
+  
+  return `
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background: ${bgColor};
+      color: ${textColor};
+    }
+    .note-page {
+      background: ${panelColor};
+      padding: 40px;
+      margin: 20px auto;
+      max-width: 900px;
+      border: 1px solid ${borderColor};
+      border-radius: 12px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+    }
+    .note-title {
+      font-size: 24px;
+      font-weight: 700;
+      margin-bottom: 8px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    .note-meta {
+      font-size: 12px;
+      color: ${mutedColor};
+      margin-bottom: 24px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    .note-content {
+      font-size: 14px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      background: ${editorBg};
+      padding: 20px;
+      border-radius: 8px;
+      border: 1px solid ${borderColor};
+      min-height: 200px;
+    }
+    .note-image {
+      margin-top: 24px;
+      text-align: center;
+    }
+    .note-image img {
+      max-width: 100%;
+      border-radius: 12px;
+      border: 1px solid ${borderColor};
+    }
+    .note-canvas {
+      margin-top: 24px;
+      text-align: center;
+    }
+    .note-canvas img {
+      max-width: 100%;
+      border-radius: 12px;
+      border: 1px solid ${borderColor};
+    }
+    .note-audio {
+      margin-top: 24px;
+    }
+    .note-audio audio {
+      width: 100%;
+    }
+  `;
+}
+
+// Export as PDF
+async function exportToPdf() {
+  if (isExporting) return;
+  isExporting = true;
+  showExportProgress('Preparing PDF export...');
+  
+  try {
+    // Ask user where to save
+    const savePath = await api.showSaveDialog({
+      title: 'Export as PDF',
+      defaultPath: `${api.basename(folderPath)}-notes.pdf`,
+      filters: [{ name: 'PDF', extensions: ['pdf'] }]
+    });
+    
+    if (!savePath) {
+      hideExportProgress();
+      isExporting = false;
+      return;
+    }
+    
+    showExportProgress('Generating PDF...');
+    
+    // Collect all note data
+    const notesData = [];
+    for (let i = 0; i < notes.length; i++) {
+      showExportProgress(`Processing note ${i + 1}/${notes.length}...`);
+      const n = notes[i];
+      const noteData = {
+        title: n.title,
+        content: n.content || '',
+        lastModified: n.lastModified
+      };
+      
+      // Get image data if exists
+      if (n.canvas?.jsonPath) {
+        try {
+          const pngPath = n.canvas.pngPath;
+          const exists = await api.fileExists(pngPath);
+          if (exists) {
+            const imgResult = await api.readImageBase64(pngPath);
+            if (imgResult.success) {
+              noteData.imageDataUrl = imgResult.dataUrl;
+            }
+          }
+        } catch (_e) {}
+      } else if (n.image?.path) {
+        try {
+          const imgResult = await api.readImageBase64(n.image.path);
+          if (imgResult.success) {
+            noteData.imageDataUrl = imgResult.dataUrl;
+          }
+        } catch (_e) {}
+      }
+      
+      notesData.push(noteData);
+    }
+    
+    showExportProgress('Writing PDF...');
+    const result = await api.exportPdf(savePath, notesData, currentTheme === 'dark');
+    
+    if (result.success) {
+      await api.showAlert(`PDF exported successfully to:\n${savePath}`);
+    } else {
+      showBanner(`PDF export failed: ${result.error}`);
+    }
+  } catch (err) {
+    showBanner(`PDF export failed: ${String(err?.message || err)}`);
+  } finally {
+    hideExportProgress();
+    isExporting = false;
+    closeExportModal();
+  }
+}
+
+// Export as PNG
+async function exportToPng() {
+  if (isExporting) return;
+  isExporting = true;
+  showExportProgress('Preparing PNG export...');
+  
+  try {
+    // Ask user to select folder
+    const saveDir = await api.openFolderDialog();
+    if (!saveDir) {
+      hideExportProgress();
+      isExporting = false;
+      return;
+    }
+    
+    for (let i = 0; i < notes.length; i++) {
+      showExportProgress(`Exporting note ${i + 1}/${notes.length}...`);
+      const n = notes[i];
+      
+      const noteData = {
+        title: n.title,
+        content: n.content || '',
+        lastModified: n.lastModified
+      };
+      
+      // Get image data if exists
+      if (n.canvas?.jsonPath) {
+        try {
+          const pngPath = n.canvas.pngPath;
+          const exists = await api.fileExists(pngPath);
+          if (exists) {
+            const imgResult = await api.readImageBase64(pngPath);
+            if (imgResult.success) {
+              noteData.imageDataUrl = imgResult.dataUrl;
+            }
+          }
+        } catch (_e) {}
+      } else if (n.image?.path) {
+        try {
+          const imgResult = await api.readImageBase64(n.image.path);
+          if (imgResult.success) {
+            noteData.imageDataUrl = imgResult.dataUrl;
+          }
+        } catch (_e) {}
+      }
+      
+      const fileName = `${n.title.replace(/[<>:"/\\|?*]/g, '_')}.png`;
+      const filePath = api.joinPath(saveDir, fileName);
+      
+      await api.exportPng(filePath, noteData, currentTheme === 'dark');
+    }
+    
+    await api.showAlert(`PNG images exported successfully to:\n${saveDir}`);
+  } catch (err) {
+    showBanner(`PNG export failed: ${String(err?.message || err)}`);
+  } finally {
+    hideExportProgress();
+    isExporting = false;
+    closeExportModal();
+  }
+}
+
+// Export as EPUB3
+async function exportToEpub() {
+  if (isExporting) return;
+  isExporting = true;
+  showExportProgress('Preparing EPUB export...');
+  
+  try {
+    // Ask user where to save
+    const savePath = await api.showSaveDialog({
+      title: 'Export as EPUB',
+      defaultPath: `${api.basename(folderPath)}-notes.epub`,
+      filters: [{ name: 'EPUB', extensions: ['epub'] }]
+    });
+    
+    if (!savePath) {
+      hideExportProgress();
+      isExporting = false;
+      return;
+    }
+    
+    showExportProgress('Generating EPUB...');
+    
+    // Collect all note data
+    const notesData = [];
+    for (let i = 0; i < notes.length; i++) {
+      showExportProgress(`Processing note ${i + 1}/${notes.length}...`);
+      const n = notes[i];
+      const noteData = {
+        title: n.title,
+        content: n.content || '',
+        lastModified: n.lastModified
+      };
+      
+      // Get image data if exists
+      if (n.canvas?.jsonPath) {
+        try {
+          const pngPath = n.canvas.pngPath;
+          const exists = await api.fileExists(pngPath);
+          if (exists) {
+            const imgResult = await api.readImageBase64(pngPath);
+            if (imgResult.success) {
+              noteData.imageDataUrl = imgResult.dataUrl;
+            }
+          }
+        } catch (_e) {}
+      } else if (n.image?.path) {
+        try {
+          const imgResult = await api.readImageBase64(n.image.path);
+          if (imgResult.success) {
+            noteData.imageDataUrl = imgResult.dataUrl;
+          }
+        } catch (_e) {}
+      }
+      
+      // Get audio data if exists
+      if (n.audio?.path) {
+        try {
+          const audioResult = await api.readAudioBase64(n.audio.path);
+          if (audioResult.success) {
+            noteData.audioDataUrl = audioResult.dataUrl;
+            noteData.audioName = n.audio.name;
+          }
+        } catch (_e) {}
+      }
+      
+      notesData.push(noteData);
+    }
+    
+    showExportProgress('Writing EPUB...');
+    const bookTitle = api.basename(folderPath);
+    const result = await api.exportEpub(savePath, bookTitle, notesData, currentTheme === 'dark');
+    
+    if (result.success) {
+      await api.showAlert(`EPUB exported successfully to:\n${savePath}`);
+    } else {
+      showBanner(`EPUB export failed: ${result.error}`);
+    }
+  } catch (err) {
+    showBanner(`EPUB export failed: ${String(err?.message || err)}`);
+  } finally {
+    hideExportProgress();
+    isExporting = false;
+    closeExportModal();
+  }
+}
+
+// Export as HTML
+async function exportToHtml() {
+  if (isExporting) return;
+  isExporting = true;
+  showExportProgress('Preparing HTML export...');
+  
+  try {
+    // Ask user to select destination folder
+    const saveDir = await api.openFolderDialog();
+    if (!saveDir) {
+      hideExportProgress();
+      isExporting = false;
+      return;
+    }
+    
+    showExportProgress('Collecting note data...');
+    
+    // Collect all note data including assets
+    const notesData = [];
+    const assets = [];
+    
+    for (let i = 0; i < notes.length; i++) {
+      showExportProgress(`Processing note ${i + 1}/${notes.length}...`);
+      const n = notes[i];
+      const noteData = {
+        id: i,
+        title: n.title,
+        name: n.name,
+        content: n.content || '',
+        lastModified: n.lastModified
+      };
+      
+      // Get canvas JSON and image if exists
+      if (n.canvas?.jsonPath) {
+        try {
+          const jsonResult = await api.readCanvasJson(n.canvas.jsonPath);
+          if (jsonResult.success && jsonResult.data) {
+            noteData.canvasJson = jsonResult.data;
+          }
+          const pngPath = n.canvas.pngPath;
+          const exists = await api.fileExists(pngPath);
+          if (exists) {
+            const imgResult = await api.readImageBase64(pngPath);
+            if (imgResult.success) {
+              const assetName = `${n.title.replace(/[<>:"/\\|?*]/g, '_')}.canvas.png`;
+              assets.push({ name: assetName, dataUrl: imgResult.dataUrl });
+              noteData.canvasImage = assetName;
+            }
+          }
+        } catch (_e) {}
+      } else if (n.image?.path) {
+        try {
+          const imgResult = await api.readImageBase64(n.image.path);
+          if (imgResult.success) {
+            const ext = api.extname(n.image.name).slice(1) || 'png';
+            const assetName = `${n.title.replace(/[<>:"/\\|?*]/g, '_')}.${ext}`;
+            assets.push({ name: assetName, dataUrl: imgResult.dataUrl });
+            noteData.image = assetName;
+          }
+        } catch (_e) {}
+      }
+      
+      // Get audio data if exists
+      if (n.audio?.path) {
+        try {
+          const audioResult = await api.readAudioBase64(n.audio.path);
+          if (audioResult.success) {
+            const ext = api.extname(n.audio.name).slice(1) || 'mp3';
+            const assetName = `${n.title.replace(/[<>:"/\\|?*]/g, '_')}.${ext}`;
+            assets.push({ name: assetName, dataUrl: audioResult.dataUrl });
+            noteData.audio = assetName;
+          }
+        } catch (_e) {}
+      }
+      
+      notesData.push(noteData);
+    }
+    
+    showExportProgress('Writing HTML files...');
+    const bookTitle = api.basename(folderPath);
+    const result = await api.exportHtml(saveDir, bookTitle, notesData, assets, currentTheme === 'dark');
+    
+    if (result.success) {
+      await api.showAlert(`HTML exported successfully to:\n${saveDir}`);
+    } else {
+      showBanner(`HTML export failed: ${result.error}`);
+    }
+  } catch (err) {
+    showBanner(`HTML export failed: ${String(err?.message || err)}`);
+  } finally {
+    hideExportProgress();
+    isExporting = false;
+    closeExportModal();
+  }
 }
 
 function updatePrefsUI() {
@@ -2736,6 +3284,16 @@ els.dropBrowseBtn.addEventListener('click', addImageFromDialog);
 
 els.prefsCloseBtn.addEventListener('click', closePrefsModal);
 els.prefsModal.addEventListener('mousedown', (e) => { if (e.target === els.prefsModal) closePrefsModal(); });
+
+// Export modal event listeners
+els.exportBtn.addEventListener('click', () => { setFocusMode(false); openExportModal(); });
+els.exportCloseBtn.addEventListener('click', closeExportModal);
+els.exportModal.addEventListener('mousedown', (e) => { if (e.target === els.exportModal) closeExportModal(); });
+els.exportPdfBtn.addEventListener('click', exportToPdf);
+els.exportPngBtn.addEventListener('click', exportToPng);
+els.exportEpubBtn.addEventListener('click', exportToEpub);
+els.exportHtmlBtn.addEventListener('click', exportToHtml);
+
 els.themeLightBtn.addEventListener('click', () => applyTheme('light'));
 els.themeDarkBtn.addEventListener('click', () => applyTheme('dark'));
 els.focusStrengthSlider.addEventListener('input', (e) => applyFocusStrength(parseInt(e.target.value, 10)));
@@ -2831,6 +3389,7 @@ window.addEventListener('resize', () => {
 
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (exportIsOpen && !isExporting) { closeExportModal(); return; }
     if (prefsIsOpen) { closePrefsModal(); return; }
     if (audioIsOpen) { closeAudioModal(); return; }
     if (drawIsOpen) { closeDrawModal(); return; }
