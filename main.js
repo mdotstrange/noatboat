@@ -1833,4 +1833,4 @@ function generateExportHtml(title, notesJson, css, js, isDark) {
   </script>
 </body>
 </html>`;
-}npm
+}
