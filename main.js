@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os'); // Added for temp file handling
 
 // Config file path for storing preferences (like last folder)
 const configPath = path.join(app.getPath('userData'), 'config.json');
@@ -604,15 +605,19 @@ function escapeHtml(str) {
 
 // Export to PDF using Electron's printToPDF
 ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark) => {
+  let tempPath = null;
+  let pdfWindow = null;
+  
   try {
     // Create a hidden window for rendering
-    const pdfWindow = new BrowserWindow({
+    pdfWindow = new BrowserWindow({
       width: 794,  // A4 at 96 DPI
       height: 1123,
       show: false,
       webPreferences: {
         nodeIntegration: false,
-        contextIsolation: true
+        contextIsolation: true,
+        backgroundThrottling: false // Important for background rendering
       }
     });
     
@@ -705,9 +710,13 @@ ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark) => {
 <body>${pagesHtml}</body>
 </html>`;
     
-    await pdfWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    // Write HTML to temp file to avoid URL length limits
+    tempPath = path.join(os.tmpdir(), `noatboat-pdf-${Date.now()}.html`);
+    fs.writeFileSync(tempPath, html);
     
-    // Wait for images to load
+    await pdfWindow.loadFile(tempPath);
+    
+    // Wait for images to load using a small buffer
     await new Promise(resolve => setTimeout(resolve, 1000));
     
     const pdfData = await pdfWindow.webContents.printToPDF({
@@ -717,25 +726,34 @@ ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark) => {
     });
     
     fs.writeFileSync(savePath, pdfData);
-    pdfWindow.close();
     
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };
+  } finally {
+    if (pdfWindow) pdfWindow.close();
+    if (tempPath) {
+      try { fs.unlinkSync(tempPath); } catch(e) {}
+    }
   }
 });
 
 // Export to PNG using Electron's capturePage
 ipcMain.handle('export-png', async (event, filePath, noteData, isDark) => {
+  let tempPath = null;
+  let pngWindow = null;
+  
   try {
     // Create a hidden window for rendering
-    const pngWindow = new BrowserWindow({
+    pngWindow = new BrowserWindow({
       width: 1200,
       height: 1600,
       show: false,
       webPreferences: {
         nodeIntegration: false,
-        contextIsolation: true
+        contextIsolation: true,
+        backgroundThrottling: false, // Vital for offscreen painting
+        offscreen: true // Encourages rendering even when hidden
       }
     });
     
@@ -824,18 +842,26 @@ ipcMain.handle('export-png', async (event, filePath, noteData, isDark) => {
 </body>
 </html>`;
     
-    await pngWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    // Write HTML to temp file
+    tempPath = path.join(os.tmpdir(), `noatboat-png-${Date.now()}.html`);
+    fs.writeFileSync(tempPath, html);
+    
+    await pngWindow.loadFile(tempPath);
     
     // Wait for images to load
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await new Promise(resolve => setTimeout(resolve, 800));
     
     const image = await pngWindow.webContents.capturePage();
     fs.writeFileSync(filePath, image.toPNG());
-    pngWindow.close();
     
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };
+  } finally {
+    if (pngWindow) pngWindow.close();
+    if (tempPath) {
+      try { fs.unlinkSync(tempPath); } catch(e) {}
+    }
   }
 });
 
@@ -895,10 +921,43 @@ h1 { font-size: 1.5em; margin-bottom: 0.5em; }
   border-radius: 8px;
 }
 .note-image { max-width: 100%; margin: 1em 0; border-radius: 8px; }
-audio { width: 100%; margin: 1em 0; }`;
+audio { width: 100%; margin: 1em 0; }
+.title-page {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  height: 90vh;
+  text-align: center;
+}
+.title-page h1 {
+  font-size: 3em;
+  margin: 0;
+  border: none;
+}
+`;
     
     addFile('OEBPS/styles.css', cssContent);
     manifestItems.push('<item id="css" href="styles.css" media-type="text/css"/>');
+
+    // --- Add Title Page (Folder Name) ---
+    const titlePageId = 'titlepage';
+    const titlePageFile = 'titlepage.xhtml';
+    const titleContent = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head>
+  <title>${escapeHtml(bookTitle)}</title>
+  <link rel="stylesheet" type="text/css" href="styles.css"/>
+</head>
+<body class="title-page">
+  <h1>${escapeHtml(bookTitle)}</h1>
+</body>
+</html>`;
+
+    addFile(`OEBPS/${titlePageFile}`, titleContent);
+    manifestItems.push(`<item id="${titlePageId}" href="${titlePageFile}" media-type="application/xhtml+xml"/>`);
+    spineItems.push(`<itemref idref="${titlePageId}"/>`);
     
     // Generate chapter files
     for (let i = 0; i < notesData.length; i++) {
@@ -965,7 +1024,7 @@ audio { width: 100%; margin: 1em 0; }`;
     }
     
     // Navigation document
-    let navItems = '';
+    let navItems = `<li><a href="${titlePageFile}">Title Page</a></li>\n`;
     for (let i = 0; i < notesData.length; i++) {
       navItems += `<li><a href="chapter${i}.xhtml">${escapeHtml(notesData[i].title)}</a></li>\n`;
     }
@@ -1774,4 +1833,4 @@ function generateExportHtml(title, notesJson, css, js, isDark) {
   </script>
 </body>
 </html>`;
-}
+}npm
