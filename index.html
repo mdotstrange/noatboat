@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Noat Boat</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9B%B3%3C/text%3E%3C/svg%3E">
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
+  <script src="./fabric.min.js"></script>
   <style>
     :root{
       --bg:#f2f2f2;
@@ -210,6 +210,28 @@
     .noteItem.active{
       background:var(--note-active-bg);
       border-color:var(--note-active-border);
+    }
+    .noteItem.folder{
+      background:var(--bg);
+      border-color:var(--border);
+    }
+    .noteItem.folder:hover{
+      background:var(--note-hover);
+      border-color:var(--note-active-border);
+    }
+    .noteItem.folder .noteTitle::before{
+      content:'📁 ';
+    }
+    .folderBreadcrumb{
+      padding:8px 10px;
+      font-size:12px;
+      color:var(--muted);
+      border-bottom:1px solid var(--border);
+      background:var(--bg);
+      font-family:var(--mono);
+      overflow:hidden;
+      text-overflow:ellipsis;
+      white-space:nowrap;
     }
     .noteTitle{
       font-size:13px;
@@ -653,6 +675,8 @@
   <div class="topbar">
     <input id="searchInput" class="search" placeholder="Search (title or text)" disabled />
     <button id="openBtn" class="btn primary" aria-label="Folder"><span class="ico" aria-hidden="true">📁</span></button>
+    <button id="backBtn" class="btn" style="display:none;" aria-label="Back to parent folder"><span class="ico" aria-hidden="true">⬅️</span></button>
+    <button id="newFolderBtn" class="btn" disabled aria-label="New folder"><span class="ico" aria-hidden="true">📂+</span></button>
     <button id="refreshBtn" class="btn" disabled aria-label="Refresh"><span class="ico" aria-hidden="true">⟳</span></button>
     <div class="gapWide"></div>
     <button id="newBtn" class="btn newTint" disabled aria-label="New note"><span class="ico" aria-hidden="true">📄</span></button>
@@ -670,6 +694,7 @@
 
   <div class="main">
     <div class="left">
+      <div id="folderBreadcrumb" class="folderBreadcrumb" style="display:none;"></div>
       <div class="list" id="list"></div>
       <div class="dimOverlay" id="dimOverlay"></div>
     </div>
@@ -830,6 +855,9 @@ const api = window.electronAPI;
 
 const els = {
   openBtn: document.getElementById('openBtn'),
+  backBtn: document.getElementById('backBtn'),
+  newFolderBtn: document.getElementById('newFolderBtn'),
+  folderBreadcrumb: document.getElementById('folderBreadcrumb'),
   searchInput: document.getElementById('searchInput'),
   newBtn: document.getElementById('newBtn'),
   fixBtn: document.getElementById('fixBtn'),
@@ -899,6 +927,8 @@ const els = {
 };
 
 let folderPath = null;
+let rootFolderPath = null;  // The main folder selected by user
+let subfolders = [];        // Subfolders in current directory
 let notes = [];
 let currentIndex = null;
 let saveTimer = null;
@@ -956,6 +986,7 @@ function hideBanner() {
 function setEnabled(enabled) {
   els.searchInput.disabled = !enabled;
   els.newBtn.disabled = !enabled;
+  els.newFolderBtn.disabled = !enabled;
   els.refreshBtn.disabled = !enabled;
 }
 
@@ -2109,23 +2140,63 @@ function renderList() {
     return;
   }
 
-  const filtered = notes
-    .map((n, idx) => ({n, idx}))
+  // Filter and sort notes
+  const filteredNotes = notes
+    .map((n, idx) => ({n, idx, isFolder: false}))
     .filter(({n}) => {
       if (!q) return true;
       return (n.title || '').toLowerCase().includes(q) || (n.content || '').toLowerCase().includes(q);
     })
     .sort((a,b) => (b.n.lastModified - a.n.lastModified) || a.n.title.localeCompare(b.n.title, undefined, {sensitivity:'base'}));
 
-  currentListOrder = filtered.map(x => x.idx);
+  // Filter folders (only show if no search query or folder name matches)
+  const filteredFolders = subfolders
+    .filter(f => {
+      if (!q) return true;
+      return f.name.toLowerCase().includes(q);
+    })
+    .sort((a,b) => a.name.localeCompare(b.name, undefined, {sensitivity:'base'}));
 
-  if (filtered.length === 0) {
+  currentListOrder = filteredNotes.map(x => x.idx);
+
+  if (filteredNotes.length === 0 && filteredFolders.length === 0) {
     els.list.innerHTML = '<div class="empty">No matches.</div>';
     return;
   }
 
   const frag = document.createDocumentFragment();
-  for (const {n, idx} of filtered) {
+  
+  // Render folders first
+  for (const folder of filteredFolders) {
+    const item = document.createElement('div');
+    item.className = 'noteItem folder';
+
+    const title = document.createElement('div');
+    title.className = 'noteTitle';
+    title.textContent = folder.name;
+
+    const meta = document.createElement('div');
+    meta.className = 'noteMeta';
+    meta.textContent = `${fmtDate(folder.lastModified)}  ·  folder`;
+
+    item.appendChild(title);
+    item.appendChild(meta);
+    
+    // Double-click to open folder
+    item.addEventListener('dblclick', () => {
+      openSubfolder(folder.path, folder.name);
+    });
+    // Single click just selects visually (optional feedback)
+    item.addEventListener('click', () => {
+      setListNav(true);
+      setFocusMode(false);
+    });
+    
+    frag.appendChild(item);
+  }
+  
+  // Render notes
+  for (const {n, idx} of filteredNotes) {
     const item = document.createElement('div');
     item.className = 'noteItem' + (idx === currentIndex ? ' active' : '');
 
@@ -2178,9 +2249,11 @@ async function openFolder() {
     const selectedPath = await api.openFolderDialog();
     if (!selectedPath) return;
     
+    rootFolderPath = selectedPath;
     folderPath = selectedPath;
     await api.saveFolderPath(folderPath);
     setEnabled(true);
+    updateFolderUI();
     await reloadNotes();
   } catch (err) {
     showBanner(`Could not open folder. ${String(err?.message || err)}`);
@@ -2188,9 +2261,97 @@ async function openFolder() {
 }
 
 async function loadFolderFromPath(path) {
+  rootFolderPath = path;
   folderPath = path;
   setEnabled(true);
+  updateFolderUI();
   await reloadNotes();
+}
+
+// Navigate into a subfolder
+async function openSubfolder(subPath, folderName) {
+  hideBanner();
+  try {
+    await flushSaveIfNeeded();
+    folderPath = subPath;
+    updateFolderUI();
+    await reloadNotes();
+  } catch (err) {
+    showBanner(`Could not open folder. ${String(err?.message || err)}`);
+  }
+}
+
+// Navigate back to root folder
+async function goBackToRoot() {
+  if (!rootFolderPath || folderPath === rootFolderPath) return;
+  
+  hideBanner();
+  try {
+    await flushSaveIfNeeded();
+    folderPath = rootFolderPath;
+    updateFolderUI();
+    await reloadNotes();
+  } catch (err) {
+    showBanner(`Could not navigate back. ${String(err?.message || err)}`);
+  }
+}
+
+// Update UI elements for folder navigation (back button, breadcrumb)
+function updateFolderUI() {
+  const isInSubfolder = rootFolderPath && folderPath && folderPath !== rootFolderPath;
+  
+  // Show/hide back button
+  els.backBtn.style.display = isInSubfolder ? '' : 'none';
+  
+  // Show/hide breadcrumb
+  if (isInSubfolder) {
+    // Get the subfolder name from the path
+    const subfolderName = api.basename(folderPath);
+    const rootName = api.basename(rootFolderPath);
+    els.folderBreadcrumb.textContent = `${rootName} / ${subfolderName}`;
+    els.folderBreadcrumb.style.display = 'block';
+  } else {
+    els.folderBreadcrumb.style.display = 'none';
+  }
+}
+
+// Create a new subfolder in the current folder
+async function newFolder() {
+  if (!folderPath) return;
+  
+  const raw = await api.showPrompt('New folder name:', '');
+  if (raw == null) return;
+
+  // Sanitize folder name (similar to note title sanitization)
+  let folderName = (raw || '').trim();
+  folderName = folderName.replace(/[\\\/:*?"<>|]/g, ' ');
+  folderName = folderName.replace(/\s+/g, ' ').trim();
+  if (folderName.length > 120) folderName = folderName.slice(0, 120).trim();
+  
+  if (!folderName) {
+    await api.showAlert('Folder name cannot be empty.');
+    return;
+  }
+
+  // Check if folder already exists
+  if (subfolders.some(f => f.name.toLowerCase() === folderName.toLowerCase())) {
+    await api.showAlert('A folder with that name already exists.');
+    return;
+  }
+
+  try {
+    const newFolderPath = api.joinPath(folderPath, folderName);
+    const result = await api.createFolder(newFolderPath);
+    if (!result.success) {
+      showBanner(`Could not create folder. ${result.error}`);
+      return;
+    }
+
+    // Reload to show the new folder
+    await reloadNotes();
+  } catch (err) {
+    showBanner(`Could not create folder. ${String(err?.message || err)}`);
+  }
 }
 
 async function reloadNotes(preserveName = null) {
@@ -2200,6 +2361,7 @@ async function reloadNotes(preserveName = null) {
   if (!preserveName && currentIndex != null && notes[currentIndex]) preserveName = notes[currentIndex].name;
 
   notes = [];
+  subfolders = [];
   currentIndex = null;
   renderCurrent();
 
@@ -2208,6 +2370,11 @@ async function reloadNotes(preserveName = null) {
     if (!result.success) {
       showBanner(`Could not read folder. ${result.error}`);
       return;
+    }
+
+    // Store subfolders - show at all levels for nested navigation
+    if (result.folders) {
+      subfolders = result.folders;
     }
 
     const attachments = new Map();
@@ -2533,6 +2700,8 @@ async function attachImage() {
 
 // Events
 els.openBtn.addEventListener('click', () => { setFocusMode(false); openFolder(); });
+els.backBtn.addEventListener('click', () => { setFocusMode(false); goBackToRoot(); });
+els.newFolderBtn.addEventListener('click', () => { setFocusMode(false); newFolder(); });
 els.newBtn.addEventListener('click', newNote);
 els.refreshBtn.addEventListener('click', refreshNotes);
 els.deleteBtn.addEventListener('click', deleteCurrent);

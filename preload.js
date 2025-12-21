@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   writeFile: (filePath, content) => ipcRenderer.invoke('write-file', filePath, content),
   deleteFile: (filePath) => ipcRenderer.invoke('delete-file', filePath),
   fileExists: (filePath) => ipcRenderer.invoke('file-exists', filePath),
+  createFolder: (folderPath) => ipcRenderer.invoke('create-folder', folderPath),
   
   // Image operations
   readImageBase64: (filePath) => ipcRenderer.invoke('read-image-base64', filePath),

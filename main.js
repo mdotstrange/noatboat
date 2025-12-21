@@ -219,21 +219,38 @@ ipcMain.handle('open-folder-dialog', async () => {
   return result.filePaths[0];
 });
 
-// Read all files from a folder
+// Read all files from a folder (now includes subdirectories)
 ipcMain.handle('read-folder', async (event, folderPath) => {
   try {
     const entries = fs.readdirSync(folderPath, { withFileTypes: true });
     const files = [];
+    const folders = [];
     
     for (const entry of entries) {
+      const fullPath = path.join(folderPath, entry.name);
+      
+      // Handle directories
+      if (entry.isDirectory()) {
+        // Skip hidden folders (starting with .)
+        if (entry.name.startsWith('.')) continue;
+        
+        const stats = fs.statSync(fullPath);
+        folders.push({
+          name: entry.name,
+          type: 'folder',
+          path: fullPath,
+          lastModified: stats.mtimeMs
+        });
+        continue;
+      }
+      
       if (!entry.isFile()) continue;
       
-      const filePath = path.join(folderPath, entry.name);
-      const stats = fs.statSync(filePath);
+      const stats = fs.statSync(fullPath);
       const lower = entry.name.toLowerCase();
       
       if (lower.endsWith('.txt')) {
-        const content = fs.readFileSync(filePath, 'utf8');
+        const content = fs.readFileSync(fullPath, 'utf8');
         files.push({
           name: entry.name,
           type: 'text',
@@ -265,7 +282,7 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
       }
     }
     
-    return { success: true, files: files };
+    return { success: true, files: files, folders: folders };
   } catch (e) {
     return { success: false, error: e.message };
   }
@@ -542,4 +559,17 @@ ipcMain.handle('show-alert', async (event, message) => {
     message: message
   });
   return true;
+});
+
+// Create a new folder
+ipcMain.handle('create-folder', async (event, folderPath) => {
+  try {
+    if (fs.existsSync(folderPath)) {
+      return { success: false, error: 'Folder already exists' };
+    }
+    fs.mkdirSync(folderPath, { recursive: true });
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
 });
