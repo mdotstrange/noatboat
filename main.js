@@ -605,10 +605,10 @@ function escapeHtml(str) {
 
 // Export to PDF using Electron's printToPDF
 // Export to PDF using Electron's printToPDF
-ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark, bookTitle) => {
+ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark) => {
   let tempPath = null;
   let pdfWindow = null;
-
+  
   try {
     // Create a hidden window for rendering
     pdfWindow = new BrowserWindow({
@@ -621,39 +621,20 @@ ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark, bookTitl
         backgroundThrottling: false // Important for background rendering
       }
     });
-
-    // Title (folder name)
-    let title = (bookTitle && String(bookTitle).trim()) ? String(bookTitle).trim() : '';
-    if (!title) {
-      const base = path.basename(savePath || '', path.extname(savePath || ''));
-      title = base.replace(/-notes$/i, '') || base || 'Notes';
-    }
-
+    
     // Generate HTML content for all notes
     const bgColor = isDark ? '#1a1a1a' : '#ffffff';
     const textColor = isDark ? '#e0e0e0' : '#111111';
     const mutedColor = isDark ? '#999999' : '#666666';
     const borderColor = isDark ? '#3a3a3a' : '#d9d9d9';
     const contentBg = isDark ? '#252525' : '#f5f5f5';
-
+    
     let pagesHtml = '';
-
-    // --- Title Page ---
-    const exportDate = new Date().toLocaleString();
-    pagesHtml += `
-      <div class="page title-page">
-        <div class="title-wrap">
-          <div class="title">${escapeHtml(title)}</div>
-          <div class="subtitle">${escapeHtml(exportDate)}</div>
-          <div class="subtitle">${escapeHtml(String(notesData?.length || 0))} notes</div>
-        </div>
-      </div>
-    `;
-
+    
     for (let i = 0; i < notesData.length; i++) {
       const note = notesData[i];
       const dateStr = note.lastModified ? new Date(note.lastModified).toLocaleString() : '';
-
+      
       // Text page
       pagesHtml += `
         <div class="page">
@@ -662,7 +643,7 @@ ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark, bookTitl
           <div class="content">${escapeHtml(note.content || '(empty)')}</div>
         </div>
       `;
-
+      
       // Image page if exists
       if (note.imageDataUrl) {
         pagesHtml += `
@@ -672,7 +653,7 @@ ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark, bookTitl
         `;
       }
     }
-
+    
     const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -693,27 +674,6 @@ ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark, bookTitl
       background: ${bgColor};
     }
     .page:last-child { page-break-after: auto; }
-    .title-page {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .title-wrap {
-      text-align: center;
-      width: 100%;
-    }
-    .title {
-      font-size: 40px;
-      font-family: ui-monospace, monospace;
-      margin-bottom: 14px;
-      word-break: break-word;
-    }
-    .subtitle {
-      font-size: 12px;
-      color: ${mutedColor};
-      font-family: ui-monospace, monospace;
-      margin-top: 8px;
-    }
     h1 {
       font-size: 24px;
       font-family: ui-monospace, monospace;
@@ -750,24 +710,24 @@ ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark, bookTitl
 </head>
 <body>${pagesHtml}</body>
 </html>`;
-
+    
     // Write HTML to temp file to avoid URL length limits
     tempPath = path.join(os.tmpdir(), `noatboat-pdf-${Date.now()}.html`);
     fs.writeFileSync(tempPath, html);
-
+    
     await pdfWindow.loadFile(tempPath);
-
+    
     // Wait for images to load using a small buffer
     await new Promise(resolve => setTimeout(resolve, 1000));
-
+    
     const pdfData = await pdfWindow.webContents.printToPDF({
       printBackground: true,
       pageSize: 'A4',
       margins: { top: 0, bottom: 0, left: 0, right: 0 }
     });
-
+    
     fs.writeFileSync(savePath, pdfData);
-
+    
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };

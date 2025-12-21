@@ -2136,7 +2136,7 @@ async function exportToPdf() {
     }
     
     showExportProgress('Writing PDF...');
-    const result = await api.exportPdf(savePath, notesData, currentTheme === 'dark', api.basename(folderPath));
+    const result = await api.exportPdf(savePath, notesData, currentTheme === 'dark');
     
     if (result.success) {
       await api.showAlert(`PDF exported successfully to:\n${savePath}`);
@@ -2829,14 +2829,15 @@ async function openSubfolder(subPath, folderName) {
   }
 }
 
-// Navigate back to root folder
-async function goBackToRoot() {
-  if (!rootFolderPath || folderPath === rootFolderPath) return;
+// Navigate up one level in the folder hierarchy
+async function navigateUp() {
+  if (!rootFolderPath || !folderPath || folderPath === rootFolderPath) return;
   
   hideBanner();
   try {
     await flushSaveIfNeeded();
-    folderPath = rootFolderPath;
+    // Go up one level using dirname
+    folderPath = api.dirname(folderPath);
     updateFolderUI();
     await reloadNotes();
   } catch (err) {
@@ -2853,10 +2854,16 @@ function updateFolderUI() {
   
   // Show/hide breadcrumb
   if (isInSubfolder) {
-    // Get the subfolder name from the path
-    const subfolderName = api.basename(folderPath);
+    // Build full breadcrumb showing path from root to current folder
     const rootName = api.basename(rootFolderPath);
-    els.folderBreadcrumb.textContent = `${rootName} / ${subfolderName}`;
+    let relativePath = folderPath.slice(rootFolderPath.length);
+    // Remove leading separator if present
+    if (relativePath.startsWith('/') || relativePath.startsWith('\\')) {
+      relativePath = relativePath.slice(1);
+    }
+    // Split path into segments
+    const segments = relativePath.split(/[/\\]/).filter(s => s.length > 0);
+    els.folderBreadcrumb.textContent = `${rootName} / ${segments.join(' / ')}`;
     els.folderBreadcrumb.style.display = 'block';
   } else {
     els.folderBreadcrumb.style.display = 'none';
@@ -3248,7 +3255,7 @@ async function attachImage() {
 
 // Events
 els.openBtn.addEventListener('click', () => { setFocusMode(false); openFolder(); });
-els.backBtn.addEventListener('click', () => { setFocusMode(false); goBackToRoot(); });
+els.backBtn.addEventListener('click', () => { setFocusMode(false); navigateUp(); });
 els.newFolderBtn.addEventListener('click', () => { setFocusMode(false); newFolder(); });
 els.newBtn.addEventListener('click', newNote);
 els.refreshBtn.addEventListener('click', refreshNotes);
