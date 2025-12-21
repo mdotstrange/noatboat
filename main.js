@@ -185,7 +185,8 @@ ipcMain.handle('get-preferences', async () => {
   return {
     theme: config.theme || 'light',
     focusStrength: config.focusStrength !== undefined ? config.focusStrength : 70,
-    autoFixEnabled: config.autoFixEnabled || false,
+    autoFixMode: config.autoFixMode || 'off',
+    autoFixEnabled: config.autoFixEnabled || false, // Legacy support
     autoFixProvider: config.autoFixProvider || 'openai',
     openAIKey: config.openAIKey || '',
     localModelPath: config.localModelPath || ''
@@ -197,7 +198,7 @@ ipcMain.handle('save-preferences', async (event, prefs) => {
   const config = loadConfig();
   if (prefs.theme !== undefined) config.theme = prefs.theme;
   if (prefs.focusStrength !== undefined) config.focusStrength = prefs.focusStrength;
-  if (prefs.autoFixEnabled !== undefined) config.autoFixEnabled = prefs.autoFixEnabled;
+  if (prefs.autoFixMode !== undefined) config.autoFixMode = prefs.autoFixMode;
   if (prefs.autoFixProvider !== undefined) config.autoFixProvider = prefs.autoFixProvider;
   if (prefs.openAIKey !== undefined) config.openAIKey = prefs.openAIKey;
   if (prefs.localModelPath !== undefined) config.localModelPath = prefs.localModelPath;

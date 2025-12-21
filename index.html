@@ -129,6 +129,21 @@
       background:#eaf8ef;
       color:#1e6b2a;
     }
+    .btn.fixing{
+      border-color:#f0c674;
+      background:#fef9e7;
+      color:#8a6d3b;
+      animation: pulse-fix 1s infinite;
+    }
+    @keyframes pulse-fix {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+    body.dark-mode .btn.fixing {
+      border-color:#f0c674;
+      background:#4a4020;
+      color:#f0c674;
+    }
     .spacer{ flex:1; }
     .gapBtn{ flex:0 0 96px; width:96px; }
     .gapWide{ width:96px; }
@@ -641,6 +656,7 @@
     <button id="refreshBtn" class="btn" disabled aria-label="Refresh"><span class="ico" aria-hidden="true">⟳</span></button>
     <div class="gapWide"></div>
     <button id="newBtn" class="btn newTint" disabled aria-label="New note"><span class="ico" aria-hidden="true">📄</span></button>
+    <button id="fixBtn" class="btn" disabled aria-label="Fix text" title="Fix spelling & grammar" style="display:none;"><span class="ico" aria-hidden="true">✨</span></button>
     <div class="gapBtn"></div>
     <button id="drawBtn" class="btn" disabled aria-label="Draw"><span class="ico" aria-hidden="true">✏️</span></button>
     <button id="attachBtn" class="btn" disabled aria-label="Attach image"><span class="ico" aria-hidden="true">🖼️</span></button>
@@ -758,12 +774,13 @@
           <div class="prefHint">Adjust how much the UI fades when editing a note</div>
         </div>
         <div class="prefItem">
-          <label class="prefLabel">Auto-Fix Typing</label>
+          <label class="prefLabel">Text Correction</label>
           <div class="prefControl">
             <button id="autoFixOffBtn" class="themeBtn active">Off</button>
-            <button id="autoFixOnBtn" class="themeBtn">On</button>
+            <button id="autoFixAutoBtn" class="themeBtn">Auto</button>
+            <button id="autoFixManualBtn" class="themeBtn">Manual</button>
           </div>
-          <div class="prefHint">Fix spelling and grammar as you type</div>
+          <div class="prefHint">Fix spelling and grammar (Auto: as you type, Manual: press button)</div>
         </div>
         <div class="prefItem" id="autoFixProviderItem" style="display:none;">
           <label class="prefLabel">Auto-Fix Provider</label>
@@ -815,6 +832,7 @@ const els = {
   openBtn: document.getElementById('openBtn'),
   searchInput: document.getElementById('searchInput'),
   newBtn: document.getElementById('newBtn'),
+  fixBtn: document.getElementById('fixBtn'),
   refreshBtn: document.getElementById('refreshBtn'),
   drawBtn: document.getElementById('drawBtn'),
   attachBtn: document.getElementById('attachBtn'),
@@ -854,7 +872,8 @@ const els = {
   focusStrengthSlider: document.getElementById('focusStrengthSlider'),
   focusStrengthValue: document.getElementById('focusStrengthValue'),
   autoFixOffBtn: document.getElementById('autoFixOffBtn'),
-  autoFixOnBtn: document.getElementById('autoFixOnBtn'),
+  autoFixAutoBtn: document.getElementById('autoFixAutoBtn'),
+  autoFixManualBtn: document.getElementById('autoFixManualBtn'),
   autoFixProviderItem: document.getElementById('autoFixProviderItem'),
   providerOpenAIBtn: document.getElementById('providerOpenAIBtn'),
   providerLocalBtn: document.getElementById('providerLocalBtn'),
@@ -946,6 +965,7 @@ function setEditorEnabled(enabled) {
   els.attachBtn.disabled = !enabled;
   els.drawBtn.disabled = !enabled;
   els.audioBtn.disabled = !enabled;
+  els.fixBtn.disabled = !enabled;
 }
 
 function fmtDate(ts) {
@@ -1774,7 +1794,7 @@ async function deleteAudioFile() {
 let prefsIsOpen = false;
 let currentTheme = 'light';
 let currentFocusStrength = 70;
-let autoFixEnabled = false;
+let autoFixMode = 'off'; // 'off', 'auto', or 'manual'
 let autoFixProvider = 'openai'; // 'openai' or 'local'
 let openAIKey = '';
 let localModelPath = '';
@@ -1802,22 +1822,27 @@ function updatePrefsUI() {
   els.themeDarkBtn.classList.toggle('active', currentTheme === 'dark');
   els.focusStrengthSlider.value = currentFocusStrength;
   els.focusStrengthValue.textContent = `${currentFocusStrength}%`;
-  els.autoFixOffBtn.classList.toggle('active', !autoFixEnabled);
-  els.autoFixOnBtn.classList.toggle('active', autoFixEnabled);
+  els.autoFixOffBtn.classList.toggle('active', autoFixMode === 'off');
+  els.autoFixAutoBtn.classList.toggle('active', autoFixMode === 'auto');
+  els.autoFixManualBtn.classList.toggle('active', autoFixMode === 'manual');
   
-  // Show provider selection when auto-fix is enabled
-  els.autoFixProviderItem.style.display = autoFixEnabled ? 'flex' : 'none';
+  // Show provider selection when auto-fix is enabled (auto or manual mode)
+  const fixEnabled = autoFixMode !== 'off';
+  els.autoFixProviderItem.style.display = fixEnabled ? 'flex' : 'none';
   els.providerOpenAIBtn.classList.toggle('active', autoFixProvider === 'openai');
   els.providerLocalBtn.classList.toggle('active', autoFixProvider === 'local');
   
   // Show OpenAI key field when using OpenAI
-  els.openAIKeyItem.style.display = (autoFixEnabled && autoFixProvider === 'openai') ? 'flex' : 'none';
+  els.openAIKeyItem.style.display = (fixEnabled && autoFixProvider === 'openai') ? 'flex' : 'none';
   els.openAIKeyInput.value = openAIKey;
   
   // Show local model fields when using local LLM
-  els.localModelItem.style.display = (autoFixEnabled && autoFixProvider === 'local') ? 'flex' : 'none';
-  els.localModelStatusItem.style.display = (autoFixEnabled && autoFixProvider === 'local') ? 'flex' : 'none';
+  els.localModelItem.style.display = (fixEnabled && autoFixProvider === 'local') ? 'flex' : 'none';
+  els.localModelStatusItem.style.display = (fixEnabled && autoFixProvider === 'local') ? 'flex' : 'none';
   els.localModelPath.value = localModelPath || '';
+  
+  // Show/hide manual fix button
+  els.fixBtn.style.display = (autoFixMode === 'manual') ? '' : 'none';
 }
 
 function applyTheme(theme) {
@@ -1827,16 +1852,20 @@ function applyTheme(theme) {
   updatePrefsUI();
 }
 
-function applyFocusStrength(strength) {
+function applyFocusStrength(strength) 
+{
   currentFocusStrength = strength;
   document.documentElement.style.setProperty('--focus-strength', (strength / 100).toFixed(2));
   els.focusStrengthValue.textContent = `${strength}%`;
   api.savePreferences({ focusStrength: strength });
 }
 
-function setAutoFixEnabled(enabled) {
-  autoFixEnabled = enabled;
-  api.savePreferences({ autoFixEnabled: enabled });
+function setAutoFixMode(mode) 
+{
+  autoFixMode = mode;
+  api.savePreferences({ autoFixMode: mode });
+  // Show/hide manual fix button
+  els.fixBtn.style.display = (mode === 'manual') ? '' : 'none';
   updatePrefsUI();
 }
 
@@ -1861,9 +1890,12 @@ async function browseForModel() {
   }
 }
 
-// Auto-fix text using OpenAI API or Local LLM
-async function autoFixText() {
-  if (!autoFixEnabled || isAutoFixing) return;
+// Fix text using OpenAI API or Local LLM
+// isManual = true bypasses the mode check (for manual button press)
+async function fixText(isManual = false) {
+  // For auto mode, only run if auto mode is enabled
+  if (!isManual && autoFixMode !== 'auto') return;
+  if (isAutoFixing) return;
   if (autoFixProvider === 'openai' && !openAIKey) return;
   if (autoFixProvider === 'local' && !localModelPath) return;
   if (currentIndex == null || !notes[currentIndex]) return;
@@ -1876,10 +1908,15 @@ async function autoFixText() {
   const originalSaveState = els.saveState.textContent;
   els.saveState.textContent = 'fixing...';
   
+  // Add visual feedback for manual fix button
+  if (isManual) {
+    els.fixBtn.classList.add('fixing');
+  }
+  
   try {
     let fixedText;
     
-    console.log('Auto-fix starting, provider:', autoFixProvider);
+    console.log('Fix starting, provider:', autoFixProvider, 'manual:', isManual);
     
     if (autoFixProvider === 'openai') {
       fixedText = await fixTextWithOpenAI(text);
@@ -1887,7 +1924,7 @@ async function autoFixText() {
       fixedText = await fixTextWithLocalLLM(text);
     }
     
-    console.log('Auto-fix result:', fixedText ? 'got response' : 'no response');
+    console.log('Fix result:', fixedText ? 'got response' : 'no response');
     
     if (fixedText && fixedText.trim() !== text.trim()) {
       // Preserve cursor position as best we can
@@ -1925,7 +1962,7 @@ async function autoFixText() {
       }, 2000);
     }
   } catch (err) {
-    console.error('Auto-fix error:', err);
+    console.error('Fix error:', err);
     els.saveState.textContent = 'fix error';
     setTimeout(() => {
       if (els.saveState.textContent === 'fix error') {
@@ -1934,6 +1971,7 @@ async function autoFixText() {
     }, 2000);
   } finally {
     isAutoFixing = false;
+    els.fixBtn.classList.remove('fixing');
   }
 }
 
@@ -2015,13 +2053,20 @@ async function updateLocalModelStatus() {
 }
 
 function scheduleAutoFix() {
-  if (!autoFixEnabled) return;
+  // Only schedule auto-fix in auto mode
+  if (autoFixMode !== 'auto') return;
   // Check if we have the required config for the selected provider
   if (autoFixProvider === 'openai' && !openAIKey) return;
   if (autoFixProvider === 'local' && !localModelPath) return;
   
   if (autoFixTimer) clearTimeout(autoFixTimer);
-  autoFixTimer = setTimeout(() => autoFixText(), AUTO_FIX_DEBOUNCE_MS);
+  autoFixTimer = setTimeout(() => fixText(false), AUTO_FIX_DEBOUNCE_MS);
+}
+
+// Manual fix triggered by button
+function manualFix() {
+  if (autoFixMode !== 'manual') return;
+  fixText(true);
 }
 
 async function loadPreferences() {
@@ -2029,12 +2074,22 @@ async function loadPreferences() {
     const prefs = await api.getPreferences();
     currentTheme = prefs.theme || 'light';
     currentFocusStrength = prefs.focusStrength !== undefined ? prefs.focusStrength : 70;
-    autoFixEnabled = prefs.autoFixEnabled || false;
+    // Handle legacy autoFixEnabled boolean -> convert to mode
+    if (prefs.autoFixMode) {
+      autoFixMode = prefs.autoFixMode;
+    } else if (prefs.autoFixEnabled) {
+      autoFixMode = 'auto'; // Legacy: true -> auto mode
+    } else {
+      autoFixMode = 'off';
+    }
     autoFixProvider = prefs.autoFixProvider || 'openai';
     openAIKey = prefs.openAIKey || '';
     localModelPath = prefs.localModelPath || '';
     document.body.classList.toggle('dark-mode', currentTheme === 'dark');
     document.documentElement.style.setProperty('--focus-strength', (currentFocusStrength / 100).toFixed(2));
+    
+    // Show/hide manual fix button based on mode
+    els.fixBtn.style.display = (autoFixMode === 'manual') ? '' : 'none';
     
     // Check model status if local LLM is configured
     if (localModelPath) {
@@ -2515,13 +2570,15 @@ els.prefsModal.addEventListener('mousedown', (e) => { if (e.target === els.prefs
 els.themeLightBtn.addEventListener('click', () => applyTheme('light'));
 els.themeDarkBtn.addEventListener('click', () => applyTheme('dark'));
 els.focusStrengthSlider.addEventListener('input', (e) => applyFocusStrength(parseInt(e.target.value, 10)));
-els.autoFixOffBtn.addEventListener('click', () => setAutoFixEnabled(false));
-els.autoFixOnBtn.addEventListener('click', () => setAutoFixEnabled(true));
+els.autoFixOffBtn.addEventListener('click', () => setAutoFixMode('off'));
+els.autoFixAutoBtn.addEventListener('click', () => setAutoFixMode('auto'));
+els.autoFixManualBtn.addEventListener('click', () => setAutoFixMode('manual'));
 els.providerOpenAIBtn.addEventListener('click', () => setAutoFixProvider('openai'));
 els.providerLocalBtn.addEventListener('click', () => setAutoFixProvider('local'));
 els.openAIKeyInput.addEventListener('change', (e) => saveOpenAIKey(e.target.value));
 els.openAIKeyInput.addEventListener('blur', (e) => saveOpenAIKey(e.target.value));
 els.browseModelBtn.addEventListener('click', () => browseForModel());
+els.fixBtn.addEventListener('click', () => manualFix());
 
 // Listen for menu open-preferences event
 api.onOpenPreferences(() => openPrefsModal());
