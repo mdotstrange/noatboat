@@ -610,6 +610,34 @@ ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark) => {
   let pdfWindow = null;
   
   try {
+    // Helper function to convert image to JPEG at 75% quality
+    function convertToJpeg(dataUrl) {
+      try {
+        // Create native image from data URL
+        const img = nativeImage.createFromDataURL(dataUrl);
+        if (img.isEmpty()) return null;
+        
+        // Convert to JPEG at 75% quality
+        const jpegBuffer = img.toJPEG(75);
+        const base64 = jpegBuffer.toString('base64');
+        return `data:image/jpeg;base64,${base64}`;
+      } catch (e) {
+        console.error('Failed to convert image to JPEG:', e);
+        return null;
+      }
+    }
+    
+    // Convert all images to JPEG for smaller file size
+    const optimizedNotesData = notesData.map(note => {
+      if (note.imageDataUrl && note.imageDataUrl.startsWith('data:image/')) {
+        const converted = convertToJpeg(note.imageDataUrl);
+        if (converted) {
+          return { ...note, imageDataUrl: converted };
+        }
+      }
+      return note;
+    });
+    
     // Create a hidden window for rendering
     pdfWindow = new BrowserWindow({
       width: 794,  // A4 at 96 DPI
@@ -631,8 +659,8 @@ ipcMain.handle('export-pdf', async (event, savePath, notesData, isDark) => {
     
     let pagesHtml = '';
     
-    for (let i = 0; i < notesData.length; i++) {
-      const note = notesData[i];
+    for (let i = 0; i < optimizedNotesData.length; i++) {
+      const note = optimizedNotesData[i];
       const dateStr = note.lastModified ? new Date(note.lastModified).toLocaleString() : '';
       
       // Text page
@@ -935,6 +963,23 @@ ipcMain.handle('export-epub', async (event, savePath, bookTitle, notesData, isDa
   try {
     const zlib = require('zlib');
     
+    // Helper function to convert image to JPEG at 75% quality
+    function convertToJpeg(dataUrl) {
+      try {
+        // Create native image from data URL
+        const img = nativeImage.createFromDataURL(dataUrl);
+        if (img.isEmpty()) return null;
+        
+        // Convert to JPEG at 75% quality
+        const jpegBuffer = img.toJPEG(75);
+        const base64 = jpegBuffer.toString('base64');
+        return `data:image/jpeg;base64,${base64}`;
+      } catch (e) {
+        console.error('Failed to convert image to JPEG:', e);
+        return null;
+      }
+    }
+    
     // Simple ZIP file creator using raw buffers
     const files = [];
     
@@ -1033,17 +1078,25 @@ audio { width: 100%; margin: 1em 0; }
       let imageTag = '';
       let audioTag = '';
       
-      // Handle image
+      // Handle image - convert to JPEG for smaller file size
       if (note.imageDataUrl) {
-        const match = note.imageDataUrl.match(/^data:image\/(\w+);base64,(.+)$/);
+        let imageDataToUse = note.imageDataUrl;
+        
+        // Convert to JPEG if it's an image
+        if (imageDataToUse.startsWith('data:image/')) {
+          const converted = convertToJpeg(imageDataToUse);
+          if (converted) {
+            imageDataToUse = converted;
+          }
+        }
+        
+        const match = imageDataToUse.match(/^data:image\/(\w+);base64,(.+)$/);
         if (match) {
-          const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
-          const imgFileName = `img${i}.${ext}`;
+          const imgFileName = `img${i}.jpg`;
           const imgBuffer = Buffer.from(match[2], 'base64');
           addFile(`OEBPS/images/${imgFileName}`, imgBuffer);
           
-          const mimeType = `image/${match[1]}`;
-          manifestItems.push(`<item id="img${i}" href="images/${imgFileName}" media-type="${mimeType}"/>`);
+          manifestItems.push(`<item id="img${i}" href="images/${imgFileName}" media-type="image/jpeg"/>`);
           imageTag = `<p><img class="note-image" src="images/${imgFileName}" alt="${escapeHtml(note.title)}"/></p>`;
         }
       }
