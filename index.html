@@ -2085,6 +2085,11 @@ async function exportToPdf() {
   showExportProgress('Preparing PDF export...');
   
   try {
+    // Save current note before exporting to ensure latest content
+    if (currentIndex != null && notes[currentIndex] && els.editor) {
+      notes[currentIndex].content = els.editor.value;
+    }
+    
     // Ask user where to save
     const savePath = await api.showSaveDialog({
       title: 'Export as PDF',
@@ -2159,6 +2164,11 @@ async function exportToPng() {
   showExportProgress('Preparing PNG export...');
   
   try {
+    // Save current note before exporting to ensure latest content
+    if (currentIndex != null && notes[currentIndex] && els.editor) {
+      notes[currentIndex].content = els.editor.value;
+    }
+    
     // Ask user to select folder
     const saveDir = await api.openFolderDialog();
     if (!saveDir) {
@@ -2221,6 +2231,11 @@ async function exportToEpub() {
   showExportProgress('Preparing EPUB export...');
   
   try {
+    // Save current note before exporting to ensure latest content
+    if (currentIndex != null && notes[currentIndex] && els.editor) {
+      notes[currentIndex].content = els.editor.value;
+    }
+    
     // Ask user where to save
     const savePath = await api.showSaveDialog({
       title: 'Export as EPUB',
@@ -2307,6 +2322,11 @@ async function exportToHtml() {
   showExportProgress('Preparing HTML export...');
   
   try {
+    // Save current note before exporting to ensure latest content
+    if (currentIndex != null && notes[currentIndex] && els.editor) {
+      notes[currentIndex].content = els.editor.value;
+    }
+    
     // Ask user to select destination folder
     const saveDir = await api.openFolderDialog();
     if (!saveDir) {
