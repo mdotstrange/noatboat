@@ -1265,22 +1265,56 @@ function getCrc32Table() {
 // Export to HTML
 ipcMain.handle('export-html', async (event, saveDir, bookTitle, notesData, assets, isDark) => {
   try {
+    // Helper function to convert image to JPEG at 75% quality
+    function convertToJpeg(dataUrl) {
+      try {
+        // Create native image from data URL
+        const img = nativeImage.createFromDataURL(dataUrl);
+        if (img.isEmpty()) return null;
+        
+        // Convert to JPEG at 75% quality
+        const jpegBuffer = img.toJPEG(75);
+        const base64 = jpegBuffer.toString('base64');
+        return `data:image/jpeg;base64,${base64}`;
+      } catch (e) {
+        console.error('Failed to convert image to JPEG:', e);
+        return null;
+      }
+    }
+    
     // Create assets folder
     const assetsDir = path.join(saveDir, 'assets');
     if (!fs.existsSync(assetsDir)) {
       fs.mkdirSync(assetsDir, { recursive: true });
     }
     
-    // Write assets
+    // Map to track renamed assets (oldName -> newName)
+    const assetNameMap = {};
+    
+    // Write assets (convert images to JPEG)
     for (const asset of assets) {
-      const match = asset.dataUrl.match(/^data:[^;]+;base64,(.+)$/);
+      let dataUrlToWrite = asset.dataUrl;
+      let nameToWrite = asset.name;
+      
+      // Check if this is an image (not audio)
+      if (asset.dataUrl.startsWith('data:image/')) {
+        const convertedDataUrl = convertToJpeg(asset.dataUrl);
+        if (convertedDataUrl) {
+          dataUrlToWrite = convertedDataUrl;
+          // Change extension to .jpg
+          nameToWrite = asset.name.replace(/\.(png|jpg|jpeg|gif|webp)$/i, '.jpg');
+          assetNameMap[asset.name] = nameToWrite;
+        }
+      }
+      
+      const match = dataUrlToWrite.match(/^data:[^;]+;base64,(.+)$/);
       if (match) {
         const buffer = Buffer.from(match[1], 'base64');
-        fs.writeFileSync(path.join(assetsDir, asset.name), buffer);
+        fs.writeFileSync(path.join(assetsDir, nameToWrite), buffer);
       }
     }
     
-    // Generate notes JSON for the app
+    // Generate notes JSON for the app (use mapped names)
     const notesJson = notesData.map(n => ({
       id: n.id,
       title: n.title,
@@ -1288,8 +1322,8 @@ ipcMain.handle('export-html', async (event, saveDir, bookTitle, notesData, asset
       content: n.content,
       lastModified: n.lastModified,
       canvasJson: n.canvasJson || null,
-      canvasImage: n.canvasImage ? `assets/${n.canvasImage}` : null,
-      image: n.image ? `assets/${n.image}` : null,
+      canvasImage: n.canvasImage ? `assets/${assetNameMap[n.canvasImage] || n.canvasImage}` : null,
+      image: n.image ? `assets/${assetNameMap[n.image] || n.image}` : null,
       audio: n.audio ? `assets/${n.audio}` : null
     }));
     
