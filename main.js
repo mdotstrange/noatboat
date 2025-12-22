@@ -1304,12 +1304,6 @@ ipcMain.handle('export-html', async (event, saveDir, bookTitle, notesData, asset
     
     fs.writeFileSync(path.join(saveDir, 'index.html'), htmlContent);
     
-    // Copy fabric.min.js if it exists
-    const fabricPath = path.join(__dirname, 'fabric.min.js');
-    if (fs.existsSync(fabricPath)) {
-      fs.copyFileSync(fabricPath, path.join(saveDir, 'fabric.min.js'));
-    }
-    
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };
@@ -1854,7 +1848,7 @@ function generateExportHtml(title, notesJson, css, js, isDark) {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>${escapeHtml(title)} - Noat Boat Export</title>
-  <script src="fabric.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
   <style>${css}</style>
 </head>
 <body class="${isDark ? 'dark' : ''}">
