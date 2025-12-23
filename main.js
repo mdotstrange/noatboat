@@ -6,6 +6,11 @@ const os = require('os'); // Added for temp file handling
 // Config file path for storing preferences (like last folder)
 const configPath = path.join(app.getPath('userData'), 'config.json');
 
+// Local LLM support
+let llamaModule = null;
+let currentModel = null;
+let currentModelPath = null;
+
 let mainWindow;
 
 function loadConfig() {
@@ -161,6 +166,21 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
+  }
+});
+
+app.on('before-quit', async () => {
+  // Clean up local LLM model
+  if (currentModel) {
+    try {
+      // Session doesn't need explicit disposal
+      if (currentModel.context) await currentModel.context.dispose();
+      if (currentModel.model) await currentModel.model.dispose();
+    } catch (e) {
+      console.error('Error disposing model on quit:', e);
+    }
+    currentModel = null;
+    currentModelPath = null;
   }
 });
 
@@ -422,6 +442,227 @@ ipcMain.handle('open-audio-dialog', async () => {
     };
   } catch (e) {
     return null;
+  }
+});
+
+// Open file picker for GGUF model files
+ipcMain.handle('open-model-dialog', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters: [
+      { name: 'GGUF Models', extensions: ['gguf'] },
+      { name: 'All Files', extensions: ['*'] }
+    ]
+  });
+  
+  if (result.canceled || result.filePaths.length === 0) {
+    return null;
+  }
+  
+  return result.filePaths[0];
+});
+
+// Run local LLM inference
+ipcMain.handle('run-local-llm', async (event, modelPath, text) => {
+  try {
+    console.log('run-local-llm called with modelPath:', modelPath);
+    console.log('Text length:', text.length);
+    
+    if (!modelPath || !fs.existsSync(modelPath)) {
+      console.error('Model file not found:', modelPath);
+      return { success: false, error: 'Model file not found' };
+    }
+    
+    // Lazy load the llama module using dynamic import (ESM)
+    if (!llamaModule) {
+      try {
+        console.log('Loading node-llama-cpp module...');
+        llamaModule = await import('node-llama-cpp');
+        console.log('node-llama-cpp loaded successfully');
+      } catch (e) {
+        console.error('Failed to load node-llama-cpp:', e);
+        return { success: false, error: 'Failed to load node-llama-cpp: ' + e.message };
+      }
+    }
+    
+    // Load model if not already loaded or if path changed
+    if (!currentModel || currentModelPath !== modelPath) {
+      console.log('Loading model from:', modelPath);
+      try {
+        // Dispose old model if exists
+        if (currentModel) {
+          try {
+            if (currentModel.session) {
+              console.log('Disposing old session...');
+              // Session doesn't need explicit disposal
+            }
+            if (currentModel.context) {
+              console.log('Disposing old context...');
+              await currentModel.context.dispose();
+            }
+            if (currentModel.model) {
+              console.log('Disposing old model...');
+              await currentModel.model.dispose();
+            }
+          } catch (e) {
+            console.error('Error disposing old model:', e);
+          }
+          currentModel = null;
+        }
+        
+        // Load new model using v3 API
+        console.log('Getting llama instance...');
+        const { getLlama, LlamaChatSession } = llamaModule;
+        const llama = await getLlama();
+        console.log('Loading model...');
+        const model = await llama.loadModel({ modelPath });
+        
+        // Use smaller context for better compatibility with large models
+        const contextSize = 2048; // Reduced from 4096
+        console.log('Creating context with size:', contextSize);
+        const context = await model.createContext({ contextSize });
+        console.log('Creating chat session...');
+        const session = new LlamaChatSession({
+          contextSequence: context.getSequence()
+        });
+        
+        currentModel = { llama, model, context, session };
+        currentModelPath = modelPath;
+        console.log('Model, context, and session loaded successfully');
+      } catch (e) {
+        console.error('Failed to load model:', e);
+        console.error('Error stack:', e.stack);
+        currentModel = null;
+        currentModelPath = null;
+        return { success: false, error: 'Failed to load model: ' + e.message };
+      }
+    }
+    
+    // Run inference with timeout
+    try {
+      console.log('Starting inference...');
+      
+      // Very strict prompt that only allows minimal corrections
+      const prompt = `Fix ONLY spelling mistakes and obvious grammar errors. Do NOT rewrite, rephrase, or restructure the text. Keep everything else exactly the same including:
+- Line breaks and paragraph structure
+- Punctuation (commas, periods, quotes, etc.)
+- Word order and sentence structure
+- Informal language, slang, and profanity
+- Capitalization (unless clearly wrong)
+
+Rules:
+- Only fix misspelled/scrambled words (e.g., "teh" → "the", "recieve" → "receive")
+- Only fix basic grammar (e.g., "I is" → "I am", "they was" → "they were")
+- Do NOT add or remove quotation marks
+- Do NOT merge or split sentences
+- Do NOT change informal to formal language
+- Do NOT rewrite for clarity or style
+- Make as few changes as possible
+
+Text to correct:
+${text}
+
+Corrected text:`;
+      
+      console.log('Calling session.prompt...');
+      
+      // Add timeout to prevent hanging (60 seconds)
+      const timeoutMs = 60000;
+      const inferencePromise = currentModel.session.prompt(prompt, {
+        maxTokens: Math.min(Math.ceil(text.length * 1.5), 2048),
+        temperature: 0.05, // Lower temperature for more conservative corrections
+        topP: 0.9
+      });
+      
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Inference timeout after 60 seconds')), timeoutMs);
+      });
+      
+      const response = await Promise.race([inferencePromise, timeoutPromise]);
+      
+      console.log('Inference complete');
+      console.log('Response length:', response.length);
+      console.log('Response preview:', response.substring(0, 100));
+      
+      // Clean up the response - remove common model artifacts
+      let cleanedResponse = response.trim();
+      
+      // Remove common prefixes models might add
+      const unwantedPrefixes = [
+        'Corrected text:',
+        'Here is the corrected text:',
+        'Here\'s the corrected text:',
+        'The corrected text is:',
+        'Corrected:'
+      ];
+      
+      for (const prefix of unwantedPrefixes) {
+        if (cleanedResponse.toLowerCase().startsWith(prefix.toLowerCase())) {
+          cleanedResponse = cleanedResponse.substring(prefix.length).trim();
+        }
+      }
+      
+      // Remove wrapping quotes if model added them
+      if ((cleanedResponse.startsWith('"') && cleanedResponse.endsWith('"')) ||
+          (cleanedResponse.startsWith("'") && cleanedResponse.endsWith("'"))) {
+        const withoutQuotes = cleanedResponse.slice(1, -1);
+        // Only remove if it doesn't drastically change the text structure
+        if (withoutQuotes.split('\n').length === cleanedResponse.split('\n').length) {
+          cleanedResponse = withoutQuotes;
+        }
+      }
+      
+      // Validate the response isn't too different from input
+      const originalLines = text.split('\n').length;
+      const responseLines = cleanedResponse.split('\n').length;
+      const originalLength = text.length;
+      const responseLength = cleanedResponse.length;
+      
+      // Reject if too many lines were added/removed (more than 2)
+      if (Math.abs(originalLines - responseLines) > 2) {
+        console.warn('Response has different line count:', originalLines, 'vs', responseLines);
+        console.warn('Rejecting response - too much structural change');
+        return { success: false, error: 'Model changed text structure too much. Try a smaller model or simpler text.' };
+      }
+      
+      // Reject if response is drastically shorter (more than 30% shorter suggests deletion)
+      if (responseLength < originalLength * 0.7) {
+        console.warn('Response is too short:', responseLength, 'vs', originalLength);
+        console.warn('Rejecting response - too much content deleted');
+        return { success: false, error: 'Model deleted too much text. Try a smaller model.' };
+      }
+      
+      // Reject if response is way longer (more than 50% longer suggests addition/rewriting)
+      if (responseLength > originalLength * 1.5) {
+        console.warn('Response is too long:', responseLength, 'vs', originalLength);
+        console.warn('Rejecting response - too much content added');
+        return { success: false, error: 'Model added too much text. Try a smaller model.' };
+      }
+      
+      return { success: true, text: cleanedResponse };
+    } catch (e) {
+      console.error('Inference error:', e);
+      console.error('Error stack:', e.stack);
+      
+      // On error, dispose and reset the session so next attempt works
+      try {
+        console.log('Cleaning up after error...');
+        if (currentModel) {
+          if (currentModel.context) await currentModel.context.dispose();
+          if (currentModel.model) await currentModel.model.dispose();
+          currentModel = null;
+          currentModelPath = null;
+        }
+      } catch (cleanupErr) {
+        console.error('Error during cleanup:', cleanupErr);
+      }
+      
+      return { success: false, error: 'Inference failed: ' + e.message };
+    }
+  } catch (e) {
+    console.error('run-local-llm error:', e);
+    console.error('Error stack:', e.stack);
+    return { success: false, error: String(e.message || e) };
   }
 });
 
