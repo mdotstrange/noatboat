@@ -2921,11 +2921,30 @@ function generateNoteHtml(noteData, isDark) {
       function initCanvas() {
         var container = document.getElementById('canvasContainer');
         var rect = container.getBoundingClientRect();
+        
+        // Get original aspect ratio from canvas JSON
+        var originalWidth = 1200;
+        var originalHeight = 1600;
+        if (canvasJson && canvasJson.width && canvasJson.height) {
+          originalWidth = canvasJson.width;
+          originalHeight = canvasJson.height;
+        }
+        var aspectRatio = originalWidth / originalHeight;
+        
+        // Calculate canvas size maintaining original aspect ratio
         if (rect.width > 0 && rect.height > 0) {
-          // Use container dimensions scaled up for higher resolution
           var scale = 2; // 2x for crisp rendering
-          CANVAS_WIDTH = Math.round(rect.width * scale);
-          CANVAS_HEIGHT = Math.round(rect.height * scale);
+          var containerAspect = rect.width / rect.height;
+          
+          if (containerAspect > aspectRatio) {
+            // Container is wider - fit to height
+            CANVAS_HEIGHT = Math.round(rect.height * scale);
+            CANVAS_WIDTH = Math.round(CANVAS_HEIGHT * aspectRatio);
+          } else {
+            // Container is taller - fit to width
+            CANVAS_WIDTH = Math.round(rect.width * scale);
+            CANVAS_HEIGHT = Math.round(CANVAS_WIDTH / aspectRatio);
+          }
         }
         
         fabricCanvas = new fabric.Canvas('fabricCanvas', { 
