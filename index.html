@@ -2542,7 +2542,14 @@ function generateRootIndexHtml(noteLinks, isDark) {
   const borderColor = isDark ? '#3a3a3a' : '#d9d9d9';
   const linkColor = isDark ? '#6ba3ff' : '#0066cc';
   
-  const boatArt = '   .  o ..                  \\n     o . o o.o                \\n          ...oo               \\n            __[]__            \\n         __|_o_o_o\\\\__         \\n         \\\\""""""""""\\"/         \\n          \\\\. ..  . /          \\n     ^^^^^^^^^^^^^^^^^^^^';
+  const boatArt = `   .  o ..                  
+     o . o o.o                
+          ...oo               
+            __[]__            
+         __|_o_o_o\\\\__         
+         \\\\"""""""""\\"/         
+          \\\\. ..  . /          
+     ^^^^^^^^^^^^^^^^^^^^`;
   
   return `<!DOCTYPE html>
 <html lang="en">
@@ -2584,7 +2591,7 @@ function generateRootIndexHtml(noteLinks, isDark) {
 <body>
   <div class="container">
     <div class="header">
-      <div class="boat-container" id="asciiBoat">${boatArt}</div>
+      <pre class="boat-container" id="asciiBoat">${boatArt}</pre>
       <h1>Noat Boat</h1>
       <p class="subtitle">Published Notes</p>
     </div>
@@ -2597,31 +2604,160 @@ function generateRootIndexHtml(noteLinks, isDark) {
     (function() {
       var boatEl = document.getElementById('asciiBoat');
       if (!boatEl) return;
-      var base = boatEl.textContent;
+      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+
+      var base = boatEl.textContent.replace(/\\r/g, '');
       var lines = base.split('\\n');
       var wavePattern = '^_^^^-^^_^^^^-^^^-^';
+
       var runsByLine = lines.map(function(line) {
-        var runs = [], re = /\\^+/g, m;
-        while ((m = re.exec(line)) !== null) runs.push({ start: m.index, len: m[0].length });
+        var runs = [];
+        var re = /\\^+/g;
+        var m;
+        while ((m = re.exec(line)) !== null) {
+          runs.push({ start: m.index, len: m[0].length });
+        }
         return runs;
       });
+
+      var stackRow = lines.findIndex(function(l) { return l.indexOf('[]') !== -1; });
+      var stackCol = stackRow >= 0 ? lines[stackRow].indexOf('[') : 0;
+      var smokeRowCount = 3;
+      var maxSmokeWidth = 18;
+      var smokeWidth = Math.min(maxSmokeWidth, Math.max(8, stackCol));
+      var smokeRows = [];
+      var smokeStart = Math.max(0, Math.min(Math.max(0, stackCol - 1), stackCol - smokeWidth + 3));
+
+      function extractRegion(line, start, len) {
+        var s = String(line || '').padEnd ? String(line || '').padEnd(start + len, ' ') : String(line || '') + Array(start + len).join(' ');
+        return s.slice(start, start + len);
+      }
+
+      function overlay(line, start, text) {
+        var need = start + text.length;
+        var padded = String(line || '').padEnd ? String(line || '').padEnd(need, ' ') : String(line || '') + Array(need).join(' ');
+        var chars = padded.split('');
+        for (var i = 0; i < text.length; i++) chars[start + i] = text[i];
+        return chars.join('');
+      }
+
+      function clearFromCol(line, col) {
+        var chars = String(line || '').split('');
+        for (var i = col; i < chars.length; i++) {
+          if (chars[i] === 'o' || chars[i] === '.') chars[i] = ' ';
+        }
+        return chars.join('');
+      }
+
+      var seed = 123456789;
+      function rand() {
+        seed = (seed * 1664525 + 1013904223) >>> 0;
+        return seed / 4294967296;
+      }
+
+      function driftAndFadeRow(row) {
+        var shifted = row.slice(1) + ' ';
+        var chars = shifted.split('');
+        for (var i = 0; i < chars.length; i++) {
+          var c = chars[i];
+          if (c === 'o' && rand() < 0.30) chars[i] = '.';
+          else if (c === '.' && rand() < 0.22) chars[i] = ' ';
+        }
+        return chars.join('');
+      }
+
+      function makeSeedRow() {
+        var chars = Array(smokeWidth).fill ? Array(smokeWidth).fill(' ') : [];
+        if (!chars.fill) for (var i = 0; i < smokeWidth; i++) chars.push(' ');
+        var origin = Math.max(0, smokeWidth - 3);
+        var count = 3 + Math.floor(rand() * 4);
+        for (var i = 0; i < count; i++) {
+          var driftLeft = Math.floor(rand() * 10);
+          var pos = Math.max(0, origin - driftLeft);
+          var far = (origin - pos) >= 5;
+          chars[pos] = rand() < (far ? 0.20 : 0.55) ? 'o' : '.';
+        }
+        if (rand() < 0.55) {
+          var pos = Math.max(0, origin - (8 + Math.floor(rand() * 8)));
+          if (pos < smokeWidth && chars[pos] === ' ') chars[pos] = '.';
+        }
+        if (rand() < 0.30) {
+          var pos = Math.max(0, origin - (10 + Math.floor(rand() * 6)));
+          if (pos < smokeWidth && chars[pos] === ' ') chars[pos] = '.';
+        }
+        return chars.join('');
+      }
+
+      var smokeBuf = [];
+      if (stackRow >= 0) {
+        for (var r = Math.max(0, stackRow - smokeRowCount); r < stackRow; r++) {
+          smokeRows.push(r);
+        }
+        smokeBuf = smokeRows.map(function(r) { return extractRegion(lines[r], smokeStart, smokeWidth); });
+
+        for (var j = 0; j < smokeRows.length; j++) {
+          var row = smokeRows[j];
+          var line = String(lines[row] || '');
+          var chars = smokeBuf[j].split('');
+          var insertPos = smokeWidth - 1;
+          for (var c = stackCol; c < line.length; c++) {
+            var ch = line[c];
+            if (ch === 'o' || ch === '.') {
+              while (insertPos >= 0 && chars[insertPos] === 'o') insertPos--;
+              if (insertPos >= 0) { chars[insertPos] = ch; insertPos--; }
+            }
+          }
+          smokeBuf[j] = chars.join('');
+        }
+      }
+
       var offset = 0;
+      var smokeTick = 0;
+      var intervalMs = 140;
+
       setInterval(function() {
         offset = (offset + 1) % wavePattern.length;
+        smokeTick++;
+
+        if (smokeRows.length) {
+          smokeBuf = smokeBuf.map(driftAndFadeRow);
+          if (smokeTick % 2 === 0) {
+            smokeBuf = smokeBuf.slice(1).concat([makeSeedRow()]);
+          }
+        }
+
         var out = lines.map(function(line, i) {
           var runs = runsByLine[i];
           if (!runs || runs.length === 0) return line;
           var chars = line.split('');
           for (var j = 0; j < runs.length; j++) {
-            var r = runs[j], need = r.len, seq = '';
-            for (var x = 0; x < 5; x++) seq += wavePattern;
+            var r = runs[j];
+            var need = r.len;
+            var repeatCount = Math.ceil((need + offset) / wavePattern.length) + 2;
+            var seq = '';
+            for (var x = 0; x < repeatCount; x++) seq += wavePattern;
             seq = seq.slice(offset, offset + need);
             for (var k = 0; k < need; k++) chars[r.start + k] = seq[k];
           }
           return chars.join('');
         });
+
+        if (smokeRows.length && stackCol > 0) {
+          for (var j = 0; j < smokeRows.length; j++) {
+            var row = smokeRows[j];
+            out[row] = clearFromCol(out[row], stackCol);
+          }
+        }
+
+        if (smokeRows.length) {
+          for (var j = 0; j < smokeRows.length; j++) {
+            var row = smokeRows[j];
+            out[row] = overlay(out[row], smokeStart, smokeBuf[j]);
+          }
+        }
+
         boatEl.textContent = out.join('\\n');
-      }, 140);
+      }, intervalMs);
     })();
   <\/script>
 </body>
@@ -2636,21 +2772,23 @@ function addNoteToRootIndex(html, noteTitle, noteDirName, lastModified) {
         <div class="note-meta">${dateStr}</div>
       </a>`;
   
-  // Check if this note already exists in the index (update it)
+  // Check if this note already exists in the index (update it in place)
   const existingLinkRegex = new RegExp(`<a href="\\.\\/${noteDirName}\\/index\\.html"[^>]*class="note-link"[\\s\\S]*?<\\/a>`, 'g');
   if (existingLinkRegex.test(html)) {
     return html.replace(existingLinkRegex, newLink);
   }
   
-  // Try placeholder first
-  if (html.includes('<!-- NOTE_LINKS_PLACEHOLDER -->')) {
-    return html.replace('<!-- NOTE_LINKS_PLACEHOLDER -->', newLink + '\n      <!-- NOTE_LINKS_PLACEHOLDER -->');
+  // Insert at the top (right after the opening of notes-list div)
+  // Look for the notes-list div and insert after its opening tag
+  const notesListMatch = html.match(/<div class="notes-list" id="notesList">\s*/);
+  if (notesListMatch) {
+    const insertPos = notesListMatch.index + notesListMatch[0].length;
+    return html.slice(0, insertPos) + '\n      ' + newLink + html.slice(insertPos);
   }
   
-  // Fallback: insert before closing </div> of notes-list
-  const notesListEnd = html.indexOf('</div>', html.indexOf('id="notesList"'));
-  if (notesListEnd > 0) {
-    return html.slice(0, notesListEnd) + newLink + '\n    ' + html.slice(notesListEnd);
+  // Fallback: Try placeholder (insert right after placeholder for backwards compatibility)
+  if (html.includes('<!-- NOTE_LINKS_PLACEHOLDER -->')) {
+    return html.replace('<!-- NOTE_LINKS_PLACEHOLDER -->', newLink + '\n      <!-- NOTE_LINKS_PLACEHOLDER -->');
   }
   
   // Last resort: insert before </body>
@@ -2701,9 +2839,8 @@ function generateNoteHtml(noteData, isDark) {
     .canvas-toolbar { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid ${borderColor}; background: ${panelColor}; flex-shrink: 0; }
     .btn { padding: 5px 10px; border: 1px solid ${borderColor}; background: ${panelColor}; border-radius: 6px; cursor: pointer; font-size: 12px; color: ${textColor}; }
     .btn.active { background: ${activeBg}; border-color: ${activeBorder}; }
-    #canvasContainer { flex: 1; position: relative; overflow: hidden; min-height: 0; }
-    #canvasContainer canvas { display: block; }
-    #canvasContainer .canvas-container { position: absolute !important; }
+    #canvasContainer { flex: 1; position: relative; overflow: hidden; min-height: 0; display: flex; align-items: center; justify-content: center; }
+    .canvas-wrapper { transform-origin: center center; display: inline-block; }
     .audio-player { padding: 10px; border-top: 1px solid ${borderColor}; display: ${hasAudio ? 'block' : 'none'}; flex-shrink: 0; }
     .audio-player audio { width: 100%; }
     @media (max-width: 768px) { .main { flex-direction: column; } .editor-pane, .canvas-pane { flex: none; height: 45vh; } }
@@ -2725,7 +2862,9 @@ function generateNoteHtml(noteData, isDark) {
         <button id="drawBtn" class="btn">Draw</button>
       </div>
       <div id="canvasContainer">
-        <canvas id="fabricCanvas"></canvas>
+        <div class="canvas-wrapper" id="canvasWrapper">
+          <canvas id="fabricCanvas"></canvas>
+        </div>
       </div>
       <div class="audio-player"><audio controls loop src="${noteData.audio || ''}"></audio></div>
     </div>
@@ -2737,6 +2876,7 @@ function generateNoteHtml(noteData, isDark) {
       var canvasImage = ${canvasImageStr};
       var fallbackImage = ${fallbackImageStr};
       var fabricCanvas = null, saveTimer = null;
+      var originalW = 600, originalH = 800; // defaults
       var editor = document.getElementById('editor');
       var saveStatus = document.getElementById('saveStatus');
       
@@ -2750,60 +2890,36 @@ function generateNoteHtml(noteData, isDark) {
       }
       editor.addEventListener('input', function() { saveStatus.textContent = 'modified'; scheduleSave(); });
       
-      function fitCanvasViewport(padding = 24) {
-        if (!fabricCanvas) return;
-
-        var objects = fabricCanvas.getObjects();
-        if (!objects || objects.length === 0) {
-          fabricCanvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
-          fabricCanvas.requestRenderAll();
-          return;
-        }
-
-        // Compute overall bounds in canvas coords (include transforms)
-        var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        objects.forEach(function(obj) {
-          var r = obj.getBoundingRect(true, true);
-          minX = Math.min(minX, r.left);
-          minY = Math.min(minY, r.top);
-          maxX = Math.max(maxX, r.left + r.width);
-          maxY = Math.max(maxY, r.top + r.height);
-        });
-
-        var contentW = Math.max(1, maxX - minX);
-        var contentH = Math.max(1, maxY - minY);
-
-        var cw = fabricCanvas.getWidth();
-        var ch = fabricCanvas.getHeight();
-
-        var availW = Math.max(1, cw - padding * 2);
-        var availH = Math.max(1, ch - padding * 2);
-
-        var scale = Math.min(availW / contentW, availH / contentH);
-
-        // Center content
-        var contentCx = minX + contentW / 2;
-        var contentCy = minY + contentH / 2;
-        var tx = (cw / 2) - (contentCx * scale);
-        var ty = (ch / 2) - (contentCy * scale);
-
-        fabricCanvas.setViewportTransform([scale, 0, 0, scale, tx, ty]);
-        fabricCanvas.requestRenderAll();
+      function scaleCanvasToFit() {
+        var container = document.getElementById('canvasContainer');
+        var wrapper = document.getElementById('canvasWrapper');
+        var rect = container.getBoundingClientRect();
+        var containerW = rect.width - 20;
+        var containerH = rect.height - 20;
+        
+        if (containerW <= 0 || containerH <= 0) return;
+        
+        var scaleX = containerW / originalW;
+        var scaleY = containerH / originalH;
+        var scale = Math.min(scaleX, scaleY, 1); // never scale up beyond 1
+        
+        wrapper.style.transform = 'scale(' + scale + ')';
       }
       
       function initCanvas() {
-        var container = document.getElementById('canvasContainer');
-        var rect = container.getBoundingClientRect();
-        var width = Math.max(Math.floor(rect.width), 400);
-        var height = Math.max(Math.floor(rect.height), 300);
+        // Get original dimensions from JSON if available
+        if (canvasJson) {
+          originalW = canvasJson.width || 600;
+          originalH = canvasJson.height || 800;
+        }
         
         var el = document.getElementById('fabricCanvas');
-        el.width = width;
-        el.height = height;
+        el.width = originalW;
+        el.height = originalH;
         
         fabricCanvas = new fabric.Canvas('fabricCanvas', { 
-          width: width, 
-          height: height, 
+          width: originalW, 
+          height: originalH, 
           backgroundColor: null 
         });
         fabricCanvas.freeDrawingBrush.width = 3;
@@ -2811,8 +2927,8 @@ function generateNoteHtml(noteData, isDark) {
         
         if (canvasJson) {
           fabricCanvas.loadFromJSON(canvasJson, function() {
-            fitCanvasViewport();
             fabricCanvas.renderAll();
+            scaleCanvasToFit();
           });
         } else if (canvasImage || fallbackImage) {
           fabric.Image.fromURL(canvasImage || fallbackImage, function(img) {
@@ -2820,8 +2936,10 @@ function generateNoteHtml(noteData, isDark) {
             img.set({ left: 0, top: 0, selectable: true });
             fabricCanvas.add(img);
             fabricCanvas.renderAll();
-            fitCanvasViewport();
+            scaleCanvasToFit();
           }, null, { crossOrigin: 'anonymous' });
+        } else {
+          scaleCanvasToFit();
         }
       }
       
@@ -2843,13 +2961,7 @@ function generateNoteHtml(noteData, isDark) {
       setTimeout(initCanvas, 150);
       
       window.addEventListener('resize', function() {
-        if (!fabricCanvas) return;
-        var container = document.getElementById('canvasContainer');
-        var rect = container.getBoundingClientRect();
-        if (rect.width > 0 && rect.height > 0) {
-          fabricCanvas.setDimensions({ width: rect.width, height: rect.height });
-          fitCanvasViewport();
-        }
+        scaleCanvasToFit();
       });
     })();
   <\/script>
