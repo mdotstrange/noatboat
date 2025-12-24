@@ -954,7 +954,7 @@
           </div>
           <div class="exportOption" id="exportHtmlBtn">
             <div class="exportOptionTitle">🌐 HTML Website</div>
-            <div class="exportOptionDesc">Export as a standalone interactive HTML version</div>
+            <div class="exportOptionDesc">Export current note as a standalone HTML page with assets</div>
           </div>
           <div class="exportOption" id="publishGithubBtn" style="border-color:var(--note-active-border);background:var(--note-active-bg);">
             <div class="exportOptionTitle">🚀 Publish Noat to GitHub</div>
@@ -2346,14 +2346,21 @@ async function exportToEpub() {
 // Export as HTML
 async function exportToHtml() {
   if (isExporting) return;
+  
+  if (currentIndex == null || !notes[currentIndex]) {
+    await api.showAlert('No note selected.\n\nPlease select a note to export.');
+    return;
+  }
+  
   isExporting = true;
   showExportProgress('Preparing HTML export...');
   
   try {
+    const n = notes[currentIndex];
+    
     // Save current note before exporting to ensure latest content
-    if (currentIndex != null && notes[currentIndex] && els.editor) {
-      notes[currentIndex].content = els.editor.value;
-    }
+    if (els.editor) n.content = els.editor.value;
+    if (canvasDirty && fabricCanvas) await saveCanvasState();
     
     // Ask user to select destination folder
     const saveDir = await api.openFolderDialog();
@@ -2365,78 +2372,80 @@ async function exportToHtml() {
     
     showExportProgress('Collecting note data...');
     
-    // Collect all note data including assets
-    const notesData = [];
-    const assets = [];
+    const noteData = {
+      id: n.title,
+      title: n.title,
+      content: n.content || '',
+      lastModified: n.lastModified
+    };
     
-    for (let i = 0; i < notes.length; i++) {
-      showExportProgress(`Processing note ${i + 1}/${notes.length}...`);
-      const n = notes[i];
-      const noteData = {
-        id: i,
-        title: n.title,
-        name: n.name,
-        content: n.content || '',
-        lastModified: n.lastModified
-      };
-      
-      // Get canvas JSON and image if exists
-      if (n.canvas?.jsonPath) {
-        try {
-          const jsonResult = await api.readCanvasJson(n.canvas.jsonPath);
-          if (jsonResult.success && jsonResult.data) {
-            noteData.canvasJson = jsonResult.data;
-          }
-          const pngPath = n.canvas.pngPath;
-          const exists = await api.fileExists(pngPath);
-          if (exists) {
-            const imgResult = await api.readImageBase64(pngPath);
-            if (imgResult.success) {
-              const assetName = `${n.title.replace(/[<>:"/\\|?*]/g, '_')}.canvas.png`;
-              assets.push({ name: assetName, dataUrl: imgResult.dataUrl });
-              noteData.canvasImage = assetName;
-            }
-          }
-        } catch (_e) {}
-      } else if (n.image?.path) {
-        try {
-          const imgResult = await api.readImageBase64(n.image.path);
+    // Create assets folder
+    const assetsDir = api.joinPath(saveDir, 'assets');
+    await api.createFolder(assetsDir);
+    
+    // Get canvas JSON and image if exists
+    if (n.canvas?.jsonPath) {
+      try {
+        const jsonResult = await api.readCanvasJson(n.canvas.jsonPath);
+        if (jsonResult.success && jsonResult.data) {
+          noteData.canvasJson = jsonResult.data;
+        }
+        const pngPath = n.canvas.pngPath;
+        if (await api.fileExists(pngPath)) {
+          const imgResult = await api.readImageBase64(pngPath);
           if (imgResult.success) {
-            const ext = api.extname(n.image.name).slice(1) || 'png';
-            const assetName = `${n.title.replace(/[<>:"/\\|?*]/g, '_')}.${ext}`;
-            assets.push({ name: assetName, dataUrl: imgResult.dataUrl });
-            noteData.image = assetName;
+            showExportProgress('Saving canvas image...');
+            const assetPath = api.joinPath(assetsDir, 'canvas.png');
+            await api.writeImageBuffer(assetPath, imgResult.dataUrl.split(',')[1]);
+            noteData.canvasImage = 'assets/canvas.png';
           }
-        } catch (_e) {}
-      }
-      
-      // Get audio data if exists
-      if (n.audio?.path) {
-        try {
-          const audioResult = await api.readAudioBase64(n.audio.path);
-          if (audioResult.success) {
-            const ext = api.extname(n.audio.name).slice(1) || 'mp3';
-            const assetName = `${n.title.replace(/[<>:"/\\|?*]/g, '_')}.${ext}`;
-            assets.push({ name: assetName, dataUrl: audioResult.dataUrl });
-            noteData.audio = assetName;
-          }
-        } catch (_e) {}
-      }
-      
-      notesData.push(noteData);
+        }
+      } catch (_e) {}
+    } else if (n.image?.path) {
+      try {
+        const imgResult = await api.readImageBase64(n.image.path);
+        if (imgResult.success) {
+          showExportProgress('Saving image...');
+          const ext = api.extname(n.image.name).slice(1) || 'png';
+          const assetPath = api.joinPath(assetsDir, `image.${ext}`);
+          await api.writeImageBuffer(assetPath, imgResult.dataUrl.split(',')[1]);
+          noteData.image = `assets/image.${ext}`;
+        }
+      } catch (_e) {}
     }
     
-    showExportProgress('Writing HTML files...');
-    const bookTitle = api.basename(folderPath);
-    const result = await api.exportHtml(saveDir, bookTitle, notesData, assets, currentTheme === 'dark');
-    
-    if (result.success) {
-      await api.showAlert(`HTML exported successfully to:\n${saveDir}`);
-    } else {
-      showBanner(`HTML export failed: ${result.error}`);
+    // Get audio data if exists
+    if (n.audio?.path) {
+      try {
+        const audioResult = await api.readAudioBase64(n.audio.path);
+        if (audioResult.success) {
+          showExportProgress('Saving audio...');
+          const ext = api.extname(n.audio.name).slice(1) || 'mp3';
+          const assetPath = api.joinPath(assetsDir, `audio.${ext}`);
+          await api.writeAudioBuffer(assetPath, audioResult.dataUrl.split(',')[1]);
+          noteData.audio = `assets/audio.${ext}`;
+        }
+      } catch (_e) {}
     }
+    
+    showExportProgress('Generating HTML page...');
+    const noteHtml = generateNoteHtml(noteData, currentTheme === 'dark');
+    
+    // Modify the HTML to remove the back button since this is a standalone export
+    const modifiedHtml = noteHtml.replace(
+      /<a href="\.\.\/index\.html" class="back-btn">Back<\/a>/,
+      '<div class="back-btn" style="visibility:hidden;">Back</div>'
+    );
+    
+    showExportProgress('Writing files...');
+    const indexPath = api.joinPath(saveDir, 'index.html');
+    await api.writeFile(indexPath, modifiedHtml);
+    
+    await api.showAlert(`HTML exported successfully to:\n${saveDir}\n\nOpen index.html to view your note.`);
+    
   } catch (err) {
     showBanner(`HTML export failed: ${String(err?.message || err)}`);
+    await api.showAlert(`Export failed:\n${String(err?.message || err)}`);
   } finally {
     hideExportProgress();
     isExporting = false;
