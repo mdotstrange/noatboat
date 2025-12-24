@@ -2875,8 +2875,6 @@ function generateNoteHtml(noteData, isDark) {
       var canvasImage = ${canvasImageStr};
       var fallbackImage = ${fallbackImageStr};
       var fabricCanvas = null, saveTimer = null;
-      var CANVAS_WIDTH = 1200;
-      var CANVAS_HEIGHT = 1600;
       
       var editor = document.getElementById('editor');
       var saveStatus = document.getElementById('saveStatus');
@@ -2891,65 +2889,97 @@ function generateNoteHtml(noteData, isDark) {
       }
       editor.addEventListener('input', function() { saveStatus.textContent = 'modified'; scheduleSave(); });
       
-      function resizeFabricCanvas() {
+      function fitCanvasViewport(padding) {
+        padding = padding || 24;
         if (!fabricCanvas) return;
-        var container = document.getElementById('canvasContainer');
-        var rect = container.getBoundingClientRect();
-        if (rect.width <= 0 || rect.height <= 0) return;
-        
-        // Scale canvas to fit container exactly
-        var scaleX = rect.width / CANVAS_WIDTH;
-        var scaleY = rect.height / CANVAS_HEIGHT;
-        var scale = Math.min(scaleX, scaleY);
-        
-        // Apply CSS transform to scale the canvas
-        var canvasWrapper = fabricCanvas.wrapperEl;
-        if (canvasWrapper) {
-          canvasWrapper.style.transformOrigin = 'top left';
-          canvasWrapper.style.transform = 'scale(' + scale + ')';
-          
-          // Center the canvas if there's extra space
-          var scaledWidth = CANVAS_WIDTH * scale;
-          var scaledHeight = CANVAS_HEIGHT * scale;
-          var offsetX = (rect.width - scaledWidth) / 2;
-          var offsetY = (rect.height - scaledHeight) / 2;
-          canvasWrapper.style.marginLeft = offsetX + 'px';
-          canvasWrapper.style.marginTop = offsetY + 'px';
+
+        var objects = fabricCanvas.getObjects();
+        if (!objects || objects.length === 0) {
+          fabricCanvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+          fabricCanvas.requestRenderAll();
+          return;
         }
+
+        // Compute overall bounds in canvas coords
+        var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (var i = 0; i < objects.length; i++) {
+          var r = objects[i].getBoundingRect(true, true);
+          minX = Math.min(minX, r.left);
+          minY = Math.min(minY, r.top);
+          maxX = Math.max(maxX, r.left + r.width);
+          maxY = Math.max(maxY, r.top + r.height);
+        }
+
+        var contentW = Math.max(1, maxX - minX);
+        var contentH = Math.max(1, maxY - minY);
+
+        var cw = fabricCanvas.getWidth();
+        var ch = fabricCanvas.getHeight();
+
+        var availW = Math.max(1, cw - padding * 2);
+        var availH = Math.max(1, ch - padding * 2);
+
+        var scale = Math.min(availW / contentW, availH / contentH);
+
+        // Center content
+        var contentCx = minX + contentW / 2;
+        var contentCy = minY + contentH / 2;
+        var tx = (cw / 2) - (contentCx * scale);
+        var ty = (ch / 2) - (contentCy * scale);
+
+        fabricCanvas.setViewportTransform([scale, 0, 0, scale, tx, ty]);
+        fabricCanvas.requestRenderAll();
       }
       
       function initCanvas() {
-        // Use exact original dimensions from canvas JSON
-        if (canvasJson && canvasJson.width && canvasJson.height) {
-          CANVAS_WIDTH = canvasJson.width;
-          CANVAS_HEIGHT = canvasJson.height;
-        }
+        var container = document.getElementById('canvasContainer');
+        var rect = container.getBoundingClientRect();
         
-        fabricCanvas = new fabric.Canvas('fabricCanvas', { 
-          width: CANVAS_WIDTH, 
-          height: CANVAS_HEIGHT, 
+        var width = Math.max(Math.floor(rect.width), 400);
+        var height = Math.max(Math.floor(rect.height), 300);
+        
+        fabricCanvas = new fabric.Canvas('fabricCanvas', {
+          width: width,
+          height: height,
           backgroundColor: null,
           selection: true,
           preserveObjectStacking: true
         });
+        
         fabricCanvas.freeDrawingBrush.width = 3;
         fabricCanvas.freeDrawingBrush.color = '#000000';
         
         if (canvasJson) {
           fabricCanvas.loadFromJSON(canvasJson, function() {
+            fitCanvasViewport();
             fabricCanvas.renderAll();
-            resizeFabricCanvas();
           });
         } else if (canvasImage || fallbackImage) {
           fabric.Image.fromURL(canvasImage || fallbackImage, function(img) {
             if (!img) return;
-            img.set({ left: 0, top: 0, selectable: true });
+            
+            var canvasWidth = fabricCanvas.width;
+            var canvasHeight = fabricCanvas.height;
+            
+            // Scale image to fit within canvas with padding
+            var maxWidth = canvasWidth * 0.9;
+            var maxHeight = canvasHeight * 0.9;
+            
+            var scale = 1;
+            if (img.width > maxWidth || img.height > maxHeight) {
+              scale = Math.min(maxWidth / img.width, maxHeight / img.height);
+            }
+            
+            img.scale(scale);
+            img.set({
+              left: (canvasWidth - img.getScaledWidth()) / 2,
+              top: (canvasHeight - img.getScaledHeight()) / 2,
+              selectable: true
+            });
+            
             fabricCanvas.add(img);
             fabricCanvas.renderAll();
-            resizeFabricCanvas();
           }, null, { crossOrigin: 'anonymous' });
-        } else {
-          resizeFabricCanvas();
         }
       }
       
@@ -2971,7 +3001,13 @@ function generateNoteHtml(noteData, isDark) {
       setTimeout(initCanvas, 150);
       
       window.addEventListener('resize', function() {
-        resizeFabricCanvas();
+        if (!fabricCanvas) return;
+        var container = document.getElementById('canvasContainer');
+        var rect = container.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          fabricCanvas.setDimensions({ width: rect.width, height: rect.height });
+          fitCanvasViewport();
+        }
       });
     })();
   <\/script>
