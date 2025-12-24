@@ -210,7 +210,9 @@ ipcMain.handle('get-preferences', async () => {
     autoFixEnabled: config.autoFixEnabled || false, // Legacy support
     autoFixProvider: config.autoFixProvider || 'openai',
     openAIKey: config.openAIKey || '',
-    localModelPath: config.localModelPath || ''
+    localModelPath: config.localModelPath || '',
+    githubToken: config.githubToken || '',
+    githubRepo: config.githubRepo || ''
   };
 });
 
@@ -223,6 +225,8 @@ ipcMain.handle('save-preferences', async (event, prefs) => {
   if (prefs.autoFixProvider !== undefined) config.autoFixProvider = prefs.autoFixProvider;
   if (prefs.openAIKey !== undefined) config.openAIKey = prefs.openAIKey;
   if (prefs.localModelPath !== undefined) config.localModelPath = prefs.localModelPath;
+  if (prefs.githubToken !== undefined) config.githubToken = prefs.githubToken;
+  if (prefs.githubRepo !== undefined) config.githubRepo = prefs.githubRepo;
   saveConfig(config);
   return true;
 });
@@ -1659,6 +1663,12 @@ function generateExportCss(isDark) {
       height: 100vh;
       overflow: hidden;
     }
+    /* ADDED: General image scaling rule */
+    img {
+      max-width: 100%;
+      height: auto;
+      display: block;
+    }
     .topbar {
       display: flex;
       gap: 10px;
@@ -1820,10 +1830,10 @@ function generateExportCss(isDark) {
       min-height: 0;
     }
     .canvasContainer canvas { display: block; }
+    /* FIXED: Removed aggressive !important rules that caused aspect ratio distortion */
     .canvasContainer .canvas-container { 
       position: absolute !important;
-      width: 100% !important;
-      height: 100% !important;
+      /* width and height removed to let Fabric.js handle scaling */
     }
     .audioPlayer {
       padding: 10px;
@@ -1966,7 +1976,7 @@ function generateExportJs() {
         try {
           fabricCanvas.loadFromJSON(n.canvasJson, () => {
             // Scale content to fit
-            scaleCanvasContent();
+            fitCanvasViewport();
             fabricCanvas.renderAll();
           });
         } catch (e) {
@@ -2009,60 +2019,47 @@ function generateExportJs() {
       }, null, { crossOrigin: 'anonymous' });
     }
     
-    function scaleCanvasContent() {
+    function fitCanvasViewport(padding = 24) {
       if (!fabricCanvas) return;
-      
+
       const objects = fabricCanvas.getObjects();
-      if (objects.length === 0) return;
-      
-      // Get bounding box of all objects
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      
-      objects.forEach(obj => {
-        const bound = obj.getBoundingRect();
-        minX = Math.min(minX, bound.left);
-        minY = Math.min(minY, bound.top);
-        maxX = Math.max(maxX, bound.left + bound.width);
-        maxY = Math.max(maxY, bound.top + bound.height);
-      });
-      
-      const contentWidth = maxX - minX;
-      const contentHeight = maxY - minY;
-      
-      if (contentWidth <= 0 || contentHeight <= 0) return;
-      
-      const canvasWidth = fabricCanvas.width;
-      const canvasHeight = fabricCanvas.height;
-      
-      // Check if content is larger than canvas
-      if (contentWidth > canvasWidth * 0.95 || contentHeight > canvasHeight * 0.95) {
-        const scale = Math.min(
-          (canvasWidth * 0.85) / contentWidth,
-          (canvasHeight * 0.85) / contentHeight
-        );
-        
-        // Scale all objects
-        const centerX = canvasWidth / 2;
-        const centerY = canvasHeight / 2;
-        const contentCenterX = minX + contentWidth / 2;
-        const contentCenterY = minY + contentHeight / 2;
-        
-        objects.forEach(obj => {
-          const objCenterX = obj.left + (obj.width * obj.scaleX) / 2;
-          const objCenterY = obj.top + (obj.height * obj.scaleY) / 2;
-          
-          const newCenterX = centerX + (objCenterX - contentCenterX) * scale;
-          const newCenterY = centerY + (objCenterY - contentCenterY) * scale;
-          
-          obj.scaleX *= scale;
-          obj.scaleY *= scale;
-          obj.left = newCenterX - (obj.width * obj.scaleX) / 2;
-          obj.top = newCenterY - (obj.height * obj.scaleY) / 2;
-          obj.setCoords();
-        });
+      if (!objects || objects.length === 0) {
+        fabricCanvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+        fabricCanvas.requestRenderAll();
+        return;
       }
+
+      // Compute overall bounds in canvas coords (include transforms)
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      objects.forEach(obj => {
+        const r = obj.getBoundingRect(true, true);
+        minX = Math.min(minX, r.left);
+        minY = Math.min(minY, r.top);
+        maxX = Math.max(maxX, r.left + r.width);
+        maxY = Math.max(maxY, r.top + r.height);
+      });
+
+      const contentW = Math.max(1, maxX - minX);
+      const contentH = Math.max(1, maxY - minY);
+
+      const cw = fabricCanvas.getWidth();
+      const ch = fabricCanvas.getHeight();
+
+      const availW = Math.max(1, cw - padding * 2);
+      const availH = Math.max(1, ch - padding * 2);
+
+      const scale = Math.min(availW / contentW, availH / contentH);
+
+      // Center content
+      const contentCx = minX + contentW / 2;
+      const contentCy = minY + contentH / 2;
+      const tx = (cw / 2) - (contentCx * scale);
+      const ty = (ch / 2) - (contentCy * scale);
+
+      fabricCanvas.setViewportTransform([scale, 0, 0, scale, tx, ty]);
+      fabricCanvas.requestRenderAll();
     }
-    
+
     function initCanvas() {
       const container = document.getElementById('canvasContainer');
       const rect = container.getBoundingClientRect();

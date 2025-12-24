@@ -910,6 +910,24 @@
             <span id="localModelStatus" style="font-size:12px;color:var(--muted);">Not loaded</span>
           </div>
         </div>
+        <div class="prefItem" style="border-top:1px solid var(--border);padding-top:20px;margin-top:8px;">
+          <label class="prefLabel">GitHub Publishing</label>
+          <div class="prefHint" style="margin-bottom:12px;">Publish notes to GitHub Pages for sharing</div>
+        </div>
+        <div class="prefItem">
+          <label class="prefLabel">GitHub Personal Access Token</label>
+          <div class="prefControl">
+            <input type="password" id="githubTokenInput" class="search" style="max-width:100%;flex:1;" placeholder="ghp_...">
+          </div>
+          <div class="prefHint">Create at GitHub → Settings → Developer settings → Personal access tokens (needs 'repo' scope)</div>
+        </div>
+        <div class="prefItem">
+          <label class="prefLabel">GitHub Repository</label>
+          <div class="prefControl">
+            <input type="text" id="githubRepoInput" class="search" style="max-width:100%;flex:1;" placeholder="username/repo-name">
+          </div>
+          <div class="prefHint">Format: username/repository-name (e.g., myuser/my-notes)</div>
+        </div>
       </div>
     </div>
   </div>
@@ -937,6 +955,10 @@
           <div class="exportOption" id="exportHtmlBtn">
             <div class="exportOptionTitle">🌐 HTML Website</div>
             <div class="exportOptionDesc">Export as a standalone interactive HTML version</div>
+          </div>
+          <div class="exportOption" id="publishGithubBtn" style="border-color:var(--note-active-border);background:var(--note-active-bg);">
+            <div class="exportOptionTitle">🚀 Publish Noat to GitHub</div>
+            <div class="exportOptionDesc">Publish current note to GitHub Pages (requires token in Preferences)</div>
           </div>
         </div>
         <div id="exportProgress" class="exportProgress" style="display:none;">
@@ -1042,6 +1064,10 @@ const els = {
   exportHtmlBtn: document.getElementById('exportHtmlBtn'),
   exportProgress: document.getElementById('exportProgress'),
   exportProgressText: document.getElementById('exportProgressText'),
+  // GitHub elements
+  githubTokenInput: document.getElementById('githubTokenInput'),
+  githubRepoInput: document.getElementById('githubRepoInput'),
+  publishGithubBtn: document.getElementById('publishGithubBtn'),
 };
 
 let folderPath = null;
@@ -1948,6 +1974,8 @@ let autoFixMode = 'off'; // 'off', 'auto', or 'manual'
 let autoFixProvider = 'openai'; // 'openai' or 'local'
 let openAIKey = '';
 let localModelPath = '';
+let githubToken = '';
+let githubRepo = '';
 let autoFixTimer = null;
 let isAutoFixing = false;
 const AUTO_FIX_DEBOUNCE_MS = 1500; // Wait 1.5s after typing stops before fixing
@@ -2416,6 +2444,526 @@ async function exportToHtml() {
   }
 }
 
+// ============ GitHub Publishing Functions ============
+
+// Check if a file exists on GitHub
+async function githubFileExists(token, owner, repo, path) {
+  try {
+    const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${path}`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/vnd.github.v3+json'
+      }
+    });
+    return response.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Get file content and SHA from GitHub
+async function githubGetFile(token, owner, repo, path) {
+  try {
+    const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${path}`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/vnd.github.v3+json'
+      }
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    return {
+      sha: data.sha,
+      content: atob(data.content.replace(/\n/g, '')),
+      encoding: data.encoding
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
+// Upload or update a file on GitHub
+async function githubPutFile(token, owner, repo, path, content, message, isBinary = false, sha = null) {
+  try {
+    const body = {
+      message: message,
+      content: isBinary ? content : btoa(unescape(encodeURIComponent(content)))
+    };
+    if (sha) body.sha = sha;
+    
+    const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/contents/${path}`, {
+      method: 'PUT',
+      headers: {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+    
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(errorData.message || `HTTP ${response.status}`);
+    }
+    
+    return await response.json();
+  } catch (e) {
+    throw e;
+  }
+}
+
+// Sanitize directory name for GitHub
+function sanitizeDirName(name) {
+  return (name || 'untitled')
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .toLowerCase()
+    .slice(0, 100) || 'note';
+}
+
+// Escape HTML for GitHub pages
+function escapeHtmlForGithub(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Generate the root index.html with animated boat
+function generateRootIndexHtml(noteLinks, isDark) {
+  const bgColor = isDark ? '#1a1a1a' : '#f2f2f2';
+  const panelColor = isDark ? '#252525' : '#ffffff';
+  const textColor = isDark ? '#e0e0e0' : '#111';
+  const mutedColor = isDark ? '#999' : '#666';
+  const borderColor = isDark ? '#3a3a3a' : '#d9d9d9';
+  const linkColor = isDark ? '#6ba3ff' : '#0066cc';
+  
+  const boatArt = '   .  o ..                  \\n     o . o o.o                \\n          ...oo               \\n            __[]__            \\n         __|_o_o_o\\\\__         \\n         \\\\""""""""""\\"/         \\n          \\\\. ..  . /          \\n     ^^^^^^^^^^^^^^^^^^^^';
+  
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Noat Boat - Published Notes</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9B%B3%3C/text%3E%3C/svg%3E">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background: ${bgColor};
+      color: ${textColor};
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .container { max-width: 800px; margin: 0 auto; padding: 40px 20px; flex: 1; }
+    .header { text-align: center; margin-bottom: 40px; }
+    .boat-container {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 14px; line-height: 1.1; white-space: pre; margin: 20px auto; color: ${mutedColor};
+    }
+    h1 { font-size: 28px; margin-top: 20px; font-weight: 700; }
+    .subtitle { color: ${mutedColor}; font-size: 14px; margin-top: 8px; }
+    .notes-list { background: ${panelColor}; border: 1px solid ${borderColor}; border-radius: 12px; overflow: hidden; }
+    .note-link {
+      display: block; padding: 16px 20px; text-decoration: none; color: ${textColor};
+      border-bottom: 1px solid ${borderColor}; transition: background 0.15s ease;
+    }
+    .note-link:last-child { border-bottom: none; }
+    .note-link:hover { background: ${isDark ? '#2d2d2d' : '#f8f8f8'}; }
+    .note-title { font-size: 16px; font-weight: 600; color: ${linkColor}; }
+    .note-meta { font-size: 12px; color: ${mutedColor}; margin-top: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .footer { text-align: center; padding: 20px; font-size: 12px; color: ${mutedColor}; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="boat-container" id="asciiBoat">${boatArt}</div>
+      <h1>Noat Boat</h1>
+      <p class="subtitle">Published Notes</p>
+    </div>
+    <div class="notes-list" id="notesList">
+      <!-- NOTE_LINKS_PLACEHOLDER -->
+    </div>
+  </div>
+  <div class="footer">Made with Noat Boat</div>
+  <script>
+    (function() {
+      var boatEl = document.getElementById('asciiBoat');
+      if (!boatEl) return;
+      var base = boatEl.textContent;
+      var lines = base.split('\\n');
+      var wavePattern = '^_^^^-^^_^^^^-^^^-^';
+      var runsByLine = lines.map(function(line) {
+        var runs = [], re = /\\^+/g, m;
+        while ((m = re.exec(line)) !== null) runs.push({ start: m.index, len: m[0].length });
+        return runs;
+      });
+      var offset = 0;
+      setInterval(function() {
+        offset = (offset + 1) % wavePattern.length;
+        var out = lines.map(function(line, i) {
+          var runs = runsByLine[i];
+          if (!runs || runs.length === 0) return line;
+          var chars = line.split('');
+          for (var j = 0; j < runs.length; j++) {
+            var r = runs[j], need = r.len, seq = '';
+            for (var x = 0; x < 5; x++) seq += wavePattern;
+            seq = seq.slice(offset, offset + need);
+            for (var k = 0; k < need; k++) chars[r.start + k] = seq[k];
+          }
+          return chars.join('');
+        });
+        boatEl.textContent = out.join('\\n');
+      }, 140);
+    })();
+  <\/script>
+</body>
+</html>`;
+}
+
+// Add a note link to the root index HTML
+function addNoteToRootIndex(html, noteTitle, noteDirName, lastModified) {
+  const dateStr = lastModified ? new Date(lastModified).toLocaleDateString() : '';
+  const newLink = `<a href="./${noteDirName}/index.html" class="note-link">
+        <div class="note-title">${escapeHtmlForGithub(noteTitle)}</div>
+        <div class="note-meta">${dateStr}</div>
+      </a>`;
+  
+  // Check if this note already exists in the index (update it)
+  const existingLinkRegex = new RegExp(`<a href="\\.\\/${noteDirName}\\/index\\.html"[^>]*class="note-link"[\\s\\S]*?<\\/a>`, 'g');
+  if (existingLinkRegex.test(html)) {
+    return html.replace(existingLinkRegex, newLink);
+  }
+  
+  // Try placeholder first
+  if (html.includes('<!-- NOTE_LINKS_PLACEHOLDER -->')) {
+    return html.replace('<!-- NOTE_LINKS_PLACEHOLDER -->', newLink + '\n      <!-- NOTE_LINKS_PLACEHOLDER -->');
+  }
+  
+  // Fallback: insert before closing </div> of notes-list
+  const notesListEnd = html.indexOf('</div>', html.indexOf('id="notesList"'));
+  if (notesListEnd > 0) {
+    return html.slice(0, notesListEnd) + newLink + '\n    ' + html.slice(notesListEnd);
+  }
+  
+  // Last resort: insert before </body>
+  const bodyEnd = html.lastIndexOf('</body>');
+  if (bodyEnd > 0) {
+    return html.slice(0, bodyEnd) + '<div class="notes-list">' + newLink + '</div>\n' + html.slice(bodyEnd);
+  }
+  
+  return html;
+}
+
+// Generate interactive note HTML page
+function generateNoteHtml(noteData, isDark) {
+  const bgColor = isDark ? '#1a1a1a' : '#f2f2f2';
+  const panelColor = isDark ? '#252525' : '#ffffff';
+  const textColor = isDark ? '#e0e0e0' : '#111';
+  const mutedColor = isDark ? '#999' : '#666';
+  const borderColor = isDark ? '#3a3a3a' : '#d9d9d9';
+  const editorBg = isDark ? '#1e1e1e' : '#fff';
+  const activeBg = isDark ? '#1e3a5f' : '#eef5ff';
+  const activeBorder = isDark ? '#2d5a8a' : '#c9dcff';
+  
+  const canvasJsonStr = noteData.canvasJson ? JSON.stringify(noteData.canvasJson).replace(/</g, '\\u003c').replace(/>/g, '\\u003e') : 'null';
+  const hasCanvas = !!(noteData.canvasJson || noteData.canvasImage || noteData.image);
+  const hasAudio = !!noteData.audio;
+  const noteIdStr = JSON.stringify(noteData.id || noteData.title);
+  const canvasImageStr = noteData.canvasImage ? JSON.stringify(noteData.canvasImage) : 'null';
+  const fallbackImageStr = noteData.image ? JSON.stringify(noteData.image) : 'null';
+  
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtmlForGithub(noteData.title)} - Noat Boat</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"><\/script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: ${bgColor}; color: ${textColor}; height: 100vh; display: flex; flex-direction: column; }
+    .topbar { display: flex; align-items: center; padding: 10px 14px; border-bottom: 1px solid ${borderColor}; background: ${panelColor}; gap: 12px; }
+    .back-btn { padding: 6px 12px; border: 1px solid ${borderColor}; background: ${panelColor}; border-radius: 6px; cursor: pointer; font-size: 13px; color: ${textColor}; text-decoration: none; }
+    .title { font-size: 16px; font-weight: 700; font-family: monospace; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .save-status { font-size: 12px; color: ${mutedColor}; font-family: monospace; }
+    .main { display: flex; flex: 1; overflow: hidden; gap: 16px; padding: 14px; min-height: 0; }
+    .editor-pane { flex: 1; display: flex; flex-direction: column; min-width: 200px; min-height: 0; }
+    textarea { flex: 1; border: 1px solid ${borderColor}; border-radius: 12px; resize: none; padding: 14px; font-size: 14px; line-height: 1.55; font-family: monospace; background: ${editorBg}; color: ${textColor}; outline: none; }
+    .canvas-pane { flex: 1; display: ${hasCanvas ? 'flex' : 'none'}; flex-direction: column; min-width: 200px; min-height: 0; border: 1px solid ${borderColor}; border-radius: 12px; overflow: hidden; background: ${editorBg}; }
+    .canvas-toolbar { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid ${borderColor}; background: ${panelColor}; flex-shrink: 0; }
+    .btn { padding: 5px 10px; border: 1px solid ${borderColor}; background: ${panelColor}; border-radius: 6px; cursor: pointer; font-size: 12px; color: ${textColor}; }
+    .btn.active { background: ${activeBg}; border-color: ${activeBorder}; }
+    #canvasContainer { flex: 1; position: relative; overflow: hidden; min-height: 0; }
+    #canvasContainer canvas { display: block; }
+    #canvasContainer .canvas-container { position: absolute !important; }
+    .audio-player { padding: 10px; border-top: 1px solid ${borderColor}; display: ${hasAudio ? 'block' : 'none'}; flex-shrink: 0; }
+    .audio-player audio { width: 100%; }
+    @media (max-width: 768px) { .main { flex-direction: column; } .editor-pane, .canvas-pane { flex: none; height: 45vh; } }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <a href="../index.html" class="back-btn">Back</a>
+    <div class="title">${escapeHtmlForGithub(noteData.title)}</div>
+    <div class="save-status" id="saveStatus"></div>
+  </div>
+  <div class="main">
+    <div class="editor-pane">
+      <textarea id="editor" spellcheck="false">${escapeHtmlForGithub(noteData.content || '')}</textarea>
+    </div>
+    <div class="canvas-pane" id="canvasPane">
+      <div class="canvas-toolbar">
+        <button id="selectBtn" class="btn active">Select</button>
+        <button id="drawBtn" class="btn">Draw</button>
+      </div>
+      <div id="canvasContainer">
+        <canvas id="fabricCanvas"></canvas>
+      </div>
+      <div class="audio-player"><audio controls loop src="${noteData.audio || ''}"></audio></div>
+    </div>
+  </div>
+  <script>
+    (function() {
+      var STORAGE_KEY = 'noatboat_' + ${noteIdStr};
+      var canvasJson = ${canvasJsonStr};
+      var canvasImage = ${canvasImageStr};
+      var fallbackImage = ${fallbackImageStr};
+      var fabricCanvas = null, saveTimer = null;
+      var editor = document.getElementById('editor');
+      var saveStatus = document.getElementById('saveStatus');
+      
+      try { var saved = localStorage.getItem(STORAGE_KEY); if (saved) { var data = JSON.parse(saved); if (data.content) editor.value = data.content; } } catch(e){}
+      
+      function scheduleSave() {
+        if (saveTimer) clearTimeout(saveTimer);
+        saveTimer = setTimeout(function() {
+          try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ content: editor.value })); saveStatus.textContent = 'saved'; } catch(e){}
+        }, 1000);
+      }
+      editor.addEventListener('input', function() { saveStatus.textContent = 'modified'; scheduleSave(); });
+      
+      function fitCanvasViewport(padding = 24) {
+        if (!fabricCanvas) return;
+
+        var objects = fabricCanvas.getObjects();
+        if (!objects || objects.length === 0) {
+          fabricCanvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+          fabricCanvas.requestRenderAll();
+          return;
+        }
+
+        // Compute overall bounds in canvas coords (include transforms)
+        var minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        objects.forEach(function(obj) {
+          var r = obj.getBoundingRect(true, true);
+          minX = Math.min(minX, r.left);
+          minY = Math.min(minY, r.top);
+          maxX = Math.max(maxX, r.left + r.width);
+          maxY = Math.max(maxY, r.top + r.height);
+        });
+
+        var contentW = Math.max(1, maxX - minX);
+        var contentH = Math.max(1, maxY - minY);
+
+        var cw = fabricCanvas.getWidth();
+        var ch = fabricCanvas.getHeight();
+
+        var availW = Math.max(1, cw - padding * 2);
+        var availH = Math.max(1, ch - padding * 2);
+
+        var scale = Math.min(availW / contentW, availH / contentH);
+
+        // Center content
+        var contentCx = minX + contentW / 2;
+        var contentCy = minY + contentH / 2;
+        var tx = (cw / 2) - (contentCx * scale);
+        var ty = (ch / 2) - (contentCy * scale);
+
+        fabricCanvas.setViewportTransform([scale, 0, 0, scale, tx, ty]);
+        fabricCanvas.requestRenderAll();
+      }
+      
+      function initCanvas() {
+        var container = document.getElementById('canvasContainer');
+        var rect = container.getBoundingClientRect();
+        var width = Math.max(Math.floor(rect.width), 400);
+        var height = Math.max(Math.floor(rect.height), 300);
+        
+        var el = document.getElementById('fabricCanvas');
+        el.width = width;
+        el.height = height;
+        
+        fabricCanvas = new fabric.Canvas('fabricCanvas', { 
+          width: width, 
+          height: height, 
+          backgroundColor: null 
+        });
+        fabricCanvas.freeDrawingBrush.width = 3;
+        fabricCanvas.freeDrawingBrush.color = '#000000';
+        
+        if (canvasJson) {
+          fabricCanvas.loadFromJSON(canvasJson, function() {
+            fitCanvasViewport();
+            fabricCanvas.renderAll();
+          });
+        } else if (canvasImage || fallbackImage) {
+          fabric.Image.fromURL(canvasImage || fallbackImage, function(img) {
+            if (!img) return;
+            img.set({ left: 0, top: 0, selectable: true });
+            fabricCanvas.add(img);
+            fabricCanvas.renderAll();
+            fitCanvasViewport();
+          }, null, { crossOrigin: 'anonymous' });
+        }
+      }
+      
+      document.getElementById('selectBtn').onclick = function() { 
+        if(fabricCanvas) { 
+          fabricCanvas.isDrawingMode = false; 
+          this.classList.add('active'); 
+          document.getElementById('drawBtn').classList.remove('active'); 
+        } 
+      };
+      document.getElementById('drawBtn').onclick = function() { 
+        if(fabricCanvas) { 
+          fabricCanvas.isDrawingMode = true; 
+          this.classList.add('active'); 
+          document.getElementById('selectBtn').classList.remove('active'); 
+        } 
+      };
+      
+      setTimeout(initCanvas, 150);
+      
+      window.addEventListener('resize', function() {
+        if (!fabricCanvas) return;
+        var container = document.getElementById('canvasContainer');
+        var rect = container.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          fabricCanvas.setDimensions({ width: rect.width, height: rect.height });
+          fitCanvasViewport();
+        }
+      });
+    })();
+  <\/script>
+</body>
+</html>`;
+}
+
+// Main function to publish current note to GitHub
+async function publishToGithub() {
+  if (isExporting) return;
+  
+  if (!githubToken) {
+    await api.showAlert('GitHub Personal Access Token not set.\n\nPlease set it in Preferences.');
+    return;
+  }
+  
+  if (!githubRepo || !githubRepo.includes('/')) {
+    await api.showAlert('GitHub Repository not set or invalid format.\n\nPlease set it in Preferences as "username/repo-name"');
+    return;
+  }
+  
+  if (currentIndex == null || !notes[currentIndex]) {
+    await api.showAlert('No note selected.\n\nPlease select a note to publish.');
+    return;
+  }
+  
+  isExporting = true;
+  showExportProgress('Preparing to publish...');
+  
+  try {
+    const [owner, repo] = githubRepo.split('/');
+    const n = notes[currentIndex];
+    
+    if (els.editor) n.content = els.editor.value;
+    if (canvasDirty && fabricCanvas) await saveCanvasState();
+    
+    const noteDirName = sanitizeDirName(n.title);
+    showExportProgress('Collecting note data...');
+    
+    const noteData = { id: noteDirName, title: n.title, content: n.content || '', lastModified: n.lastModified };
+    const filesToUpload = [];
+    
+    if (n.canvas?.jsonPath) {
+      try {
+        const jsonResult = await api.readCanvasJson(n.canvas.jsonPath);
+        if (jsonResult.success && jsonResult.data) noteData.canvasJson = jsonResult.data;
+        const pngPath = n.canvas.pngPath;
+        if (await api.fileExists(pngPath)) {
+          const imgResult = await api.readImageBase64(pngPath);
+          if (imgResult.success) {
+            noteData.canvasImage = 'canvas.png';
+            filesToUpload.push({ path: `${noteDirName}/canvas.png`, content: imgResult.dataUrl.split(',')[1], isBinary: true });
+          }
+        }
+      } catch (_e) {}
+    } else if (n.image?.path) {
+      try {
+        const imgResult = await api.readImageBase64(n.image.path);
+        if (imgResult.success) {
+          const ext = api.extname(n.image.name).slice(1) || 'png';
+          noteData.image = `image.${ext}`;
+          filesToUpload.push({ path: `${noteDirName}/image.${ext}`, content: imgResult.dataUrl.split(',')[1], isBinary: true });
+        }
+      } catch (_e) {}
+    }
+    
+    if (n.audio?.path) {
+      try {
+        const audioResult = await api.readAudioBase64(n.audio.path);
+        if (audioResult.success) {
+          const ext = api.extname(n.audio.name).slice(1) || 'mp3';
+          noteData.audio = `audio.${ext}`;
+          filesToUpload.push({ path: `${noteDirName}/audio.${ext}`, content: audioResult.dataUrl.split(',')[1], isBinary: true });
+        }
+      } catch (_e) {}
+    }
+    
+    showExportProgress('Generating note page...');
+    const noteHtml = generateNoteHtml(noteData, currentTheme === 'dark');
+    filesToUpload.unshift({ path: `${noteDirName}/index.html`, content: noteHtml, isBinary: false });
+    
+    for (let i = 0; i < filesToUpload.length; i++) {
+      const file = filesToUpload[i];
+      showExportProgress(`Uploading ${i + 1}/${filesToUpload.length}: ${file.path}...`);
+      let sha = null;
+      const existing = await githubGetFile(githubToken, owner, repo, file.path);
+      if (existing) sha = existing.sha;
+      await githubPutFile(githubToken, owner, repo, file.path, file.content, `Update ${file.path}`, file.isBinary, sha);
+    }
+    
+    showExportProgress('Updating site index...');
+    let rootHtml;
+    const existingRoot = await githubGetFile(githubToken, owner, repo, 'index.html');
+    if (existingRoot && existingRoot.content) {
+      rootHtml = addNoteToRootIndex(existingRoot.content, n.title, noteDirName, n.lastModified);
+    } else {
+      rootHtml = generateRootIndexHtml([], currentTheme === 'dark');
+      rootHtml = addNoteToRootIndex(rootHtml, n.title, noteDirName, n.lastModified);
+    }
+    await githubPutFile(githubToken, owner, repo, 'index.html', rootHtml, 'Update site index', false, existingRoot?.sha || null);
+    
+    const pagesUrl = `https://${owner}.github.io/${repo}/${noteDirName}/`;
+    await api.showAlert(`Published successfully!\n\nYour note is available at:\n${pagesUrl}\n\n(Enable GitHub Pages in repo settings if not already done)`);
+    
+  } catch (err) {
+    showBanner(`GitHub publish failed: ${String(err?.message || err)}`);
+    await api.showAlert(`Publish failed:\n${String(err?.message || err)}`);
+  } finally {
+    hideExportProgress();
+    isExporting = false;
+    closeExportModal();
+  }
+}
+
 function updatePrefsUI() {
   els.themeLightBtn.classList.toggle('active', currentTheme === 'light');
   els.themeDarkBtn.classList.toggle('active', currentTheme === 'dark');
@@ -2439,6 +2987,10 @@ function updatePrefsUI() {
   els.localModelItem.style.display = (fixEnabled && autoFixProvider === 'local') ? 'flex' : 'none';
   els.localModelStatusItem.style.display = (fixEnabled && autoFixProvider === 'local') ? 'flex' : 'none';
   els.localModelPath.value = localModelPath || '';
+  
+  // GitHub settings
+  els.githubTokenInput.value = githubToken || '';
+  els.githubRepoInput.value = githubRepo || '';
   
   // Show/hide manual fix button
   els.fixBtn.style.display = (autoFixMode === 'manual') ? '' : 'none';
@@ -2477,6 +3029,16 @@ function setAutoFixProvider(provider) {
 function saveOpenAIKey(key) {
   openAIKey = key;
   api.savePreferences({ openAIKey: key });
+}
+
+function saveGithubToken(token) {
+  githubToken = token;
+  api.savePreferences({ githubToken: token });
+}
+
+function saveGithubRepo(repo) {
+  githubRepo = repo;
+  api.savePreferences({ githubRepo: repo });
 }
 
 async function browseForModel() {
@@ -2684,6 +3246,8 @@ async function loadPreferences() {
     autoFixProvider = prefs.autoFixProvider || 'openai';
     openAIKey = prefs.openAIKey || '';
     localModelPath = prefs.localModelPath || '';
+    githubToken = prefs.githubToken || '';
+    githubRepo = prefs.githubRepo || '';
     document.body.classList.toggle('dark-mode', currentTheme === 'dark');
     document.documentElement.style.setProperty('--focus-strength', (currentFocusStrength / 100).toFixed(2));
     
@@ -3320,6 +3884,7 @@ els.exportPdfBtn.addEventListener('click', exportToPdf);
 els.exportPngBtn.addEventListener('click', exportToPng);
 els.exportEpubBtn.addEventListener('click', exportToEpub);
 els.exportHtmlBtn.addEventListener('click', exportToHtml);
+els.publishGithubBtn.addEventListener('click', publishToGithub);
 
 els.themeLightBtn.addEventListener('click', () => applyTheme('light'));
 els.themeDarkBtn.addEventListener('click', () => applyTheme('dark'));
@@ -3331,6 +3896,12 @@ els.providerOpenAIBtn.addEventListener('click', () => setAutoFixProvider('openai
 els.providerLocalBtn.addEventListener('click', () => setAutoFixProvider('local'));
 els.openAIKeyInput.addEventListener('change', (e) => saveOpenAIKey(e.target.value));
 els.openAIKeyInput.addEventListener('blur', (e) => saveOpenAIKey(e.target.value));
+
+// GitHub settings handlers
+els.githubTokenInput.addEventListener('change', (e) => saveGithubToken(e.target.value));
+els.githubTokenInput.addEventListener('blur', (e) => saveGithubToken(e.target.value));
+els.githubRepoInput.addEventListener('change', (e) => saveGithubRepo(e.target.value));
+els.githubRepoInput.addEventListener('blur', (e) => saveGithubRepo(e.target.value));
 els.browseModelBtn.addEventListener('click', () => browseForModel());
 els.fixBtn.addEventListener('click', () => manualFix());
 
