@@ -2839,8 +2839,9 @@ function generateNoteHtml(noteData, isDark) {
     .canvas-toolbar { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid ${borderColor}; background: ${panelColor}; flex-shrink: 0; }
     .btn { padding: 5px 10px; border: 1px solid ${borderColor}; background: ${panelColor}; border-radius: 6px; cursor: pointer; font-size: 12px; color: ${textColor}; }
     .btn.active { background: ${activeBg}; border-color: ${activeBorder}; }
-    #canvasContainer { flex: 1; position: relative; overflow: hidden; min-height: 0; display: flex; align-items: center; justify-content: center; }
-    .canvas-wrapper { transform-origin: center center; display: inline-block; }
+    #canvasContainer { flex: 1; position: relative; overflow: hidden; min-height: 0; }
+    #canvasContainer canvas { display: block; }
+    #canvasContainer .canvas-container { position: absolute !important; }
     .audio-player { padding: 10px; border-top: 1px solid ${borderColor}; display: ${hasAudio ? 'block' : 'none'}; flex-shrink: 0; }
     .audio-player audio { width: 100%; }
     @media (max-width: 768px) { .main { flex-direction: column; } .editor-pane, .canvas-pane { flex: none; height: 45vh; } }
@@ -2862,9 +2863,7 @@ function generateNoteHtml(noteData, isDark) {
         <button id="drawBtn" class="btn">Draw</button>
       </div>
       <div id="canvasContainer">
-        <div class="canvas-wrapper" id="canvasWrapper">
-          <canvas id="fabricCanvas"></canvas>
-        </div>
+        <canvas id="fabricCanvas"></canvas>
       </div>
       <div class="audio-player"><audio controls loop src="${noteData.audio || ''}"></audio></div>
     </div>
@@ -2876,11 +2875,9 @@ function generateNoteHtml(noteData, isDark) {
       var canvasImage = ${canvasImageStr};
       var fallbackImage = ${fallbackImageStr};
       var fabricCanvas = null, saveTimer = null;
+      var CANVAS_WIDTH = 1200;
+      var CANVAS_HEIGHT = 1600;
       
-      // Store the original canvas dimensions from the JSON
-      var originalWidth = 600;
-      var originalHeight = 800;
-      var originalW = 600, originalH = 800; // defaults
       var editor = document.getElementById('editor');
       var saveStatus = document.getElementById('saveStatus');
       
@@ -2894,37 +2891,49 @@ function generateNoteHtml(noteData, isDark) {
       }
       editor.addEventListener('input', function() { saveStatus.textContent = 'modified'; scheduleSave(); });
       
-      function scaleCanvasToFit() {
+      function resizeFabricCanvas() {
+        if (!fabricCanvas) return;
         var container = document.getElementById('canvasContainer');
-        var wrapper = document.getElementById('canvasWrapper');
         var rect = container.getBoundingClientRect();
-        var containerW = rect.width - 20;
-        var containerH = rect.height - 20;
+        if (rect.width <= 0 || rect.height <= 0) return;
         
-        if (containerW <= 0 || containerH <= 0) return;
+        // Scale canvas to fit container exactly
+        var scaleX = rect.width / CANVAS_WIDTH;
+        var scaleY = rect.height / CANVAS_HEIGHT;
+        var scale = Math.min(scaleX, scaleY);
         
-        var scaleX = containerW / originalWidth;
-        var scaleY = containerH / originalHeight;
-        var scale = Math.min(scaleX, scaleY, 1); // never scale up beyond 1
-        
-        wrapper.style.transform = 'scale(' + scale + ')';
+        // Apply CSS transform to scale the canvas
+        var canvasWrapper = fabricCanvas.wrapperEl;
+        if (canvasWrapper) {
+          canvasWrapper.style.transformOrigin = 'top left';
+          canvasWrapper.style.transform = 'scale(' + scale + ')';
+          
+          // Center the canvas if there's extra space
+          var scaledWidth = CANVAS_WIDTH * scale;
+          var scaledHeight = CANVAS_HEIGHT * scale;
+          var offsetX = (rect.width - scaledWidth) / 2;
+          var offsetY = (rect.height - scaledHeight) / 2;
+          canvasWrapper.style.marginLeft = offsetX + 'px';
+          canvasWrapper.style.marginTop = offsetY + 'px';
+        }
       }
       
       function initCanvas() {
-        // Get original dimensions from JSON if available
-        if (canvasJson) {
-          originalWidth = canvasJson.width || 600;
-          originalHeight = canvasJson.height || 800;
+        var container = document.getElementById('canvasContainer');
+        var rect = container.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          // Use container dimensions scaled up for higher resolution
+          var scale = 2; // 2x for crisp rendering
+          CANVAS_WIDTH = Math.round(rect.width * scale);
+          CANVAS_HEIGHT = Math.round(rect.height * scale);
         }
         
-        var el = document.getElementById('fabricCanvas');
-        el.width = originalWidth;
-        el.height = originalHeight;
-        
         fabricCanvas = new fabric.Canvas('fabricCanvas', { 
-          width: originalWidth, 
-          height: originalHeight, 
-          backgroundColor: null 
+          width: CANVAS_WIDTH, 
+          height: CANVAS_HEIGHT, 
+          backgroundColor: null,
+          selection: true,
+          preserveObjectStacking: true
         });
         fabricCanvas.freeDrawingBrush.width = 3;
         fabricCanvas.freeDrawingBrush.color = '#000000';
@@ -2932,7 +2941,7 @@ function generateNoteHtml(noteData, isDark) {
         if (canvasJson) {
           fabricCanvas.loadFromJSON(canvasJson, function() {
             fabricCanvas.renderAll();
-            scaleCanvasToFit();
+            resizeFabricCanvas();
           });
         } else if (canvasImage || fallbackImage) {
           fabric.Image.fromURL(canvasImage || fallbackImage, function(img) {
@@ -2940,10 +2949,10 @@ function generateNoteHtml(noteData, isDark) {
             img.set({ left: 0, top: 0, selectable: true });
             fabricCanvas.add(img);
             fabricCanvas.renderAll();
-            scaleCanvasToFit();
+            resizeFabricCanvas();
           }, null, { crossOrigin: 'anonymous' });
         } else {
-          scaleCanvasToFit();
+          resizeFabricCanvas();
         }
       }
       
@@ -2965,7 +2974,7 @@ function generateNoteHtml(noteData, isDark) {
       setTimeout(initCanvas, 150);
       
       window.addEventListener('resize', function() {
-        scaleCanvasToFit();
+        resizeFabricCanvas();
       });
     })();
   <\/script>
