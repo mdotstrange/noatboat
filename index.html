@@ -2876,6 +2876,10 @@ function generateNoteHtml(noteData, isDark) {
       var canvasImage = ${canvasImageStr};
       var fallbackImage = ${fallbackImageStr};
       var fabricCanvas = null, saveTimer = null;
+      
+      // Store the original canvas dimensions from the JSON
+      var originalWidth = 600;
+      var originalHeight = 800;
       var originalW = 600, originalH = 800; // defaults
       var editor = document.getElementById('editor');
       var saveStatus = document.getElementById('saveStatus');
@@ -2899,8 +2903,8 @@ function generateNoteHtml(noteData, isDark) {
         
         if (containerW <= 0 || containerH <= 0) return;
         
-        var scaleX = containerW / originalW;
-        var scaleY = containerH / originalH;
+        var scaleX = containerW / originalWidth;
+        var scaleY = containerH / originalHeight;
         var scale = Math.min(scaleX, scaleY, 1); // never scale up beyond 1
         
         wrapper.style.transform = 'scale(' + scale + ')';
@@ -2909,17 +2913,17 @@ function generateNoteHtml(noteData, isDark) {
       function initCanvas() {
         // Get original dimensions from JSON if available
         if (canvasJson) {
-          originalW = canvasJson.width || 600;
-          originalH = canvasJson.height || 800;
+          originalWidth = canvasJson.width || 600;
+          originalHeight = canvasJson.height || 800;
         }
         
         var el = document.getElementById('fabricCanvas');
-        el.width = originalW;
-        el.height = originalH;
+        el.width = originalWidth;
+        el.height = originalHeight;
         
         fabricCanvas = new fabric.Canvas('fabricCanvas', { 
-          width: originalW, 
-          height: originalH, 
+          width: originalWidth, 
+          height: originalHeight, 
           backgroundColor: null 
         });
         fabricCanvas.freeDrawingBrush.width = 3;
