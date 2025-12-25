@@ -546,58 +546,45 @@ ipcMain.handle('run-local-llm', async (event, modelPath, text) => {
     try {
       console.log('Starting inference...');
       
-      // Very strict prompt that only allows minimal corrections
-      const prompt = `Fix ONLY spelling mistakes and obvious grammar errors. Do NOT rewrite, rephrase, or restructure the text. Keep everything else exactly the same including:
-- Line breaks and paragraph structure
-- Punctuation (commas, periods, quotes, etc.)
-- Word order and sentence structure
-- Informal language, slang, and profanity
-- Capitalization (unless clearly wrong)
+      // Simple, clear prompt that works better with various models
+      const prompt = `Fix spelling and grammar errors only. Return the corrected text without any explanation.
 
-Rules:
-- Only fix misspelled/scrambled words (e.g., "teh" → "the", "recieve" → "receive")
-- Only fix basic grammar (e.g., "I is" → "I am", "they was" → "they were")
-- Do NOT add or remove quotation marks
-- Do NOT merge or split sentences
-- Do NOT change informal to formal language
-- Do NOT rewrite for clarity or style
-- Make as few changes as possible
-
-Text to correct:
-${text}
-
-Corrected text:`;
+${text}`;
       
       console.log('Calling session.prompt...');
       
-      // Add timeout to prevent hanging (60 seconds)
-      const timeoutMs = 60000;
+      // Add timeout to prevent hanging (90 seconds for larger texts)
+      const timeoutMs = 90000;
       const inferencePromise = currentModel.session.prompt(prompt, {
-        maxTokens: Math.min(Math.ceil(text.length * 1.5), 2048),
-        temperature: 0.05, // Lower temperature for more conservative corrections
-        topP: 0.9
+        maxTokens: Math.min(Math.ceil(text.length * 2), 4096),
+        temperature: 0.1,
+        topP: 0.95
       });
       
       const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Inference timeout after 60 seconds')), timeoutMs);
+        setTimeout(() => reject(new Error('Inference timeout after 90 seconds')), timeoutMs);
       });
       
       const response = await Promise.race([inferencePromise, timeoutPromise]);
       
       console.log('Inference complete');
       console.log('Response length:', response.length);
-      console.log('Response preview:', response.substring(0, 100));
+      console.log('Response preview:', response.substring(0, 200));
       
       // Clean up the response - remove common model artifacts
       let cleanedResponse = response.trim();
       
-      // Remove common prefixes models might add
+      // Remove common prefixes/suffixes models might add
       const unwantedPrefixes = [
         'Corrected text:',
         'Here is the corrected text:',
         'Here\'s the corrected text:',
         'The corrected text is:',
-        'Corrected:'
+        'Corrected:',
+        'Here is the text with corrections:',
+        'Fixed text:',
+        'Output:',
+        'Result:'
       ];
       
       for (const prefix of unwantedPrefixes) {
@@ -606,41 +593,47 @@ Corrected text:`;
         }
       }
       
-      // Remove wrapping quotes if model added them
-      if ((cleanedResponse.startsWith('"') && cleanedResponse.endsWith('"')) ||
-          (cleanedResponse.startsWith("'") && cleanedResponse.endsWith("'"))) {
-        const withoutQuotes = cleanedResponse.slice(1, -1);
-        // Only remove if it doesn't drastically change the text structure
-        if (withoutQuotes.split('\n').length === cleanedResponse.split('\n').length) {
-          cleanedResponse = withoutQuotes;
+      // Remove wrapping quotes if model added them and original didn't have them
+      const originalHasQuotes = (text.startsWith('"') && text.endsWith('"')) || 
+                                (text.startsWith("'") && text.endsWith("'"));
+      if (!originalHasQuotes) {
+        if ((cleanedResponse.startsWith('"') && cleanedResponse.endsWith('"')) ||
+            (cleanedResponse.startsWith("'") && cleanedResponse.endsWith("'"))) {
+          cleanedResponse = cleanedResponse.slice(1, -1);
         }
       }
       
-      // Validate the response isn't too different from input
-      const originalLines = text.split('\n').length;
-      const responseLines = cleanedResponse.split('\n').length;
+      // Remove markdown code blocks if model wrapped the response
+      if (cleanedResponse.startsWith('```') && cleanedResponse.includes('```', 3)) {
+        const firstNewline = cleanedResponse.indexOf('\n');
+        const lastBackticks = cleanedResponse.lastIndexOf('```');
+        if (firstNewline > 0 && lastBackticks > firstNewline) {
+          cleanedResponse = cleanedResponse.substring(firstNewline + 1, lastBackticks).trim();
+        }
+      }
+      
+      // Validate the response isn't completely different from input
       const originalLength = text.length;
       const responseLength = cleanedResponse.length;
       
-      // Reject if too many lines were added/removed (more than 2)
-      if (Math.abs(originalLines - responseLines) > 2) {
-        console.warn('Response has different line count:', originalLines, 'vs', responseLines);
-        console.warn('Rejecting response - too much structural change');
-        return { success: false, error: 'Model changed text structure too much. Try a smaller model or simpler text.' };
-      }
-      
-      // Reject if response is drastically shorter (more than 30% shorter suggests deletion)
-      if (responseLength < originalLength * 0.7) {
+      // Only reject if response is drastically different (50% shorter or 100% longer)
+      // This is more permissive to avoid false rejections
+      if (responseLength < originalLength * 0.5) {
         console.warn('Response is too short:', responseLength, 'vs', originalLength);
         console.warn('Rejecting response - too much content deleted');
-        return { success: false, error: 'Model deleted too much text. Try a smaller model.' };
+        return { success: false, error: 'Model output too short. Try a different model.' };
       }
       
-      // Reject if response is way longer (more than 50% longer suggests addition/rewriting)
-      if (responseLength > originalLength * 1.5) {
+      if (responseLength > originalLength * 2) {
         console.warn('Response is too long:', responseLength, 'vs', originalLength);
         console.warn('Rejecting response - too much content added');
-        return { success: false, error: 'Model added too much text. Try a smaller model.' };
+        return { success: false, error: 'Model added too much text. Try a different model.' };
+      }
+      
+      // If response is empty or just whitespace, that's a failure
+      if (!cleanedResponse || cleanedResponse.trim().length === 0) {
+        console.warn('Response is empty');
+        return { success: false, error: 'Model returned empty response.' };
       }
       
       return { success: true, text: cleanedResponse };
@@ -1276,7 +1269,6 @@ h1 { font-size: 1.5em; margin-bottom: 0.5em; }
   border-radius: 8px;
 }
 .note-image { max-width: 100%; margin: 1em 0; border-radius: 8px; }
-audio { width: 100%; margin: 1em 0; }
 .title-page {
   display: flex;
   flex-direction: column;
@@ -1321,7 +1313,6 @@ audio { width: 100%; margin: 1em 0; }
       const chapterFile = `${chapterId}.xhtml`;
       
       let imageTag = '';
-      let audioTag = '';
       
       // Handle image - convert to JPEG for smaller file size
       if (note.imageDataUrl) {
@@ -1346,22 +1337,7 @@ audio { width: 100%; margin: 1em 0; }
         }
       }
       
-      // Handle audio
-      if (note.audioDataUrl) {
-        const match = note.audioDataUrl.match(/^data:audio\/([^;]+);base64,(.+)$/);
-        if (match) {
-          let ext = match[1];
-          if (ext === 'mpeg') ext = 'mp3';
-          if (ext === 'mp4') ext = 'm4a';
-          const audioFileName = `audio${i}.${ext}`;
-          const audioBuffer = Buffer.from(match[2], 'base64');
-          addFile(`OEBPS/audio/${audioFileName}`, audioBuffer);
-          
-          const mimeType = `audio/${match[1]}`;
-          manifestItems.push(`<item id="audio${i}" href="audio/${audioFileName}" media-type="${mimeType}"/>`);
-          audioTag = `<p><audio controls src="audio/${audioFileName}">Audio</audio></p>`;
-        }
-      }
+      // Note: Audio is not included in EPUB export as most e-readers don't support it
       
       const dateStr = note.lastModified ? new Date(note.lastModified).toLocaleString() : '';
       
@@ -1377,7 +1353,6 @@ audio { width: 100%; margin: 1em 0; }
   <p class="meta">${escapeHtml(dateStr)}</p>
   <div class="content">${escapeHtml(note.content || '(empty)')}</div>
   ${imageTag}
-  ${audioTag}
 </body>
 </html>`;
       
