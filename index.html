@@ -6,6 +6,7 @@
   <title>Noat Boat</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9B%B3%3C/text%3E%3C/svg%3E">
   <script src="./fabric.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
   <style>
     :root{
       --bg:#f2f2f2;
@@ -2419,16 +2420,35 @@ async function exportToHtml() {
       } catch (_e) {}
     }
     
-    // Get audio data if exists
+    // Get audio data if exists (compress WAV/AIFF to MP3)
     if (n.audio?.path) {
       try {
         const audioResult = await api.readAudioBase64(n.audio.path);
         if (audioResult.success) {
-          showExportProgress('Saving audio...');
-          const ext = api.extname(n.audio.name).slice(1) || 'mp3';
-          const assetPath = api.joinPath(assetsDir, `audio.${ext}`);
-          await api.writeAudioBuffer(assetPath, audioResult.dataUrl.split(',')[1]);
-          noteData.audio = `assets/audio.${ext}`;
+          const originalExt = api.extname(n.audio.name).slice(1) || 'mp3';
+          
+          // Try to compress to MP3 using browser-based encoder (only compresses uncompressed formats)
+          showExportProgress('Compressing audio...');
+          const compressResult = await compressAudioToMp3(audioResult.dataUrl, originalExt);
+          
+          if (compressResult.success) {
+            const finalExt = compressResult.ext || originalExt;
+            const assetPath = api.joinPath(assetsDir, `audio.${finalExt}`);
+            await api.writeAudioBuffer(assetPath, compressResult.dataUrl);
+            noteData.audio = `assets/audio.${finalExt}`;
+            
+            if (compressResult.wasCompressed) {
+              console.log('Audio compressed to MP3 at 128kbps');
+            } else {
+              console.log(`Audio kept as ${finalExt} (MP3 encoder not available or format already compressed)`);
+            }
+          } else {
+            // Fallback to original if compression fails
+            console.warn('Audio compression failed, using original:', compressResult.error);
+            const assetPath = api.joinPath(assetsDir, `audio.${originalExt}`);
+            await api.writeAudioBuffer(assetPath, audioResult.dataUrl);
+            noteData.audio = `assets/audio.${originalExt}`;
+          }
         }
       } catch (_e) {}
     }
@@ -3071,6 +3091,129 @@ async function convertImageToJpeg(dataUrl) {
   });
 }
 
+// Helper function to compress audio to MP3 at 128kbps (browser-based using lamejs from CDN)
+// Only compresses uncompressed formats: wav, aif, aiff
+// Returns original for already compressed formats: mp3, aac, m4a, opus, ogg, flac, wma
+async function compressAudioToMp3(dataUrl, originalExt) {
+  const ext = (originalExt || '').toLowerCase().replace('.', '');
+  console.log(`[AudioCompress] Called with ext: "${ext}"`);
+  
+  // Check if lamejs is available (loaded from CDN)
+  if (typeof lamejs === 'undefined' || !lamejs.Mp3Encoder) {
+    console.log('[AudioCompress] lamejs not available, returning audio as-is');
+    return { success: true, dataUrl, ext, wasCompressed: false };
+  }
+  
+  // List of already compressed formats - return as-is
+  const compressedFormats = ['mp3', 'aac', 'm4a', 'opus', 'ogg', 'flac', 'wma', 'mpeg'];
+  if (compressedFormats.includes(ext)) {
+    console.log(`[AudioCompress] Format "${ext}" is already compressed, skipping`);
+    return { success: true, dataUrl, ext, wasCompressed: false };
+  }
+  
+  // List of uncompressed formats we can convert
+  const uncompressedFormats = ['wav', 'aif', 'aiff', 'pcm', 'raw'];
+  if (!uncompressedFormats.includes(ext)) {
+    console.log(`[AudioCompress] Unknown format "${ext}", returning as-is`);
+    return { success: true, dataUrl, ext, wasCompressed: false };
+  }
+  
+  console.log(`[AudioCompress] Compressing ${ext} to MP3 at 128kbps...`);
+  
+  try {
+    // Decode audio using Web Audio API
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    
+    // Extract base64 data
+    const base64Match = dataUrl.match(/^data:audio\/[^;]+;base64,(.+)$/);
+    if (!base64Match) {
+      return { success: false, error: 'Invalid audio data URL format' };
+    }
+    
+    // Convert base64 to ArrayBuffer
+    const binaryString = atob(base64Match[1]);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    
+    // Decode the audio
+    const audioBuffer = await audioContext.decodeAudioData(bytes.buffer);
+    console.log(`[AudioCompress] Decoded: ${audioBuffer.sampleRate}Hz, ${audioBuffer.numberOfChannels} channels, ${audioBuffer.duration.toFixed(2)}s`);
+    
+    const sampleRate = audioBuffer.sampleRate;
+    const numChannels = Math.min(audioBuffer.numberOfChannels, 2); // Max 2 channels for MP3
+    
+    // Get audio data as Float32Array and convert to Int16
+    const leftChannel = audioBuffer.getChannelData(0);
+    const rightChannel = numChannels > 1 ? audioBuffer.getChannelData(1) : leftChannel;
+    
+    // Convert Float32 (-1 to 1) to Int16 (-32768 to 32767)
+    const leftInt16 = new Int16Array(leftChannel.length);
+    const rightInt16 = new Int16Array(rightChannel.length);
+    for (let i = 0; i < leftChannel.length; i++) {
+      leftInt16[i] = Math.max(-32768, Math.min(32767, Math.round(leftChannel[i] * 32767)));
+      rightInt16[i] = Math.max(-32768, Math.min(32767, Math.round(rightChannel[i] * 32767)));
+    }
+    
+    // Encode to MP3
+    const mp3encoder = new lamejs.Mp3Encoder(numChannels, sampleRate, 128);
+    const mp3Data = [];
+    
+    const sampleBlockSize = 1152; // lamejs requires this block size
+    for (let i = 0; i < leftInt16.length; i += sampleBlockSize) {
+      const leftChunk = leftInt16.subarray(i, Math.min(i + sampleBlockSize, leftInt16.length));
+      const rightChunk = rightInt16.subarray(i, Math.min(i + sampleBlockSize, rightInt16.length));
+      
+      let mp3buf;
+      if (numChannels === 1) {
+        mp3buf = mp3encoder.encodeBuffer(leftChunk);
+      } else {
+        mp3buf = mp3encoder.encodeBuffer(leftChunk, rightChunk);
+      }
+      
+      if (mp3buf.length > 0) {
+        mp3Data.push(mp3buf);
+      }
+    }
+    
+    // Flush remaining data
+    const mp3End = mp3encoder.flush();
+    if (mp3End.length > 0) {
+      mp3Data.push(mp3End);
+    }
+    
+    // Combine all MP3 chunks
+    const totalLength = mp3Data.reduce((sum, buf) => sum + buf.length, 0);
+    const mp3Buffer = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const buf of mp3Data) {
+      mp3Buffer.set(buf, offset);
+      offset += buf.length;
+    }
+    
+    // Convert to base64 data URL
+    let binary = '';
+    for (let i = 0; i < mp3Buffer.length; i++) {
+      binary += String.fromCharCode(mp3Buffer[i]);
+    }
+    const mp3Base64 = btoa(binary);
+    const mp3DataUrl = `data:audio/mpeg;base64,${mp3Base64}`;
+    
+    const originalSize = bytes.length;
+    const compressedSize = mp3Buffer.length;
+    console.log(`[AudioCompress] Compressed: ${originalSize} bytes -> ${compressedSize} bytes (${Math.round(compressedSize / originalSize * 100)}%)`);
+    
+    // Close audio context
+    audioContext.close();
+    
+    return { success: true, dataUrl: mp3DataUrl, ext: 'mp3', wasCompressed: true };
+  } catch (e) {
+    console.error('[AudioCompress] Error:', e);
+    return { success: false, error: e.message };
+  }
+}
+
 async function publishToGithub() {
   if (isExporting) return;
   
@@ -3138,9 +3281,28 @@ async function publishToGithub() {
       try {
         const audioResult = await api.readAudioBase64(n.audio.path);
         if (audioResult.success) {
-          const ext = api.extname(n.audio.name).slice(1) || 'mp3';
-          noteData.audio = `audio.${ext}`;
-          filesToUpload.push({ path: `${noteDirName}/audio.${ext}`, content: audioResult.dataUrl.split(',')[1], isBinary: true });
+          const originalExt = api.extname(n.audio.name).slice(1) || 'mp3';
+          
+          // Try to compress to MP3 using browser-based encoder (only compresses uncompressed formats)
+          showExportProgress('Compressing audio...');
+          const compressResult = await compressAudioToMp3(audioResult.dataUrl, originalExt);
+          
+          if (compressResult.success) {
+            const finalExt = compressResult.ext || originalExt;
+            noteData.audio = `audio.${finalExt}`;
+            filesToUpload.push({ path: `${noteDirName}/audio.${finalExt}`, content: compressResult.dataUrl.split(',')[1], isBinary: true });
+            
+            if (compressResult.wasCompressed) {
+              console.log('GitHub: Audio compressed to MP3 at 128kbps');
+            } else {
+              console.log(`GitHub: Audio kept as ${finalExt} (MP3 encoder not available or format already compressed)`);
+            }
+          } else {
+            // Fallback to original if compression fails
+            console.warn('Audio compression failed, using original:', compressResult.error);
+            noteData.audio = `audio.${originalExt}`;
+            filesToUpload.push({ path: `${noteDirName}/audio.${originalExt}`, content: audioResult.dataUrl.split(',')[1], isBinary: true });
+          }
         }
       } catch (_e) {}
     }

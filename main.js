@@ -3,6 +3,8 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os'); // Added for temp file handling
 
+// Note: MP3 encoding is done in the renderer process using lamejs from CDN
+
 // Config file path for storing preferences (like last folder)
 const configPath = path.join(app.getPath('userData'), 'config.json');
 
@@ -774,6 +776,9 @@ ipcMain.handle('write-audio-buffer', async (event, filePath, base64Data) => {
     return { success: false, error: e.message };
   }
 });
+
+// Note: Audio MP3 compression is handled in the renderer process using lamejs from CDN
+// See compressAudioToMp3() function in index.html
 
 // Read canvas JSON
 ipcMain.handle('read-canvas-json', async (event, filePath) => {
