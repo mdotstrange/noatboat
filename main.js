@@ -1852,7 +1852,12 @@ function generateExportCss(isDark) {
     body {
       margin: 0;
       font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-      background: ${bgColor};
+      background-color: ${bgColor};
+      background-image:
+        repeating-linear-gradient(0deg, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 0, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 1px, transparent 1px, transparent 24px),
+        repeating-linear-gradient(90deg, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 0, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 1px, transparent 1px, transparent 24px),
+        repeating-linear-gradient(0deg, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 0, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 1px, transparent 1px, transparent 120px),
+        repeating-linear-gradient(90deg, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 0, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 1px, transparent 1px, transparent 120px);
       color: ${textColor};
       height: 100vh;
       overflow: hidden;
@@ -1993,9 +1998,15 @@ function generateExportCss(isDark) {
       flex: 1 1 50%;
       min-width: 200px;
       max-width: 50%;
-      background: ${editorBg};
+      background-color: ${editorBg};
       color: ${textColor};
       border-radius: 8px;
+      background-image:
+        repeating-linear-gradient(0deg, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 0, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 1px, transparent 1px, transparent 24px),
+        repeating-linear-gradient(90deg, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 0, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 1px, transparent 1px, transparent 24px),
+        repeating-linear-gradient(0deg, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 0, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 1px, transparent 1px, transparent 120px),
+        repeating-linear-gradient(90deg, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 0, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 1px, transparent 1px, transparent 120px);
+      background-attachment: local;
     }
     .canvasWrap {
       flex: 1 1 50%;
@@ -2020,8 +2031,13 @@ function generateExportCss(isDark) {
       flex: 1;
       position: relative;
       overflow: hidden;
-      background: ${editorBg};
+      background-color: ${editorBg};
       min-height: 0;
+      background-image:
+        repeating-linear-gradient(0deg, ${isDark ? 'rgba(255,255,255,.02)' : 'rgba(0,0,0,.02)'} 0, ${isDark ? 'rgba(255,255,255,.02)' : 'rgba(0,0,0,.02)'} 1px, transparent 1px, transparent 24px),
+        repeating-linear-gradient(90deg, ${isDark ? 'rgba(255,255,255,.02)' : 'rgba(0,0,0,.02)'} 0, ${isDark ? 'rgba(255,255,255,.02)' : 'rgba(0,0,0,.02)'} 1px, transparent 1px, transparent 24px),
+        repeating-linear-gradient(0deg, ${isDark ? 'rgba(255,255,255,.04)' : 'rgba(0,0,0,.035)'} 0, ${isDark ? 'rgba(255,255,255,.04)' : 'rgba(0,0,0,.035)'} 1px, transparent 1px, transparent 120px),
+        repeating-linear-gradient(90deg, ${isDark ? 'rgba(255,255,255,.04)' : 'rgba(0,0,0,.035)'} 0, ${isDark ? 'rgba(255,255,255,.04)' : 'rgba(0,0,0,.035)'} 1px, transparent 1px, transparent 120px);
     }
     .canvasContainer canvas { display: block; }
     /* FIXED: Removed aggressive !important rules that caused aspect ratio distortion */

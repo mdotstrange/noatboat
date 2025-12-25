@@ -2731,7 +2731,12 @@ function generateRootIndexHtml(noteLinks, isDark) {
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-      background: ${bgColor};
+      background-color: ${bgColor};
+      background-image:
+        repeating-linear-gradient(0deg, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 0, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 1px, transparent 1px, transparent 24px),
+        repeating-linear-gradient(90deg, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 0, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 1px, transparent 1px, transparent 24px),
+        repeating-linear-gradient(0deg, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 0, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 1px, transparent 1px, transparent 120px),
+        repeating-linear-gradient(90deg, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 0, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 1px, transparent 1px, transparent 120px);
       color: ${textColor};
       min-height: 100vh;
       display: flex;
@@ -2996,19 +3001,60 @@ function generateNoteHtml(noteData, isDark) {
   <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"><\/script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: system-ui, -apple-system, sans-serif; background: ${bgColor}; color: ${textColor}; height: 100vh; display: flex; flex-direction: column; }
+    body { 
+      font-family: system-ui, -apple-system, sans-serif; 
+      background-color: ${bgColor}; 
+      background-image:
+        repeating-linear-gradient(0deg, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 0, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 1px, transparent 1px, transparent 24px),
+        repeating-linear-gradient(90deg, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 0, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 1px, transparent 1px, transparent 24px),
+        repeating-linear-gradient(0deg, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 0, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 1px, transparent 1px, transparent 120px),
+        repeating-linear-gradient(90deg, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 0, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 1px, transparent 1px, transparent 120px);
+      color: ${textColor}; 
+      height: 100vh; 
+      display: flex; 
+      flex-direction: column; 
+    }
     .topbar { display: flex; align-items: center; padding: 10px 14px; border-bottom: 1px solid ${borderColor}; background: ${panelColor}; gap: 12px; }
     .back-btn { padding: 6px 12px; border: 1px solid ${borderColor}; background: ${panelColor}; border-radius: 6px; cursor: pointer; font-size: 13px; color: ${textColor}; text-decoration: none; }
     .title { font-size: 16px; font-weight: 700; font-family: monospace; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .save-status { font-size: 12px; color: ${mutedColor}; font-family: monospace; }
     .main { display: flex; flex: 1; overflow: hidden; gap: 16px; padding: 14px; min-height: 0; }
     .editor-pane { flex: 1; display: flex; flex-direction: column; min-width: 200px; min-height: 0; }
-    textarea { flex: 1; border: 1px solid ${borderColor}; border-radius: 12px; resize: none; padding: 14px; font-size: 14px; line-height: 1.55; font-family: monospace; background: ${editorBg}; color: ${textColor}; outline: none; }
+    textarea { 
+      flex: 1; 
+      border: 1px solid ${borderColor}; 
+      border-radius: 12px; 
+      resize: none; 
+      padding: 14px; 
+      font-size: 14px; 
+      line-height: 1.55; 
+      font-family: monospace; 
+      background-color: ${editorBg}; 
+      background-image:
+        repeating-linear-gradient(0deg, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 0, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 1px, transparent 1px, transparent 24px),
+        repeating-linear-gradient(90deg, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 0, ${isDark ? 'rgba(255,255,255,.03)' : 'rgba(0,0,0,.025)'} 1px, transparent 1px, transparent 24px),
+        repeating-linear-gradient(0deg, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 0, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 1px, transparent 1px, transparent 120px),
+        repeating-linear-gradient(90deg, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 0, ${isDark ? 'rgba(255,255,255,.06)' : 'rgba(0,0,0,.04)'} 1px, transparent 1px, transparent 120px);
+      background-attachment: local;
+      color: ${textColor}; 
+      outline: none; 
+    }
     .canvas-pane { flex: 1; display: ${hasCanvas ? 'flex' : 'none'}; flex-direction: column; min-width: 200px; min-height: 0; border: 1px solid ${borderColor}; border-radius: 12px; overflow: hidden; background: ${editorBg}; }
     .canvas-toolbar { display: flex; gap: 6px; padding: 8px 10px; border-bottom: 1px solid ${borderColor}; background: ${panelColor}; flex-shrink: 0; }
     .btn { padding: 5px 10px; border: 1px solid ${borderColor}; background: ${panelColor}; border-radius: 6px; cursor: pointer; font-size: 12px; color: ${textColor}; }
     .btn.active { background: ${activeBg}; border-color: ${activeBorder}; }
-    #canvasContainer { flex: 1; position: relative; overflow: hidden; min-height: 0; }
+    #canvasContainer { 
+      flex: 1; 
+      position: relative; 
+      overflow: hidden; 
+      min-height: 0;
+      background-color: ${editorBg};
+      background-image:
+        repeating-linear-gradient(0deg, ${isDark ? 'rgba(255,255,255,.02)' : 'rgba(0,0,0,.02)'} 0, ${isDark ? 'rgba(255,255,255,.02)' : 'rgba(0,0,0,.02)'} 1px, transparent 1px, transparent 24px),
+        repeating-linear-gradient(90deg, ${isDark ? 'rgba(255,255,255,.02)' : 'rgba(0,0,0,.02)'} 0, ${isDark ? 'rgba(255,255,255,.02)' : 'rgba(0,0,0,.02)'} 1px, transparent 1px, transparent 24px),
+        repeating-linear-gradient(0deg, ${isDark ? 'rgba(255,255,255,.04)' : 'rgba(0,0,0,.035)'} 0, ${isDark ? 'rgba(255,255,255,.04)' : 'rgba(0,0,0,.035)'} 1px, transparent 1px, transparent 120px),
+        repeating-linear-gradient(90deg, ${isDark ? 'rgba(255,255,255,.04)' : 'rgba(0,0,0,.035)'} 0, ${isDark ? 'rgba(255,255,255,.04)' : 'rgba(0,0,0,.035)'} 1px, transparent 1px, transparent 120px);
+    }
     #canvasContainer canvas { display: block; }
     #canvasContainer .canvas-container { position: absolute !important; }
     .audio-player { padding: 10px; border-top: 1px solid ${borderColor}; display: ${hasAudio ? 'block' : 'none'}; flex-shrink: 0; }
