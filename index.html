@@ -1896,21 +1896,166 @@ function updateAudioModalState() {
   }
 }
 
+// Track object URLs for cleanup
+let currentAudioObjectUrl = null;
+
 function stopAudio() {
   els.audioPlayer.pause();
   els.audioPlayer.currentTime = 0;
   els.audioPlayer.src = '';
+  
+  // Clean up object URL if any
+  if (currentAudioObjectUrl) {
+    URL.revokeObjectURL(currentAudioObjectUrl);
+    currentAudioObjectUrl = null;
+  }
+}
+
+// Convert unsupported audio to playable WAV using Web Audio API
+async function convertToPlayableAudio(dataUrl) {
+  console.log('[AudioConvert] Attempting to convert unsupported audio format...');
+  
+  try {
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    
+    // Extract base64 data
+    const base64Match = dataUrl.match(/^data:audio\/[^;]+;base64,(.+)$/);
+    if (!base64Match) {
+      throw new Error('Invalid audio data URL');
+    }
+    
+    // Convert base64 to ArrayBuffer
+    const binaryString = atob(base64Match[1]);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    
+    // Decode audio data
+    const audioBuffer = await audioContext.decodeAudioData(bytes.buffer);
+    console.log(`[AudioConvert] Decoded: ${audioBuffer.sampleRate}Hz, ${audioBuffer.numberOfChannels} ch, ${audioBuffer.duration.toFixed(2)}s`);
+    
+    // Convert to standard PCM WAV that browsers can play
+    const wavData = audioBufferToWav(audioBuffer);
+    const wavBlob = new Blob([wavData], { type: 'audio/wav' });
+    const wavUrl = URL.createObjectURL(wavBlob);
+    
+    audioContext.close();
+    console.log('[AudioConvert] Conversion successful');
+    
+    return { success: true, url: wavUrl, isObjectUrl: true };
+  } catch (e) {
+    console.error('[AudioConvert] Conversion failed:', e);
+    return { success: false, error: e.message };
+  }
+}
+
+// Convert AudioBuffer to WAV ArrayBuffer (standard PCM format)
+function audioBufferToWav(audioBuffer) {
+  const numChannels = audioBuffer.numberOfChannels;
+  const sampleRate = audioBuffer.sampleRate;
+  const format = 1; // PCM
+  const bitDepth = 16;
+  
+  // Interleave channels
+  let interleaved;
+  if (numChannels === 1) {
+    interleaved = audioBuffer.getChannelData(0);
+  } else {
+    const left = audioBuffer.getChannelData(0);
+    const right = audioBuffer.getChannelData(1);
+    interleaved = new Float32Array(left.length * 2);
+    for (let i = 0, j = 0; i < left.length; i++, j += 2) {
+      interleaved[j] = left[i];
+      interleaved[j + 1] = right[i];
+    }
+  }
+  
+  // Create WAV file
+  const dataLength = interleaved.length * (bitDepth / 8);
+  const buffer = new ArrayBuffer(44 + dataLength);
+  const view = new DataView(buffer);
+  
+  // RIFF header
+  writeString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + dataLength, true);
+  writeString(view, 8, 'WAVE');
+  
+  // fmt chunk
+  writeString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true); // chunk size
+  view.setUint16(20, format, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * numChannels * (bitDepth / 8), true); // byte rate
+  view.setUint16(32, numChannels * (bitDepth / 8), true); // block align
+  view.setUint16(34, bitDepth, true);
+  
+  // data chunk
+  writeString(view, 36, 'data');
+  view.setUint32(40, dataLength, true);
+  
+  // Write PCM samples
+  let offset = 44;
+  for (let i = 0; i < interleaved.length; i++, offset += 2) {
+    const sample = Math.max(-1, Math.min(1, interleaved[i]));
+    view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+  }
+  
+  return buffer;
+  
+  function writeString(view, offset, string) {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i));
+    }
+  }
 }
 
 async function playCurrentAudio() {
   if (currentIndex == null || !notes[currentIndex] || !notes[currentIndex].audio) return;
-  
+
+  // Clean up previous object URL if any
+  if (currentAudioObjectUrl) {
+    URL.revokeObjectURL(currentAudioObjectUrl);
+    currentAudioObjectUrl = null;
+  }
+
+  const audioPath = notes[currentIndex].audio.path;
+
   try {
-    const result = await api.readAudioBase64(notes[currentIndex].audio.path);
-    if (result.success) {
-      els.audioPlayer.src = result.dataUrl;
-      els.audioPlayer.play();
+    // Prefer file:// playback, with automatic FFmpeg transcode for formats Chromium can't decode (e.g. AIFF).
+    const src1 = await api.getAudioPlaybackUrl(audioPath, { forceTranscode: false });
+    if (!src1 || !src1.success || !src1.url) {
+      showBanner(`Could not prepare audio. ${src1?.error || ''}`.trim());
+      return;
     }
+
+    els.audioPlayer.src = src1.url;
+
+    try {
+      await els.audioPlayer.play();
+      return;
+    } catch (playError) {
+      console.log('[Audio] Playback failed:', playError?.message || playError);
+    }
+
+    // Force transcode to WAV and retry (covers platform codec gaps).
+    const src2 = await api.getAudioPlaybackUrl(audioPath, { forceTranscode: true });
+    if (src2 && src2.success && src2.url && src2.url !== src1.url) {
+      els.audioPlayer.src = src2.url;
+      await els.audioPlayer.play();
+      return;
+    }
+
+    // Final fallback: data URL approach (may still fail for unsupported codecs).
+    const result = await api.readAudioBase64(audioPath);
+    if (!result.success) {
+      showBanner('Could not read audio file.');
+      return;
+    }
+
+    els.audioPlayer.src = result.dataUrl;
+    await els.audioPlayer.play();
   } catch (err) {
     showBanner(`Could not play audio. ${String(err?.message || err)}`);
   }
@@ -2420,31 +2565,21 @@ async function exportToHtml() {
       } catch (_e) {}
     }
     
-    // Get audio data if exists (compress WAV/AIFF to MP3)
+    // Get audio data if exists (convert to MP3 for export compatibility)
     if (n.audio?.path) {
       try {
-        const audioResult = await api.readAudioBase64(n.audio.path);
-        if (audioResult.success) {
-          const originalExt = api.extname(n.audio.name).slice(1) || 'mp3';
-          
-          // Try to compress to MP3 using browser-based encoder (only compresses uncompressed formats)
-          showExportProgress('Compressing audio...');
-          const compressResult = await compressAudioToMp3(audioResult.dataUrl, originalExt);
-          
-          if (compressResult.success) {
-            const finalExt = compressResult.ext || originalExt;
-            const assetPath = api.joinPath(assetsDir, `audio.${finalExt}`);
-            await api.writeAudioBuffer(assetPath, compressResult.dataUrl);
-            noteData.audio = `assets/audio.${finalExt}`;
-            
-            if (compressResult.wasCompressed) {
-              console.log('Audio compressed to MP3 at 128kbps');
-            } else {
-              console.log(`Audio kept as ${finalExt} (MP3 encoder not available or format already compressed)`);
-            }
-          } else {
-            // Fallback to original if compression fails
-            console.warn('Audio compression failed, using original:', compressResult.error);
+        showExportProgress('Converting audio to MP3...');
+        const mp3 = await api.transcodeAudioToMp3DataUrl(n.audio.path, 128);
+
+        if (mp3 && mp3.success && mp3.dataUrl) {
+          const assetPath = api.joinPath(assetsDir, 'audio.mp3');
+          await api.writeAudioBuffer(assetPath, mp3.dataUrl);
+          noteData.audio = 'assets/audio.mp3';
+        } else {
+          // Fallback: use original format
+          const audioResult = await api.readAudioBase64(n.audio.path);
+          if (audioResult.success) {
+            const originalExt = api.extname(n.audio.name).slice(1) || 'mp3';
             const assetPath = api.joinPath(assetsDir, `audio.${originalExt}`);
             await api.writeAudioBuffer(assetPath, audioResult.dataUrl);
             noteData.audio = `assets/audio.${originalExt}`;
@@ -2452,8 +2587,8 @@ async function exportToHtml() {
         }
       } catch (_e) {}
     }
-    
-    showExportProgress('Generating HTML page...');
+
+showExportProgress('Generating HTML page...');
     const noteHtml = generateNoteHtml(noteData, currentTheme === 'dark');
     
     // Modify the HTML to remove the back button since this is a standalone export
@@ -3279,35 +3414,25 @@ async function publishToGithub() {
     
     if (n.audio?.path) {
       try {
-        const audioResult = await api.readAudioBase64(n.audio.path);
-        if (audioResult.success) {
-          const originalExt = api.extname(n.audio.name).slice(1) || 'mp3';
-          
-          // Try to compress to MP3 using browser-based encoder (only compresses uncompressed formats)
-          showExportProgress('Compressing audio...');
-          const compressResult = await compressAudioToMp3(audioResult.dataUrl, originalExt);
-          
-          if (compressResult.success) {
-            const finalExt = compressResult.ext || originalExt;
-            noteData.audio = `audio.${finalExt}`;
-            filesToUpload.push({ path: `${noteDirName}/audio.${finalExt}`, content: compressResult.dataUrl.split(',')[1], isBinary: true });
-            
-            if (compressResult.wasCompressed) {
-              console.log('GitHub: Audio compressed to MP3 at 128kbps');
-            } else {
-              console.log(`GitHub: Audio kept as ${finalExt} (MP3 encoder not available or format already compressed)`);
-            }
-          } else {
-            // Fallback to original if compression fails
-            console.warn('Audio compression failed, using original:', compressResult.error);
+        showExportProgress('Converting audio to MP3...');
+        const mp3 = await api.transcodeAudioToMp3DataUrl(n.audio.path, 128);
+
+        if (mp3 && mp3.success && mp3.dataUrl) {
+          noteData.audio = 'audio.mp3';
+          filesToUpload.push({ path: `${noteDirName}/audio.mp3`, content: mp3.dataUrl.split(',')[1], isBinary: true });
+        } else {
+          // Fallback: use original format
+          const audioResult = await api.readAudioBase64(n.audio.path);
+          if (audioResult.success) {
+            const originalExt = api.extname(n.audio.name).slice(1) || 'mp3';
             noteData.audio = `audio.${originalExt}`;
             filesToUpload.push({ path: `${noteDirName}/audio.${originalExt}`, content: audioResult.dataUrl.split(',')[1], isBinary: true });
           }
         }
       } catch (_e) {}
     }
-    
-    showExportProgress('Generating note page...');
+
+showExportProgress('Generating note page...');
     const noteHtml = generateNoteHtml(noteData, currentTheme === 'dark');
     filesToUpload.unshift({ path: `${noteDirName}/index.html`, content: noteHtml, isBinary: false });
     

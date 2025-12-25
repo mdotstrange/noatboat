@@ -5,7 +5,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "postinstall": "electron-rebuild",
+    "postinstall": "npx @electron/rebuild",
     "build-win": "electron-builder --win",
     "build-mac": "electron-builder --mac",
     "build-mac-intel": "electron-builder --mac --x64",
@@ -25,17 +25,22 @@
       "!dist/**"
     ],
     "asarUnpack": [
-      "node_modules/node-llama-cpp/**"
+      "**/node-llama-cpp/**",
+      "**/ffmpeg-static/**"
     ],
     "win": {
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "build/icon.ico"
@@ -47,11 +52,17 @@
       "target": [
         {
           "target": "dir",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         },
         {
           "target": "dmg",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ],
       "icon": "build/icon.icns",
@@ -59,7 +70,10 @@
       "artifactName": "${productName}-${version}-${arch}.${ext}"
     },
     "linux": {
-      "target": ["AppImage", "deb"],
+      "target": [
+        "AppImage",
+        "deb"
+      ],
       "icon": "build/icon.png",
       "category": "Office"
     },
@@ -70,15 +84,19 @@
       "uninstallerIcon": "build/icon.ico"
     }
   },
-  "keywords": ["notes", "markdown"],
+  "keywords": [
+    "notes",
+    "markdown"
+  ],
   "author": "Some Other Guy",
   "license": "MIT",
   "dependencies": {
-    "node-llama-cpp": "^3.2.0"
+    "node-llama-cpp": "^3.2.0",
+    "ffmpeg-static": "^5.2.0"
   },
   "devDependencies": {
     "electron": "^39.2.7",
     "electron-builder": "^24.9.1",
-    "electron-rebuild": "^3.6.0"
+    "@electron/rebuild": "^3.6.0"
   }
 }

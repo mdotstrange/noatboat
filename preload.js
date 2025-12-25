@@ -25,7 +25,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   readAudioBase64: (filePath) => ipcRenderer.invoke('read-audio-base64', filePath),
   writeAudioBuffer: (filePath, base64Data) => ipcRenderer.invoke('write-audio-buffer', filePath, base64Data),
   openAudioDialog: () => ipcRenderer.invoke('open-audio-dialog'),
-  
+  // Audio transcoding / playback helpers
+  getAudioPlaybackUrl: (filePath, options) => ipcRenderer.invoke('get-audio-playback-url', filePath, options || {}),
+  transcodeAudioToMp3DataUrl: (filePath, bitrateKbps) => ipcRenderer.invoke('transcode-audio-to-mp3-dataurl', filePath, bitrateKbps || 128),
+
   // Canvas operations
   readCanvasJson: (filePath) => ipcRenderer.invoke('read-canvas-json', filePath),
   writeCanvasJson: (filePath, jsonData) => ipcRenderer.invoke('write-canvas-json', filePath, jsonData),

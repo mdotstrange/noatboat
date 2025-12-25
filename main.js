@@ -3,6 +3,93 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os'); // Added for temp file handling
 
+const { spawn } = require('child_process');
+const { pathToFileURL } = require('url');
+const crypto = require('crypto');
+
+let ffmpegPath = null;
+try {
+  ffmpegPath = require('ffmpeg-static');
+
+  // When packaged with asar, binaries must be read from app.asar.unpacked.
+  // ffmpeg-static may still resolve a path under app.asar, which is not executable and can throw ENOTDIR.
+  if (ffmpegPath && typeof ffmpegPath === 'string' && ffmpegPath.includes('app.asar')) {
+    ffmpegPath = ffmpegPath.replace('app.asar', 'app.asar.unpacked');
+  }
+
+  // Ensure the binary is executable on macOS/Linux.
+  if (ffmpegPath && process.platform !== 'win32') {
+    try { fs.chmodSync(ffmpegPath, 0o755); } catch (_e) {}
+  }
+} catch (e) {
+  console.warn('ffmpeg-static not available; audio transcoding disabled.');
+}
+
+// Lazily created cache dir for transcoded audio
+function getAudioCacheDir() {
+  const dir = path.join(app.getPath('userData'), 'audio-cache');
+  try {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  } catch (_e) {}
+  return dir;
+}
+
+function getFileSignature(p) {
+  try {
+    const st = fs.statSync(p);
+    return `${st.size}|${st.mtimeMs}`;
+  } catch (_e) {
+    return '0|0';
+  }
+}
+
+function getCachedAudioPath(inputPath, outExt) {
+  const sig = getFileSignature(inputPath);
+  const key = crypto.createHash('sha1').update(`${inputPath}|${sig}`).digest('hex');
+  return path.join(getAudioCacheDir(), `${key}.${outExt}`);
+}
+
+function runFfmpeg(args) {
+  return new Promise((resolve, reject) => {
+    if (!ffmpegPath) {
+      reject(new Error('ffmpeg not available'));
+      return;
+    }
+    if (!fs.existsSync(ffmpegPath)) {
+      reject(new Error(`ffmpeg binary not found: ${ffmpegPath}`));
+      return;
+    }
+    const p = spawn(ffmpegPath, args, { windowsHide: true });
+    let stderr = '';
+    p.stderr.on('data', (d) => { stderr += d.toString(); });
+    p.on('error', (err) => reject(new Error(`${err.message} (ffmpegPath=${ffmpegPath})`)));
+    p.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error((stderr || '').trim() || `ffmpeg exited with code ${code}`));
+    });
+  });
+}
+
+async function transcodeToWavCached(inputPath) {
+  const outPath = getCachedAudioPath(inputPath, 'wav');
+  if (fs.existsSync(outPath)) return outPath;
+
+  // -vn to ignore video streams, force stereo and 44.1kHz for predictable playback
+  await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', inputPath, '-vn', '-ac', '2', '-ar', '44100', '-f', 'wav', outPath]);
+  return outPath;
+}
+
+async function transcodeToMp3DataUrl(inputPath, bitrateKbps = 128) {
+  const outPath = getCachedAudioPath(inputPath, 'mp3');
+  if (!fs.existsSync(outPath)) {
+    await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', inputPath, '-vn', '-ac', '2', '-ar', '44100', '-b:a', `${bitrateKbps}k`, '-f', 'mp3', outPath]);
+  }
+  const buf = fs.readFileSync(outPath);
+  const b64 = buf.toString('base64');
+  return { path: outPath, dataUrl: `data:audio/mpeg;base64,${b64}` };
+}
+
+
 // Note: MP3 encoding is done in the renderer process using lamejs from CDN
 
 // Config file path for storing preferences (like last folder)
@@ -751,7 +838,7 @@ ipcMain.handle('read-audio-base64', async (event, filePath) => {
     const ext = path.extname(filePath).toLowerCase().slice(1);
     let mimeType = 'audio/mpeg';
     if (ext === 'wav') mimeType = 'audio/wav';
-    else if (ext === 'aiff' || ext === 'aif') mimeType = 'audio/aiff';
+    else if (ext === 'aiff' || ext === 'aif') mimeType = 'audio/x-aiff'; // x-aiff is more widely supported
     else if (ext === 'ogg') mimeType = 'audio/ogg';
     else if (ext === 'm4a') mimeType = 'audio/mp4';
     else if (ext === 'flac') mimeType = 'audio/flac';
@@ -774,6 +861,54 @@ ipcMain.handle('write-audio-buffer', async (event, filePath, base64Data) => {
     return { success: true, lastModified: stats.mtimeMs, size: stats.size };
   } catch (e) {
     return { success: false, error: e.message };
+  }
+});
+
+
+// Get a playback URL for an audio file.
+// If the format isn't reliably supported by Chromium (e.g. AIFF), it will be transcoded to WAV via ffmpeg.
+ipcMain.handle('get-audio-playback-url', async (event, filePath, options = {}) => {
+  try {
+    if (!filePath || !fs.existsSync(filePath)) {
+      return { success: false, error: 'Audio file not found' };
+    }
+
+    const ext = path.extname(filePath).toLowerCase().slice(1);
+    const forceTranscode = !!options.forceTranscode;
+
+    // Keep these as-is to avoid unnecessary transcoding.
+    const passthrough = new Set(['mp3', 'wav', 'ogg']);
+    const needsTranscode = forceTranscode || !passthrough.has(ext);
+
+    if (!needsTranscode) {
+      return { success: true, url: pathToFileURL(filePath).href, wasTranscoded: false };
+    }
+
+    if (!ffmpegPath) {
+      // No ffmpeg available; return the original file URL and let the renderer try.
+      return { success: true, url: pathToFileURL(filePath).href, wasTranscoded: false, warning: 'ffmpeg unavailable' };
+    }
+
+    const wavPath = await transcodeToWavCached(filePath);
+    return { success: true, url: pathToFileURL(wavPath).href, wasTranscoded: true, transcodedPath: wavPath };
+  } catch (e) {
+    return { success: false, error: String(e.message || e) };
+  }
+});
+
+// Transcode an audio file to MP3 and return a data: URL (used for HTML/GitHub export).
+ipcMain.handle('transcode-audio-to-mp3-dataurl', async (event, filePath, bitrateKbps = 128) => {
+  try {
+    if (!filePath || !fs.existsSync(filePath)) {
+      return { success: false, error: 'Audio file not found' };
+    }
+    if (!ffmpegPath) {
+      return { success: false, error: 'ffmpeg unavailable' };
+    }
+    const out = await transcodeToMp3DataUrl(filePath, bitrateKbps);
+    return { success: true, dataUrl: out.dataUrl };
+  } catch (e) {
+    return { success: false, error: String(e.message || e) };
   }
 });
 
