@@ -3792,25 +3792,65 @@ async function refreshNotes() {
   if (keepFocus) setFocusMode(true);
 }
 
-// Check if a note is empty (no text, no image, no canvas, no audio)
-function isNoteEmpty(n) {
+// Check if a note is empty (no text, no image, no canvas content, no audio)
+// Pass editorContent when checking the currently active note to ensure we get the latest value
+// This is async because it may need to check canvas file contents
+async function isNoteEmpty(n, editorContent = null) {
   if (!n) return false;
-  const hasText = n.content && n.content.trim().length > 0;
-  const hasImage = n.image && n.image.path;
-  const hasCanvas = n.canvas && (n.canvas.jsonPath || n.canvas.pngPath);
-  const hasAudio = n.audio && n.audio.path;
-  return !hasText && !hasImage && !hasCanvas && !hasAudio;
+  
+  // Use provided editorContent if given, otherwise fall back to n.content
+  const textContent = editorContent !== null ? editorContent : (n.content || '');
+  const hasText = textContent.trim().length > 0;
+  const hasImage = !!(n.image && n.image.path);
+  const hasAudio = !!(n.audio && n.audio.path);
+  
+  // For canvas, we need to check if the file actually has objects, not just if the path exists
+  let hasCanvasContent = false;
+  if (n.canvas && n.canvas.jsonPath) {
+    try {
+      const result = await api.readCanvasJson(n.canvas.jsonPath);
+      if (result.success && result.data) {
+        const canvasData = JSON.parse(result.data);
+        // Check if canvas has any objects
+        hasCanvasContent = canvasData.objects && canvasData.objects.length > 0;
+      }
+    } catch (e) {
+      // If we can't read/parse the file, assume no canvas content
+      hasCanvasContent = false;
+    }
+  }
+  
+  console.log('[isNoteEmpty] Check:', { 
+    hasText, 
+    textLength: textContent.trim().length,
+    hasImage, 
+    hasCanvasContent,
+    canvasPath: n.canvas?.jsonPath || null,
+    hasAudio,
+    result: !hasText && !hasImage && !hasCanvasContent && !hasAudio 
+  });
+  
+  return !hasText && !hasImage && !hasCanvasContent && !hasAudio;
 }
 
 // Auto-delete an empty note without confirmation
-async function autoDeleteEmptyNote(noteIndex) {
-  if (noteIndex == null || !notes[noteIndex] || !folderPath) return;
+// editorContent should be passed when deleting the currently active note
+async function autoDeleteEmptyNote(noteIndex, editorContent = null) {
+  console.log('[AutoDelete] autoDeleteEmptyNote called with index:', noteIndex);
+  if (noteIndex == null || !notes[noteIndex] || !folderPath) {
+    console.log('[AutoDelete] Bailing early - null index, no note, or no folder');
+    return;
+  }
   const n = notes[noteIndex];
   
-  // Double-check the note is actually empty
-  if (!isNoteEmpty(n)) return;
+  // Double-check the note is actually empty (use editorContent if provided)
+  if (!(await isNoteEmpty(n, editorContent))) {
+    console.log('[AutoDelete] Note not empty on double-check, aborting');
+    return;
+  }
   
   try {
+    console.log('[AutoDelete] Deleting file:', n.path);
     // Delete the note file silently
     await api.deleteFile(n.path);
     
@@ -3822,10 +3862,10 @@ async function autoDeleteEmptyNote(noteIndex) {
     // Remove from notes array
     notes.splice(noteIndex, 1);
     
-    console.log('Auto-deleted empty note:', n.name);
+    console.log('[AutoDelete] Successfully auto-deleted empty note:', n.name);
   } catch (err) {
     // Silently ignore errors - the note might already be deleted
-    console.warn('Failed to auto-delete empty note:', err);
+    console.warn('[AutoDelete] Failed to auto-delete empty note:', err);
   }
 }
 
@@ -3840,22 +3880,35 @@ async function openNoteByIndex(idx, opts = {}) {
     await saveCanvasState();
   }
   
+  // Auto-delete the previous note if it was empty (Apple Notes-like behavior)
+  // Check BEFORE flushing to ensure we capture the current editor state
+  const previousIndex = currentIndex;
+  const editorContent = els.editor ? els.editor.value : '';
+  
+  console.log('[AutoDelete] Switching from index', previousIndex, 'to index', idx);
+  
   await flushSaveIfNeeded();
   
-  // Auto-delete the previous note if it was empty (Apple Notes-like behavior)
-  const previousIndex = currentIndex;
   if (previousIndex != null && previousIndex !== idx && notes[previousIndex]) {
-    // Update the note's content from editor before checking if empty
-    notes[previousIndex].content = els.editor.value || '';
+    const prevNote = notes[previousIndex];
+    console.log('[AutoDelete] Checking note:', prevNote.name);
+    console.log('[AutoDelete] - editor content length:', editorContent.trim().length);
+    console.log('[AutoDelete] - has image:', !!(prevNote.image && prevNote.image.path));
+    console.log('[AutoDelete] - has canvas:', !!(prevNote.canvas && (prevNote.canvas.jsonPath || prevNote.canvas.pngPath)));
+    console.log('[AutoDelete] - has audio:', !!(prevNote.audio && prevNote.audio.path));
     
-    if (isNoteEmpty(notes[previousIndex])) {
-      await autoDeleteEmptyNote(previousIndex);
+    // Pass editor content directly to ensure we check the current state
+    if (await isNoteEmpty(notes[previousIndex], editorContent)) {
+      console.log('[AutoDelete] Note is empty, deleting:', prevNote.name);
+      await autoDeleteEmptyNote(previousIndex, editorContent);
       // Adjust the target index if it was after the deleted note
       if (idx > previousIndex) {
         idx = idx - 1;
+        console.log('[AutoDelete] Adjusted target index to:', idx);
       }
       // If the target note no longer exists, bail
       if (!notes[idx]) {
+        console.log('[AutoDelete] Target note no longer exists, bailing');
         currentIndex = null;
         renderCurrent();
         renderList();
@@ -3869,7 +3922,7 @@ async function openNoteByIndex(idx, opts = {}) {
   renderList();
   await renderImage();
   // Auto-play audio if the note has one
-  if (notes[idx].audio) {
+  if (notes[idx] && notes[idx].audio) {
     await playCurrentAudio();
   }
   if (focusEditor) els.editor.focus();
@@ -4148,10 +4201,19 @@ els.searchInput.addEventListener('focus', async () => {
   setFocusMode(false);
   
   // Auto-delete the current note if it's empty when clicking away to search
+  console.log('[AutoDelete:Search] Search focused, currentIndex:', currentIndex);
   if (currentIndex != null && notes[currentIndex]) {
-    notes[currentIndex].content = els.editor.value || '';
-    if (isNoteEmpty(notes[currentIndex])) {
-      await autoDeleteEmptyNote(currentIndex);
+    // Get editor content BEFORE any async operations
+    const editorContent = els.editor ? els.editor.value : '';
+    
+    const n = notes[currentIndex];
+    console.log('[AutoDelete:Search] Checking note:', n.name);
+    console.log('[AutoDelete:Search] - editor content length:', editorContent.trim().length);
+    
+    // Pass editor content directly to ensure we check the current state
+    if (await isNoteEmpty(notes[currentIndex], editorContent)) {
+      console.log('[AutoDelete:Search] Note is empty, deleting');
+      await autoDeleteEmptyNote(currentIndex, editorContent);
       currentIndex = null;
       renderCurrent();
       renderList();
