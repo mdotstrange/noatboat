@@ -369,8 +369,13 @@ ipcMain.handle('read-image-base64', async (event, filePath) => {
 // Write image from buffer (for drawings)
 ipcMain.handle('write-image-buffer', async (event, filePath, base64Data) => {
   try {
-    // base64Data is the data URL, strip the prefix
-    const base64 = base64Data.replace(/^data:image\/\w+;base64,/, '');
+    // base64Data can be either:
+    // 1. A full data URL like "data:image/jpeg;base64,..."
+    // 2. Just the base64 string
+    let base64 = base64Data;
+    if (base64Data.startsWith('data:')) {
+      base64 = base64Data.split(',')[1] || base64Data;
+    }
     const buffer = Buffer.from(base64, 'base64');
     fs.writeFileSync(filePath, buffer);
     const stats = fs.statSync(filePath);
@@ -2266,4 +2271,4 @@ function generateExportHtml(title, notesJson, css, js, isDark) {
   </script>
 </body>
 </html>`;
-}r
+}

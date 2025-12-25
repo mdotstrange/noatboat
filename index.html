@@ -2396,10 +2396,12 @@ async function exportToHtml() {
         if (await api.fileExists(pngPath)) {
           const imgResult = await api.readImageBase64(pngPath);
           if (imgResult.success) {
-            showExportProgress('Saving canvas image...');
-            const assetPath = api.joinPath(assetsDir, 'canvas.png');
-            await api.writeImageBuffer(assetPath, imgResult.dataUrl.split(',')[1]);
-            noteData.canvasImage = 'assets/canvas.png';
+            showExportProgress('Compressing canvas image...');
+            // Convert to JPEG at 75% quality
+            const jpegDataUrl = await convertImageToJpeg(imgResult.dataUrl);
+            const assetPath = api.joinPath(assetsDir, 'canvas.jpg');
+            await api.writeImageBuffer(assetPath, jpegDataUrl);
+            noteData.canvasImage = 'assets/canvas.jpg';
           }
         }
       } catch (_e) {}
@@ -2407,11 +2409,12 @@ async function exportToHtml() {
       try {
         const imgResult = await api.readImageBase64(n.image.path);
         if (imgResult.success) {
-          showExportProgress('Saving image...');
-          const ext = api.extname(n.image.name).slice(1) || 'png';
-          const assetPath = api.joinPath(assetsDir, `image.${ext}`);
-          await api.writeImageBuffer(assetPath, imgResult.dataUrl.split(',')[1]);
-          noteData.image = `assets/image.${ext}`;
+          showExportProgress('Compressing image...');
+          // Convert to JPEG at 75% quality
+          const jpegDataUrl = await convertImageToJpeg(imgResult.dataUrl);
+          const assetPath = api.joinPath(assetsDir, 'image.jpg');
+          await api.writeImageBuffer(assetPath, jpegDataUrl);
+          noteData.image = 'assets/image.jpg';
         }
       } catch (_e) {}
     }
@@ -3027,6 +3030,47 @@ function generateNoteHtml(noteData, isDark) {
 }
 
 // Main function to publish current note to GitHub
+
+// Helper function to convert image data URL to JPEG at 75% quality (browser-based)
+async function convertImageToJpeg(dataUrl) {
+  return new Promise((resolve) => {
+    // Skip if not an image or already a JPEG
+    if (!dataUrl || !dataUrl.startsWith('data:image/')) {
+      resolve(dataUrl);
+      return;
+    }
+    
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        
+        // Fill with white background (for transparency)
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        // Draw the image
+        ctx.drawImage(img, 0, 0);
+        
+        // Convert to JPEG at 75% quality
+        const jpegDataUrl = canvas.toDataURL('image/jpeg', 0.75);
+        resolve(jpegDataUrl);
+      } catch (e) {
+        console.error('Failed to convert image to JPEG:', e);
+        resolve(dataUrl); // Return original on error
+      }
+    };
+    img.onerror = () => {
+      console.error('Failed to load image for JPEG conversion');
+      resolve(dataUrl); // Return original on error
+    };
+    img.src = dataUrl;
+  });
+}
+
 async function publishToGithub() {
   if (isExporting) return;
   
@@ -3069,8 +3113,11 @@ async function publishToGithub() {
         if (await api.fileExists(pngPath)) {
           const imgResult = await api.readImageBase64(pngPath);
           if (imgResult.success) {
-            noteData.canvasImage = 'canvas.png';
-            filesToUpload.push({ path: `${noteDirName}/canvas.png`, content: imgResult.dataUrl.split(',')[1], isBinary: true });
+            // Convert to JPEG for smaller file size
+            showExportProgress('Compressing canvas image...');
+            const jpegDataUrl = await convertImageToJpeg(imgResult.dataUrl);
+            noteData.canvasImage = 'canvas.jpg';
+            filesToUpload.push({ path: `${noteDirName}/canvas.jpg`, content: jpegDataUrl.split(',')[1], isBinary: true });
           }
         }
       } catch (_e) {}
@@ -3078,9 +3125,11 @@ async function publishToGithub() {
       try {
         const imgResult = await api.readImageBase64(n.image.path);
         if (imgResult.success) {
-          const ext = api.extname(n.image.name).slice(1) || 'png';
-          noteData.image = `image.${ext}`;
-          filesToUpload.push({ path: `${noteDirName}/image.${ext}`, content: imgResult.dataUrl.split(',')[1], isBinary: true });
+          // Convert to JPEG for smaller file size
+          showExportProgress('Compressing image...');
+          const jpegDataUrl = await convertImageToJpeg(imgResult.dataUrl);
+          noteData.image = 'image.jpg';
+          filesToUpload.push({ path: `${noteDirName}/image.jpg`, content: jpegDataUrl.split(',')[1], isBinary: true });
         }
       } catch (_e) {}
     }
