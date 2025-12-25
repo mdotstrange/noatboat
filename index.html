@@ -3255,6 +3255,11 @@ async function fixText(isManual = false) {
     }
     
     console.log('Fix result:', fixedText ? 'got response' : 'no response');
+    if (fixedText) {
+      console.log('Original text:', JSON.stringify(text));
+      console.log('Fixed text:', JSON.stringify(fixedText));
+      console.log('Are they different?', fixedText.trim() !== text.trim());
+    }
     
     if (fixedText && fixedText.trim() !== text.trim()) {
       // Preserve cursor position as best we can

@@ -173,8 +173,6 @@ app.on('before-quit', async () => {
   // Clean up local LLM model
   if (currentModel) {
     try {
-      // Session doesn't need explicit disposal
-      if (currentModel.context) await currentModel.context.dispose();
       if (currentModel.model) await currentModel.model.dispose();
     } catch (e) {
       console.error('Error disposing model on quit:', e);
@@ -496,10 +494,6 @@ ipcMain.handle('run-local-llm', async (event, modelPath, text) => {
         // Dispose old model if exists
         if (currentModel) {
           try {
-            if (currentModel.session) {
-              console.log('Disposing old session...');
-              // Session doesn't need explicit disposal
-            }
             if (currentModel.context) {
               console.log('Disposing old context...');
               await currentModel.context.dispose();
@@ -521,18 +515,10 @@ ipcMain.handle('run-local-llm', async (event, modelPath, text) => {
         console.log('Loading model...');
         const model = await llama.loadModel({ modelPath });
         
-        // Use smaller context for better compatibility with large models
-        const contextSize = 2048; // Reduced from 4096
-        console.log('Creating context with size:', contextSize);
-        const context = await model.createContext({ contextSize });
-        console.log('Creating chat session...');
-        const session = new LlamaChatSession({
-          contextSequence: context.getSequence()
-        });
-        
-        currentModel = { llama, model, context, session };
+        // Store just the model and llama instance - we'll create fresh context/session per call
+        currentModel = { llama, model, LlamaChatSession };
         currentModelPath = modelPath;
-        console.log('Model, context, and session loaded successfully');
+        console.log('Model loaded successfully');
       } catch (e) {
         console.error('Failed to load model:', e);
         console.error('Error stack:', e.stack);
@@ -542,23 +528,43 @@ ipcMain.handle('run-local-llm', async (event, modelPath, text) => {
       }
     }
     
+    // Create a fresh context and session for each inference call
+    // This ensures no context pollution from previous calls
+    let context = null;
+    let session = null;
+    
     // Run inference with timeout
     try {
       console.log('Starting inference...');
+      console.log('Original text:', text);
       
-      // Simple, clear prompt that works better with various models
-      const prompt = `Fix spelling and grammar errors only. Return the corrected text without any explanation.
+      // Create fresh context and session
+      const contextSize = 2048;
+      console.log('Creating fresh context with size:', contextSize);
+      context = await currentModel.model.createContext({ contextSize });
+      session = new currentModel.LlamaChatSession({
+        contextSequence: context.getSequence()
+      });
+      console.log('Fresh session created');
+      
+      // Use a structured prompt with clear delimiters that works better with various models
+      // Many local models respond better to example-based or clearly delimited prompts
+      const prompt = `You are a spelling and grammar correction assistant. Your task is to fix spelling mistakes and grammar errors in the text below. Only fix errors - do not change the meaning, style, or add any commentary.
 
-${text}`;
+INPUT TEXT:
+${text}
+
+CORRECTED TEXT:`;
       
       console.log('Calling session.prompt...');
       
       // Add timeout to prevent hanging (90 seconds for larger texts)
       const timeoutMs = 90000;
-      const inferencePromise = currentModel.session.prompt(prompt, {
-        maxTokens: Math.min(Math.ceil(text.length * 2), 4096),
-        temperature: 0.1,
-        topP: 0.95
+      const inferencePromise = session.prompt(prompt, {
+        maxTokens: Math.min(Math.ceil(text.length * 2) + 100, 4096),
+        temperature: 0.2,
+        topP: 0.9,
+        stopOnAbortSignal: false
       });
       
       const timeoutPromise = new Promise((_, reject) => {
@@ -567,15 +573,24 @@ ${text}`;
       
       const response = await Promise.race([inferencePromise, timeoutPromise]);
       
+      // Dispose context immediately after getting response
+      try {
+        await context.dispose();
+        context = null;
+      } catch (disposeErr) {
+        console.warn('Error disposing context:', disposeErr);
+      }
+      
       console.log('Inference complete');
+      console.log('Raw response:', JSON.stringify(response));
       console.log('Response length:', response.length);
-      console.log('Response preview:', response.substring(0, 200));
       
       // Clean up the response - remove common model artifacts
       let cleanedResponse = response.trim();
       
-      // Remove common prefixes/suffixes models might add
+      // Remove common prefixes/suffixes models might add (case insensitive)
       const unwantedPrefixes = [
+        'CORRECTED TEXT:',
         'Corrected text:',
         'Here is the corrected text:',
         'Here\'s the corrected text:',
@@ -583,13 +598,30 @@ ${text}`;
         'Corrected:',
         'Here is the text with corrections:',
         'Fixed text:',
+        'Fixed:',
         'Output:',
-        'Result:'
+        'Result:',
+        'Sure, here',
+        'Sure! Here',
+        'Of course',
+        'I\'ve corrected',
+        'I have corrected',
+        'The corrected version:',
+        'Here you go:'
       ];
       
       for (const prefix of unwantedPrefixes) {
         if (cleanedResponse.toLowerCase().startsWith(prefix.toLowerCase())) {
           cleanedResponse = cleanedResponse.substring(prefix.length).trim();
+        }
+      }
+      
+      // If the response contains "INPUT TEXT:" it might have repeated the prompt - extract after CORRECTED TEXT:
+      if (cleanedResponse.includes('INPUT TEXT:') || cleanedResponse.includes('CORRECTED TEXT:')) {
+        const marker = 'CORRECTED TEXT:';
+        const markerIndex = cleanedResponse.lastIndexOf(marker);
+        if (markerIndex !== -1) {
+          cleanedResponse = cleanedResponse.substring(markerIndex + marker.length).trim();
         }
       }
       
@@ -612,19 +644,41 @@ ${text}`;
         }
       }
       
+      // Remove trailing commentary that some models add (after periods followed by explanation)
+      // Look for patterns like ". I fixed..." or ". Note:" at the end
+      const commentaryPatterns = [
+        /\.\s*(I (have |had )?(fixed|corrected|changed|made|updated).*$)/i,
+        /\.\s*(Note:.*$)/i,
+        /\.\s*(I hope.*$)/i,
+        /\.\s*(Let me know.*$)/i,
+        /\.\s*(The (main |only )?changes? (I made |were|are|is).*$)/i
+      ];
+      
+      for (const pattern of commentaryPatterns) {
+        const match = cleanedResponse.match(pattern);
+        if (match) {
+          // Only trim if the commentary is at the end and the remaining text is reasonable
+          const trimmed = cleanedResponse.replace(pattern, '.');
+          if (trimmed.length >= text.length * 0.5) {
+            cleanedResponse = trimmed;
+          }
+        }
+      }
+      
+      console.log('Cleaned response:', JSON.stringify(cleanedResponse));
+      
       // Validate the response isn't completely different from input
       const originalLength = text.length;
       const responseLength = cleanedResponse.length;
       
-      // Only reject if response is drastically different (50% shorter or 100% longer)
-      // This is more permissive to avoid false rejections
-      if (responseLength < originalLength * 0.5) {
+      // Only reject if response is drastically different (40% shorter or 150% longer)
+      if (responseLength < originalLength * 0.4) {
         console.warn('Response is too short:', responseLength, 'vs', originalLength);
         console.warn('Rejecting response - too much content deleted');
         return { success: false, error: 'Model output too short. Try a different model.' };
       }
       
-      if (responseLength > originalLength * 2) {
+      if (responseLength > originalLength * 2.5) {
         console.warn('Response is too long:', responseLength, 'vs', originalLength);
         console.warn('Rejecting response - too much content added');
         return { success: false, error: 'Model added too much text. Try a different model.' };
@@ -636,22 +690,42 @@ ${text}`;
         return { success: false, error: 'Model returned empty response.' };
       }
       
+      // Check if the response is identical to input (model didn't do anything)
+      if (cleanedResponse.trim().toLowerCase() === text.trim().toLowerCase()) {
+        console.log('Response identical to input - no changes made by model');
+        // Return success but with the original text - the UI will show "no fixes needed"
+        return { success: true, text: cleanedResponse };
+      }
+      
+      console.log('Returning corrected text');
       return { success: true, text: cleanedResponse };
     } catch (e) {
       console.error('Inference error:', e);
       console.error('Error stack:', e.stack);
       
-      // On error, dispose and reset the session so next attempt works
+      // Clean up the context we created for this call
       try {
-        console.log('Cleaning up after error...');
-        if (currentModel) {
-          if (currentModel.context) await currentModel.context.dispose();
-          if (currentModel.model) await currentModel.model.dispose();
-          currentModel = null;
-          currentModelPath = null;
+        if (context) {
+          console.log('Disposing context after error...');
+          await context.dispose();
+          context = null;
         }
       } catch (cleanupErr) {
-        console.error('Error during cleanup:', cleanupErr);
+        console.error('Error disposing context:', cleanupErr);
+      }
+      
+      // Only dispose the model on critical errors (not timeouts)
+      if (e.message && !e.message.includes('timeout')) {
+        try {
+          console.log('Cleaning up model after critical error...');
+          if (currentModel && currentModel.model) {
+            await currentModel.model.dispose();
+          }
+          currentModel = null;
+          currentModelPath = null;
+        } catch (modelCleanupErr) {
+          console.error('Error during model cleanup:', modelCleanupErr);
+        }
       }
       
       return { success: false, error: 'Inference failed: ' + e.message };
@@ -2192,4 +2266,4 @@ function generateExportHtml(title, notesJson, css, js, isDark) {
   </script>
 </body>
 </html>`;
-}
+}r
