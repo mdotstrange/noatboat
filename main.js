@@ -299,7 +299,8 @@ ipcMain.handle('get-preferences', async () => {
     openAIKey: config.openAIKey || '',
     localModelPath: config.localModelPath || '',
     githubToken: config.githubToken || '',
-    githubRepo: config.githubRepo || ''
+    githubRepo: config.githubRepo || '',
+    publishingName: config.publishingName || ''
   };
 });
 
@@ -314,6 +315,7 @@ ipcMain.handle('save-preferences', async (event, prefs) => {
   if (prefs.localModelPath !== undefined) config.localModelPath = prefs.localModelPath;
   if (prefs.githubToken !== undefined) config.githubToken = prefs.githubToken;
   if (prefs.githubRepo !== undefined) config.githubRepo = prefs.githubRepo;
+  if (prefs.publishingName !== undefined) config.publishingName = prefs.publishingName;
   saveConfig(config);
   return true;
 });
@@ -2376,13 +2378,16 @@ function generateExportJs() {
   `;
 }
 
-function generateExportHtml(title, notesJson, css, js, isDark) {
+function generateExportHtml(title, notesJson, css, js, isDark, publishingName = '') {
+  // Build the Noat Boat branding with optional owner name
+  const noatBoatTitle = publishingName ? `${escapeHtml(publishingName)}'s Noat Boat` : 'Noat Boat';
+  
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${escapeHtml(title)} - Noat Boat Export</title>
+  <title>${escapeHtml(title)} - ${noatBoatTitle} Export</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"></script>
   <style>${css}</style>
 </head>
@@ -2390,7 +2395,7 @@ function generateExportHtml(title, notesJson, css, js, isDark) {
   <div class="topbar">
     <input id="searchInput" class="search" placeholder="Search notes..." />
     <span style="flex:1;"></span>
-    <span style="font-size:13px;color:${isDark ? '#999' : '#666'};">📓 ${escapeHtml(title)}</span>
+    <span style="font-size:13px;color:${isDark ? '#999' : '#666'};">📓 ${escapeHtml(title)} - ${noatBoatTitle}</span>
   </div>
   
   <div class="main">

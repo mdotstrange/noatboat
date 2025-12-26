@@ -938,6 +938,13 @@
           </div>
           <div class="prefHint">Format: username/repository-name (e.g., myuser/my-notes)</div>
         </div>
+        <div class="prefItem">
+          <label class="prefLabel">My Publishing Name</label>
+          <div class="prefControl">
+            <input type="text" id="publishingNameInput" class="search" style="max-width:100%;flex:1;" placeholder="Your name">
+          </div>
+          <div class="prefHint">Optional: Adds "[Name]'s" before "Noat Boat" on exported pages (e.g., "Jim's Noat Boat")</div>
+        </div>
       </div>
     </div>
   </div>
@@ -1079,6 +1086,7 @@ const els = {
   // GitHub elements
   githubTokenInput: document.getElementById('githubTokenInput'),
   githubRepoInput: document.getElementById('githubRepoInput'),
+  publishingNameInput: document.getElementById('publishingNameInput'),
   publishGithubBtn: document.getElementById('publishGithubBtn'),
 };
 
@@ -2133,6 +2141,7 @@ let openAIKey = '';
 let localModelPath = '';
 let githubToken = '';
 let githubRepo = '';
+let publishingName = '';
 let autoFixTimer = null;
 let isAutoFixing = false;
 const AUTO_FIX_DEBOUNCE_MS = 1500; // Wait 1.5s after typing stops before fixing
@@ -2589,7 +2598,7 @@ async function exportToHtml() {
     }
 
 showExportProgress('Generating HTML page...');
-    const noteHtml = generateNoteHtml(noteData, currentTheme === 'dark');
+    const noteHtml = generateNoteHtml(noteData, currentTheme === 'dark', publishingName);
     
     // Modify the HTML to remove the back button since this is a standalone export
     const modifiedHtml = noteHtml.replace(
@@ -2703,13 +2712,17 @@ function escapeHtmlForGithub(str) {
 }
 
 // Generate the root index.html with animated boat
-function generateRootIndexHtml(noteLinks, isDark) {
+function generateRootIndexHtml(noteLinks, isDark, ownerName = '') {
   const bgColor = isDark ? '#1a1a1a' : '#f2f2f2';
   const panelColor = isDark ? '#252525' : '#ffffff';
   const textColor = isDark ? '#e0e0e0' : '#111';
   const mutedColor = isDark ? '#999' : '#666';
   const borderColor = isDark ? '#3a3a3a' : '#d9d9d9';
   const linkColor = isDark ? '#6ba3ff' : '#0066cc';
+  
+  // Build title with optional owner name
+  const displayTitle = ownerName ? `${escapeHtmlForGithub(ownerName)}'s Noat Boat` : 'Noat Boat';
+  const pageTitle = ownerName ? `${ownerName}'s Noat Boat - Published Notes` : 'Noat Boat - Published Notes';
   
   const boatArt = `   .  o ..                  
      o . o o.o                
@@ -2725,7 +2738,7 @@ function generateRootIndexHtml(noteLinks, isDark) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Noat Boat - Published Notes</title>
+  <title>${escapeHtmlForGithub(pageTitle)}</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9B%B3%3C/text%3E%3C/svg%3E">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -2766,7 +2779,7 @@ function generateRootIndexHtml(noteLinks, isDark) {
   <div class="container">
     <div class="header">
       <pre class="boat-container" id="asciiBoat">${boatArt}</pre>
-      <h1>Noat Boat</h1>
+      <h1>${displayTitle}</h1>
       <p class="subtitle">Published Notes</p>
     </div>
     <div class="notes-list" id="notesList">
@@ -2975,7 +2988,7 @@ function addNoteToRootIndex(html, noteTitle, noteDirName, lastModified) {
 }
 
 // Generate interactive note HTML page
-function generateNoteHtml(noteData, isDark) {
+function generateNoteHtml(noteData, isDark, ownerName = '') {
   const bgColor = isDark ? '#1a1a1a' : '#f2f2f2';
   const panelColor = isDark ? '#252525' : '#ffffff';
   const textColor = isDark ? '#e0e0e0' : '#111';
@@ -2984,6 +2997,9 @@ function generateNoteHtml(noteData, isDark) {
   const editorBg = isDark ? '#1e1e1e' : '#fff';
   const activeBg = isDark ? '#1e3a5f' : '#eef5ff';
   const activeBorder = isDark ? '#2d5a8a' : '#c9dcff';
+  
+  // Build the Noat Boat branding with optional owner name
+  const noatBoatTitle = ownerName ? `${escapeHtmlForGithub(ownerName)}'s Noat Boat` : 'Noat Boat';
   
   const canvasJsonStr = noteData.canvasJson ? JSON.stringify(noteData.canvasJson).replace(/</g, '\\u003c').replace(/>/g, '\\u003e') : 'null';
   const hasCanvas = !!(noteData.canvasJson || noteData.canvasImage || noteData.image);
@@ -2997,7 +3013,7 @@ function generateNoteHtml(noteData, isDark) {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>${escapeHtmlForGithub(noteData.title)} - Noat Boat</title>
+  <title>${escapeHtmlForGithub(noteData.title)} - ${noatBoatTitle}</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.1/fabric.min.js"><\/script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -3479,7 +3495,7 @@ async function publishToGithub() {
     }
 
 showExportProgress('Generating note page...');
-    const noteHtml = generateNoteHtml(noteData, currentTheme === 'dark');
+    const noteHtml = generateNoteHtml(noteData, currentTheme === 'dark', publishingName);
     filesToUpload.unshift({ path: `${noteDirName}/index.html`, content: noteHtml, isBinary: false });
     
     for (let i = 0; i < filesToUpload.length; i++) {
@@ -3497,7 +3513,7 @@ showExportProgress('Generating note page...');
     if (existingRoot && existingRoot.content) {
       rootHtml = addNoteToRootIndex(existingRoot.content, n.title, noteDirName, n.lastModified);
     } else {
-      rootHtml = generateRootIndexHtml([], currentTheme === 'dark');
+      rootHtml = generateRootIndexHtml([], currentTheme === 'dark', publishingName);
       rootHtml = addNoteToRootIndex(rootHtml, n.title, noteDirName, n.lastModified);
     }
     await githubPutFile(githubToken, owner, repo, 'index.html', rootHtml, 'Update site index', false, existingRoot?.sha || null);
@@ -3542,6 +3558,7 @@ function updatePrefsUI() {
   // GitHub settings
   els.githubTokenInput.value = githubToken || '';
   els.githubRepoInput.value = githubRepo || '';
+  els.publishingNameInput.value = publishingName || '';
   
   // Show/hide manual fix button
   els.fixBtn.style.display = (autoFixMode === 'manual') ? '' : 'none';
@@ -3590,6 +3607,11 @@ function saveGithubToken(token) {
 function saveGithubRepo(repo) {
   githubRepo = repo;
   api.savePreferences({ githubRepo: repo });
+}
+
+function savePublishingName(name) {
+  publishingName = name;
+  api.savePreferences({ publishingName: name });
 }
 
 async function browseForModel() {
@@ -3804,6 +3826,7 @@ async function loadPreferences() {
     localModelPath = prefs.localModelPath || '';
     githubToken = prefs.githubToken || '';
     githubRepo = prefs.githubRepo || '';
+    publishingName = prefs.publishingName || '';
     document.body.classList.toggle('dark-mode', currentTheme === 'dark');
     document.documentElement.style.setProperty('--focus-strength', (currentFocusStrength / 100).toFixed(2));
     
@@ -4571,6 +4594,8 @@ els.githubTokenInput.addEventListener('change', (e) => saveGithubToken(e.target.
 els.githubTokenInput.addEventListener('blur', (e) => saveGithubToken(e.target.value));
 els.githubRepoInput.addEventListener('change', (e) => saveGithubRepo(e.target.value));
 els.githubRepoInput.addEventListener('blur', (e) => saveGithubRepo(e.target.value));
+els.publishingNameInput.addEventListener('change', (e) => savePublishingName(e.target.value));
+els.publishingNameInput.addEventListener('blur', (e) => savePublishingName(e.target.value));
 els.browseModelBtn.addEventListener('click', () => browseForModel());
 els.fixBtn.addEventListener('click', () => manualFix());
 
