@@ -91,12 +91,13 @@
   "author": "Some Other Guy",
   "license": "MIT",
   "dependencies": {
-    "node-llama-cpp": "^3.2.0",
-    "ffmpeg-static": "^5.2.0"
+    "@netlify/blobs": "^10.5.0",
+    "ffmpeg-static": "^5.2.0",
+    "node-llama-cpp": "^3.2.0"
   },
   "devDependencies": {
+    "@electron/rebuild": "^3.6.0",
     "electron": "^39.2.7",
-    "electron-builder": "^24.9.1",
-    "@electron/rebuild": "^3.6.0"
+    "electron-builder": "^24.9.1"
   }
 }
