@@ -301,7 +301,9 @@ ipcMain.handle('get-preferences', async () => {
     githubToken: config.githubToken || '',
     githubRepo: config.githubRepo || '',
     publishingName: config.publishingName || '',
-    publishedSiteUrl: config.publishedSiteUrl || ''
+    publishedSiteUrl: config.publishedSiteUrl || '',
+    bitcoinTipAddress: config.bitcoinTipAddress || '',
+    ethereumTipAddress: config.ethereumTipAddress || ''
   };
 });
 
@@ -318,6 +320,8 @@ ipcMain.handle('save-preferences', async (event, prefs) => {
   if (prefs.githubRepo !== undefined) config.githubRepo = prefs.githubRepo;
   if (prefs.publishingName !== undefined) config.publishingName = prefs.publishingName;
   if (prefs.publishedSiteUrl !== undefined) config.publishedSiteUrl = prefs.publishedSiteUrl;
+  if (prefs.bitcoinTipAddress !== undefined) config.bitcoinTipAddress = prefs.bitcoinTipAddress;
+  if (prefs.ethereumTipAddress !== undefined) config.ethereumTipAddress = prefs.ethereumTipAddress;
   saveConfig(config);
   return true;
 });

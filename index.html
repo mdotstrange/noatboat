@@ -555,6 +555,7 @@
     .prefsModal.open{ display:flex; }
     .prefsDialog{
       width:min(450px, 90vw);
+      max-height:min(85vh, 700px);
       background:var(--panel);
       border:1px solid var(--border);
       border-radius:16px;
@@ -570,9 +571,10 @@
       display:flex;
       align-items:center;
       justify-content:space-between;
+      flex-shrink:0;
     }
     .prefsTitle{ font-size:14px; font-weight:700; font-family:var(--mono); color:var(--text); }
-    .prefsBody{ padding:20px; display:flex; flex-direction:column; gap:20px; }
+    .prefsBody{ padding:20px; display:flex; flex-direction:column; gap:20px; overflow-y:auto; flex:1; }
     .prefItem{ display:flex; flex-direction:column; gap:8px; }
     .prefLabel{ font-size:13px; font-weight:600; color:var(--text); }
     .prefControl{ display:flex; gap:8px; align-items:center; }
@@ -953,6 +955,24 @@
           </div>
           <div class="prefHint">The URL of your published GitHub Pages site (used for sharing links)</div>
         </div>
+        <div class="prefItem" style="border-top:1px solid var(--border);padding-top:20px;margin-top:8px;">
+          <label class="prefLabel">Tip Addresses</label>
+          <div class="prefHint" style="margin-bottom:12px;">Accept cryptocurrency tips from visitors</div>
+        </div>
+        <div class="prefItem">
+          <label class="prefLabel">Bitcoin Tip Address</label>
+          <div class="prefControl">
+            <input type="text" id="bitcoinTipAddressInput" class="search" style="max-width:100%;flex:1;font-family:var(--mono);font-size:12px;" placeholder="bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh">
+          </div>
+          <div class="prefHint">Your Bitcoin address for receiving tips</div>
+        </div>
+        <div class="prefItem">
+          <label class="prefLabel">Ethereum Tip Address</label>
+          <div class="prefControl">
+            <input type="text" id="ethereumTipAddressInput" class="search" style="max-width:100%;flex:1;font-family:var(--mono);font-size:12px;" placeholder="0x... or name.eth">
+          </div>
+          <div class="prefHint">Your Ethereum address or ENS name for receiving tips</div>
+        </div>
       </div>
     </div>
   </div>
@@ -1097,6 +1117,8 @@ const els = {
   publishingNameInput: document.getElementById('publishingNameInput'),
   publishedSiteUrlInput: document.getElementById('publishedSiteUrlInput'),
   publishedSiteUrlStatus: document.getElementById('publishedSiteUrlStatus'),
+  bitcoinTipAddressInput: document.getElementById('bitcoinTipAddressInput'),
+  ethereumTipAddressInput: document.getElementById('ethereumTipAddressInput'),
   publishGithubBtn: document.getElementById('publishGithubBtn'),
 };
 
@@ -2153,6 +2175,8 @@ let githubToken = '';
 let githubRepo = '';
 let publishingName = '';
 let publishedSiteUrl = '';
+let bitcoinTipAddress = '';
+let ethereumTipAddress = '';
 let autoFixTimer = null;
 let isAutoFixing = false;
 const AUTO_FIX_DEBOUNCE_MS = 1500; // Wait 1.5s after typing stops before fixing
@@ -2723,7 +2747,7 @@ function escapeHtmlForGithub(str) {
 }
 
 // Generate the root index.html with animated boat
-function generateRootIndexHtml(noteLinks, isDark, ownerName = '') {
+function generateRootIndexHtml(noteLinks, isDark, ownerName = '', btcAddress = '', ethAddress = '') {
   const bgColor = isDark ? '#1a1a1a' : '#f2f2f2';
   const panelColor = isDark ? '#252525' : '#ffffff';
   const textColor = isDark ? '#e0e0e0' : '#111';
@@ -2784,6 +2808,36 @@ function generateRootIndexHtml(noteLinks, isDark, ownerName = '') {
     .webring-btn:hover { transform: translateY(-2px); }
     .webring-btn img { width: 48px; height: 48px; object-fit: contain; }
     .webring-btn span { font-size: 12px; color: ${mutedColor}; font-weight: 500; }
+    .tip-modal-overlay {
+      display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.5); z-index: 10000; align-items: center; justify-content: center;
+    }
+    .tip-modal-overlay.open { display: flex; }
+    .tip-modal {
+      background: ${panelColor}; border-radius: 12px; padding: 24px; max-width: 420px; width: 90%;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3); border: 1px solid ${borderColor}; max-height: 85vh; overflow-y: auto;
+    }
+    .tip-modal h2 { margin: 0 0 16px 0; font-size: 20px; text-align: center; }
+    .tip-modal-close {
+      position: absolute; top: 12px; right: 12px; background: none; border: none;
+      font-size: 20px; cursor: pointer; color: ${mutedColor}; padding: 4px 8px;
+    }
+    .tip-modal-close:hover { color: ${textColor}; }
+    .tip-section { margin-bottom: 16px; padding: 14px; background: ${bgColor}; border-radius: 8px; border: 1px solid ${borderColor}; }
+    .tip-section:last-child { margin-bottom: 0; }
+    .tip-link {
+      display: block; text-align: center; padding: 10px 16px; background: ${linkColor};
+      color: white; border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 500;
+      margin-bottom: 10px; transition: opacity 0.15s;
+    }
+    .tip-link:hover { opacity: 0.85; }
+    .tip-link.btc { background: #f7931a; }
+    .tip-link.eth { background: #627eea; }
+    .tip-address {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 10px; word-break: break-all; padding: 8px; background: ${panelColor};
+      border: 1px solid ${borderColor}; border-radius: 4px; user-select: all; cursor: text; text-align: center;
+    }
     .notes-list { background: ${panelColor}; border: 1px solid ${borderColor}; border-radius: 12px; overflow: hidden; }
     .note-link {
       display: block; padding: 16px 20px; text-decoration: none; color: ${textColor};
@@ -2817,7 +2871,21 @@ function generateRootIndexHtml(noteLinks, isDark, ownerName = '') {
     </div>
   </div>
   <div class="footer">Made with Noat Boat</div>
+  
+  <!-- Tip Modal -->
+  <div class="tip-modal-overlay" id="tipModal">
+    <div class="tip-modal" style="position:relative;">
+      <button class="tip-modal-close" id="tipModalClose">&times;</button>
+      <h2>💰 Tip this Boat!</h2>
+      <div id="tipContent"></div>
+    </div>
+  </div>
+  
   <script>
+    // Tip addresses (embedded during export)
+    var TIP_BTC_ADDRESS = '${escapeHtmlForGithub(btcAddress)}';
+    var TIP_ETH_ADDRESS = '${escapeHtmlForGithub(ethAddress)}';
+    
     (function() {
       var boatEl = document.getElementById('asciiBoat');
       if (!boatEl) return;
@@ -3000,11 +3068,87 @@ function generateRootIndexHtml(noteLinks, isDark, ownerName = '') {
       }
       
       var tipBtn = document.getElementById('tipBtn');
+      var tipModal = document.getElementById('tipModal');
+      var tipModalClose = document.getElementById('tipModalClose');
+      var tipContent = document.getElementById('tipContent');
+      
+      function copyToClipboard(text) {
+        navigator.clipboard.writeText(text).then(function() {
+          alert('Address copied!');
+        }).catch(function() {
+          // Fallback for older browsers
+          var ta = document.createElement('textarea');
+          ta.value = text;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+          alert('Address copied!');
+        });
+      }
+      
+      function openTipModal() {
+        if (!TIP_BTC_ADDRESS && !TIP_ETH_ADDRESS) {
+          alert('No tip addresses configured for this boat.');
+          return;
+        }
+        
+        var html = '';
+        
+        // Bitcoin section
+        if (TIP_BTC_ADDRESS) {
+          html += '<div class="tip-section">';
+          html += '<a href="bitcoin:' + TIP_BTC_ADDRESS + '" class="tip-link btc" id="btcTipBtn">₿ Tip with Bitcoin</a>';
+          html += '<div class="tip-address">' + TIP_BTC_ADDRESS + '</div>';
+          html += '</div>';
+        }
+        
+        // Ethereum section
+        if (TIP_ETH_ADDRESS) {
+          html += '<div class="tip-section">';
+          html += '<a href="#" class="tip-link eth" id="ethTipBtn">Ξ Tip with ETH</a>';
+          html += '<div class="tip-address">' + TIP_ETH_ADDRESS + '</div>';
+          html += '</div>';
+        }
+        
+        tipContent.innerHTML = html;
+        tipModal.classList.add('open');
+        
+        // Add click handlers for copying
+        var btcTipBtn = document.getElementById('btcTipBtn');
+        if (btcTipBtn) {
+          btcTipBtn.addEventListener('click', function() {
+            copyToClipboard(TIP_BTC_ADDRESS);
+          });
+        }
+        
+        var ethTipBtn = document.getElementById('ethTipBtn');
+        if (ethTipBtn) {
+          ethTipBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            copyToClipboard(TIP_ETH_ADDRESS);
+          });
+        }
+      }
+      
+      function closeTipModal() {
+        tipModal.classList.remove('open');
+      }
+      
       if (tipBtn) {
         tipBtn.addEventListener('click', function(e) {
           e.preventDefault();
-          // Tip functionality will be added later
-          alert('Tip functionality coming soon!');
+          openTipModal();
+        });
+      }
+      
+      if (tipModalClose) {
+        tipModalClose.addEventListener('click', closeTipModal);
+      }
+      
+      if (tipModal) {
+        tipModal.addEventListener('click', function(e) {
+          if (e.target === tipModal) closeTipModal();
         });
       }
     })();
@@ -3045,6 +3189,23 @@ function addNoteToRootIndex(html, noteTitle, noteDirName, lastModified) {
   if (bodyEnd > 0) {
     return html.slice(0, bodyEnd) + '<div class="notes-list">' + newLink + '</div>\n' + html.slice(bodyEnd);
   }
+  
+  return html;
+}
+
+// Update tip addresses in existing root HTML
+function updateTipAddressesInHtml(html, btcAddress, ethAddress) {
+  // Update Bitcoin address
+  html = html.replace(
+    /var TIP_BTC_ADDRESS = '[^']*';/,
+    `var TIP_BTC_ADDRESS = '${escapeHtmlForGithub(btcAddress || '')}';`
+  );
+  
+  // Update Ethereum address
+  html = html.replace(
+    /var TIP_ETH_ADDRESS = '[^']*';/,
+    `var TIP_ETH_ADDRESS = '${escapeHtmlForGithub(ethAddress || '')}';`
+  );
   
   return html;
 }
@@ -3574,8 +3735,10 @@ showExportProgress('Generating note page...');
     const existingRoot = await githubGetFile(githubToken, owner, repo, 'index.html');
     if (existingRoot && existingRoot.content) {
       rootHtml = addNoteToRootIndex(existingRoot.content, n.title, noteDirName, n.lastModified);
+      // Update tip addresses in existing HTML if they've changed
+      rootHtml = updateTipAddressesInHtml(rootHtml, bitcoinTipAddress, ethereumTipAddress);
     } else {
-      rootHtml = generateRootIndexHtml([], currentTheme === 'dark', publishingName);
+      rootHtml = generateRootIndexHtml([], currentTheme === 'dark', publishingName, bitcoinTipAddress, ethereumTipAddress);
       rootHtml = addNoteToRootIndex(rootHtml, n.title, noteDirName, n.lastModified);
     }
     await githubPutFile(githubToken, owner, repo, 'index.html', rootHtml, 'Update site index', false, existingRoot?.sha || null);
@@ -3640,6 +3803,8 @@ function updatePrefsUI() {
   els.publishingNameInput.value = publishingName || '';
   els.publishedSiteUrlInput.value = publishedSiteUrl || '';
   updatePublishedSiteUrlStatus(publishedSiteUrl);
+  els.bitcoinTipAddressInput.value = bitcoinTipAddress || '';
+  els.ethereumTipAddressInput.value = ethereumTipAddress || '';
   
   // Show/hide manual fix button
   els.fixBtn.style.display = (autoFixMode === 'manual') ? '' : 'none';
@@ -3722,6 +3887,16 @@ function savePublishedSiteUrl(url) {
   publishedSiteUrl = url;
   api.savePreferences({ publishedSiteUrl: url });
   updatePublishedSiteUrlStatus(url);
+}
+
+function saveBitcoinTipAddress(address) {
+  bitcoinTipAddress = address;
+  api.savePreferences({ bitcoinTipAddress: address });
+}
+
+function saveEthereumTipAddress(address) {
+  ethereumTipAddress = address;
+  api.savePreferences({ ethereumTipAddress: address });
 }
 
 const WEBRING_API_URL = 'https://noatboatwebring.netlify.app/.netlify/functions/webring';
@@ -3993,6 +4168,8 @@ async function loadPreferences() {
     githubRepo = prefs.githubRepo || '';
     publishingName = prefs.publishingName || '';
     publishedSiteUrl = prefs.publishedSiteUrl || '';
+    bitcoinTipAddress = prefs.bitcoinTipAddress || '';
+    ethereumTipAddress = prefs.ethereumTipAddress || '';
     document.body.classList.toggle('dark-mode', currentTheme === 'dark');
     document.documentElement.style.setProperty('--focus-strength', (currentFocusStrength / 100).toFixed(2));
     
@@ -4765,6 +4942,10 @@ els.publishingNameInput.addEventListener('blur', (e) => savePublishingName(e.tar
 els.publishedSiteUrlInput.addEventListener('change', (e) => savePublishedSiteUrl(e.target.value));
 els.publishedSiteUrlInput.addEventListener('blur', (e) => savePublishedSiteUrl(e.target.value));
 els.publishedSiteUrlInput.addEventListener('input', (e) => updatePublishedSiteUrlStatus(e.target.value));
+els.bitcoinTipAddressInput.addEventListener('change', (e) => saveBitcoinTipAddress(e.target.value));
+els.bitcoinTipAddressInput.addEventListener('blur', (e) => saveBitcoinTipAddress(e.target.value));
+els.ethereumTipAddressInput.addEventListener('change', (e) => saveEthereumTipAddress(e.target.value));
+els.ethereumTipAddressInput.addEventListener('blur', (e) => saveEthereumTipAddress(e.target.value));
 els.browseModelBtn.addEventListener('click', () => browseForModel());
 els.fixBtn.addEventListener('click', () => manualFix());
 
