@@ -1,6 +1,6 @@
 # Noat Boat - Electron App
 
-A Notational Velocity clone built with Electron for Windows, Mac, and Linux.
+A minimal note taking app by Some Other Guy
 
 ## Features
 

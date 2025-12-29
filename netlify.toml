@@ -1,4 +1,0 @@
-[[redirects]]
-  from = "/nb.json"
-  to = "/.netlify/functions/nb"
-  status = 200
