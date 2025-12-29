@@ -3530,7 +3530,24 @@ showExportProgress('Generating note page...');
     await githubPutFile(githubToken, owner, repo, 'index.html', rootHtml, 'Update site index', false, existingRoot?.sha || null);
     
     const pagesUrl = `https://${owner}.github.io/${repo}/${noteDirName}/`;
-    await api.showAlert(`Published successfully!\n\nYour note is available at:\n${pagesUrl}\n\n(Enable GitHub Pages in repo settings if not already done)`);
+    
+    // Try to register with webring if Published Site URL is configured
+    let webringMessage = '';
+    if (publishedSiteUrl && isValidUrl(publishedSiteUrl)) {
+      showExportProgress('Checking webring eligibility...');
+      const webringResult = await tryRegisterWebring(publishedSiteUrl);
+      if (webringResult.registered) {
+        webringMessage = '\n\n🔗 Added to Noat Boat webring!';
+      } else if (webringResult.alreadyRegistered) {
+        webringMessage = '\n\n🔗 Already in Noat Boat webring';
+      } else if (webringResult.notEligible) {
+        // Site doesn't have the right title, silently skip
+      } else if (webringResult.error) {
+        console.warn('Webring registration failed:', webringResult.error);
+      }
+    }
+    
+    await api.showAlert(`Published successfully!\n\nYour note is available at:\n${pagesUrl}\n\n(Enable GitHub Pages in repo settings if not already done)${webringMessage}`);
     
   } catch (err) {
     showBanner(`GitHub publish failed: ${String(err?.message || err)}`);
@@ -3654,6 +3671,61 @@ function savePublishedSiteUrl(url) {
   publishedSiteUrl = url;
   api.savePreferences({ publishedSiteUrl: url });
   updatePublishedSiteUrlStatus(url);
+}
+
+const WEBRING_API_URL = 'https://noatboatwebring.netlify.app/.netlify/functions/webring';
+
+async function tryRegisterWebring(siteUrl) {
+  try {
+    // Fetch the published site's HTML to check the title
+    const response = await fetch(siteUrl, { 
+      method: 'GET',
+      headers: { 'Accept': 'text/html' }
+    });
+    
+    if (!response.ok) {
+      return { error: `Failed to fetch site: ${response.status}` };
+    }
+    
+    const html = await response.text();
+    
+    // Check if title contains "Noat Boat - Published Notes"
+    const titleMatch = html.match(/<title[^>]*>(.*?)<\/title>/i);
+    if (!titleMatch) {
+      return { notEligible: true, reason: 'No title tag found' };
+    }
+    
+    const title = titleMatch[1];
+    // Decode HTML entities for comparison
+    const decodedTitle = title.replace(/&#39;/g, "'").replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+    
+    if (!decodedTitle.includes('Noat Boat - Published Notes')) {
+      return { notEligible: true, reason: 'Title does not contain "Noat Boat - Published Notes"' };
+    }
+    
+    // Site is eligible, register with webring
+    const registerResponse = await fetch(WEBRING_API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: siteUrl })
+    });
+    
+    if (!registerResponse.ok) {
+      const errorData = await registerResponse.json().catch(() => ({}));
+      return { error: errorData.error || `Registration failed: ${registerResponse.status}` };
+    }
+    
+    const result = await registerResponse.json();
+    
+    if (result.added) {
+      return { registered: true, count: result.count };
+    } else {
+      return { alreadyRegistered: true, count: result.count };
+    }
+    
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
 }
 
 async function browseForModel() {
