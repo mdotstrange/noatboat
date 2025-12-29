@@ -945,6 +945,14 @@
           </div>
           <div class="prefHint">Optional: Adds "[Name]'s" before "Noat Boat" on exported pages (e.g., "Jim's Noat Boat")</div>
         </div>
+        <div class="prefItem">
+          <label class="prefLabel">Published Site URL</label>
+          <div class="prefControl" style="gap:8px;">
+            <input type="text" id="publishedSiteUrlInput" class="search" style="max-width:100%;flex:1;" placeholder="https://username.github.io/repo-name">
+            <span id="publishedSiteUrlStatus" class="urlStatus" style="font-size:18px;min-width:24px;text-align:center;"></span>
+          </div>
+          <div class="prefHint">The URL of your published GitHub Pages site (used for sharing links)</div>
+        </div>
       </div>
     </div>
   </div>
@@ -1087,6 +1095,8 @@ const els = {
   githubTokenInput: document.getElementById('githubTokenInput'),
   githubRepoInput: document.getElementById('githubRepoInput'),
   publishingNameInput: document.getElementById('publishingNameInput'),
+  publishedSiteUrlInput: document.getElementById('publishedSiteUrlInput'),
+  publishedSiteUrlStatus: document.getElementById('publishedSiteUrlStatus'),
   publishGithubBtn: document.getElementById('publishGithubBtn'),
 };
 
@@ -2142,6 +2152,7 @@ let localModelPath = '';
 let githubToken = '';
 let githubRepo = '';
 let publishingName = '';
+let publishedSiteUrl = '';
 let autoFixTimer = null;
 let isAutoFixing = false;
 const AUTO_FIX_DEBOUNCE_MS = 1500; // Wait 1.5s after typing stops before fixing
@@ -3559,6 +3570,8 @@ function updatePrefsUI() {
   els.githubTokenInput.value = githubToken || '';
   els.githubRepoInput.value = githubRepo || '';
   els.publishingNameInput.value = publishingName || '';
+  els.publishedSiteUrlInput.value = publishedSiteUrl || '';
+  updatePublishedSiteUrlStatus(publishedSiteUrl);
   
   // Show/hide manual fix button
   els.fixBtn.style.display = (autoFixMode === 'manual') ? '' : 'none';
@@ -3612,6 +3625,35 @@ function saveGithubRepo(repo) {
 function savePublishingName(name) {
   publishingName = name;
   api.savePreferences({ publishingName: name });
+}
+
+function isValidUrl(string) {
+  try {
+    const url = new URL(string);
+    return url.protocol === 'http:' || url.protocol === 'https:';
+  } catch (_) {
+    return false;
+  }
+}
+
+function updatePublishedSiteUrlStatus(url) {
+  const statusEl = els.publishedSiteUrlStatus;
+  if (!url || url.trim() === '') {
+    statusEl.textContent = '';
+    statusEl.title = '';
+  } else if (isValidUrl(url.trim())) {
+    statusEl.textContent = '✅';
+    statusEl.title = 'Valid URL';
+  } else {
+    statusEl.textContent = '❌';
+    statusEl.title = 'Invalid URL - must start with http:// or https://';
+  }
+}
+
+function savePublishedSiteUrl(url) {
+  publishedSiteUrl = url;
+  api.savePreferences({ publishedSiteUrl: url });
+  updatePublishedSiteUrlStatus(url);
 }
 
 async function browseForModel() {
@@ -3827,6 +3869,7 @@ async function loadPreferences() {
     githubToken = prefs.githubToken || '';
     githubRepo = prefs.githubRepo || '';
     publishingName = prefs.publishingName || '';
+    publishedSiteUrl = prefs.publishedSiteUrl || '';
     document.body.classList.toggle('dark-mode', currentTheme === 'dark');
     document.documentElement.style.setProperty('--focus-strength', (currentFocusStrength / 100).toFixed(2));
     
@@ -4596,6 +4639,9 @@ els.githubRepoInput.addEventListener('change', (e) => saveGithubRepo(e.target.va
 els.githubRepoInput.addEventListener('blur', (e) => saveGithubRepo(e.target.value));
 els.publishingNameInput.addEventListener('change', (e) => savePublishingName(e.target.value));
 els.publishingNameInput.addEventListener('blur', (e) => savePublishingName(e.target.value));
+els.publishedSiteUrlInput.addEventListener('change', (e) => savePublishedSiteUrl(e.target.value));
+els.publishedSiteUrlInput.addEventListener('blur', (e) => savePublishedSiteUrl(e.target.value));
+els.publishedSiteUrlInput.addEventListener('input', (e) => updatePublishedSiteUrlStatus(e.target.value));
 els.browseModelBtn.addEventListener('click', () => browseForModel());
 els.fixBtn.addEventListener('click', () => manualFix());
 

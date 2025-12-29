@@ -300,7 +300,8 @@ ipcMain.handle('get-preferences', async () => {
     localModelPath: config.localModelPath || '',
     githubToken: config.githubToken || '',
     githubRepo: config.githubRepo || '',
-    publishingName: config.publishingName || ''
+    publishingName: config.publishingName || '',
+    publishedSiteUrl: config.publishedSiteUrl || ''
   };
 });
 
@@ -316,6 +317,7 @@ ipcMain.handle('save-preferences', async (event, prefs) => {
   if (prefs.githubToken !== undefined) config.githubToken = prefs.githubToken;
   if (prefs.githubRepo !== undefined) config.githubRepo = prefs.githubRepo;
   if (prefs.publishingName !== undefined) config.publishingName = prefs.publishingName;
+  if (prefs.publishedSiteUrl !== undefined) config.publishedSiteUrl = prefs.publishedSiteUrl;
   saveConfig(config);
   return true;
 });
