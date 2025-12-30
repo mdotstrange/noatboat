@@ -2860,6 +2860,10 @@ function generateRootIndexHtml(noteLinks, isDark, ownerName = '', btcAddress = '
           <img src="https://noatboatwebring.netlify.app/tip.png" alt="Tip">
           <span>Tip this Boat!</span>
         </a>
+        <a href="#" class="webring-btn" id="ahoyBtn" title="Ahoy!">
+          <img src="https://noatboatwebring.netlify.app/msg.png" alt="Ahoy">
+          <span>Ahoy!</span>
+        </a>
         <a href="#" class="webring-btn" id="boardBtn" title="Board another Boat!">
           <img src="https://noatboatwebring.netlify.app/board.png" alt="Board">
           <span>Board another Boat!</span>
@@ -3149,6 +3153,21 @@ function generateRootIndexHtml(noteLinks, isDark, ownerName = '', btcAddress = '
       if (tipModal) {
         tipModal.addEventListener('click', function(e) {
           if (e.target === tipModal) closeTipModal();
+        });
+      }
+      
+      // Ahoy button handler
+      var ahoyBtn = document.getElementById('ahoyBtn');
+      if (ahoyBtn) {
+        ahoyBtn.addEventListener('click', function(e) {
+          e.preventDefault();
+          // Check if there's a link to /ahoy in the page
+          var ahoyLink = document.querySelector('a[href*="/ahoy"]');
+          if (ahoyLink) {
+            window.location.href = ahoyLink.href;
+          } else {
+            alert('This boat does not answer your call.');
+          }
         });
       }
     })();
