@@ -4272,6 +4272,7 @@ function renderList() {
   for (const {n, idx} of filteredNotes) {
     const item = document.createElement('div');
     item.className = 'noteItem' + (idx === currentIndex ? ' active' : '');
+    item.draggable = true;
 
     const title = document.createElement('div');
     title.className = 'noteTitle';
@@ -4288,6 +4289,13 @@ function renderList() {
     item.appendChild(title);
     item.appendChild(meta);
     item.addEventListener('click', () => { setListNav(true); openNoteByIndex(idx, { focusEditor:false, focusMode:false, keepListNav:true }); });
+    
+    // Drag note to create link
+    item.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('application/x-noatboat-note', JSON.stringify({ title: n.title, idx: idx }));
+      e.dataTransfer.effectAllowed = 'link';
+    });
+    
     frag.appendChild(item);
   }
   els.list.appendChild(frag);
@@ -5031,6 +5039,32 @@ els.editor.addEventListener('drop', (e) => {
   
   if (currentIndex == null || !notes[currentIndex]) return;
   
+  // Check for note link data first
+  const noteLinkData = e.dataTransfer.getData('application/x-noatboat-note');
+  if (noteLinkData) {
+    try {
+      const noteInfo = JSON.parse(noteLinkData);
+      const linkText = `[[${noteInfo.title}]]`;
+      
+      // Insert at cursor position
+      const editor = els.editor;
+      const start = editor.selectionStart;
+      const end = editor.selectionEnd;
+      const value = editor.value;
+      
+      editor.value = value.substring(0, start) + linkText + value.substring(end);
+      editor.selectionStart = editor.selectionEnd = start + linkText.length;
+      
+      // Update note and trigger save
+      notes[currentIndex].content = editor.value;
+      dirty = true;
+      els.saveState.textContent = 'modified';
+      scheduleSave();
+      editor.focus();
+      return;
+    } catch (_e) {}
+  }
+  
   const files = e.dataTransfer.files;
   if (files.length === 0) return;
   
@@ -5063,6 +5097,61 @@ els.editor.addEventListener('drop', (e) => {
   els.saveState.textContent = 'modified';
   scheduleSave();
   editor.focus();
+});
+
+// Double-click on [[Note Title]] links to open the linked note
+els.editor.addEventListener('dblclick', (e) => {
+  const editor = els.editor;
+  const value = editor.value;
+  const cursorPos = editor.selectionStart;
+  
+  // Find if cursor is within a [[...]] link
+  // Search backwards from cursor for [[
+  let linkStart = -1;
+  for (let i = cursorPos - 1; i >= 0 && i >= cursorPos - 200; i--) {
+    if (value[i] === '[' && value[i + 1] === '[') {
+      linkStart = i;
+      break;
+    }
+    if (value[i] === ']' && value[i + 1] === ']') {
+      // Found closing brackets before opening, cursor is not in a link
+      break;
+    }
+  }
+  
+  if (linkStart === -1) return;
+  
+  // Search forward from linkStart for ]]
+  let linkEnd = -1;
+  for (let i = linkStart + 2; i < value.length && i < linkStart + 250; i++) {
+    if (value[i] === ']' && value[i + 1] === ']') {
+      linkEnd = i + 2;
+      break;
+    }
+    if (value[i] === '[' && value[i + 1] === '[') {
+      // Found another opening before closing, invalid
+      break;
+    }
+  }
+  
+  if (linkEnd === -1) return;
+  
+  // Check if cursor is within this link
+  if (cursorPos < linkStart || cursorPos > linkEnd) return;
+  
+  // Extract the note title
+  const noteTitle = value.substring(linkStart + 2, linkEnd - 2).trim();
+  if (!noteTitle) return;
+  
+  // Find the note with this title
+  const noteIdx = notes.findIndex(n => n.title.toLowerCase() === noteTitle.toLowerCase());
+  if (noteIdx === -1) {
+    api.showAlert(`Note not found: "${noteTitle}"`);
+    return;
+  }
+  
+  // Open the note
+  openNoteByIndex(noteIdx, { focusEditor: true, focusMode: false });
 });
 
 els.thumb.addEventListener('click', openLightbox);
