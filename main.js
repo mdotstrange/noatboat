@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os'); // Added for temp file handling
@@ -444,6 +444,35 @@ ipcMain.handle('delete-file', async (event, filePath) => {
 // Check if file exists
 ipcMain.handle('file-exists', async (event, filePath) => {
   return fs.existsSync(filePath);
+});
+
+// Show file in OS file explorer
+ipcMain.handle('show-item-in-folder', async (event, filePath) => {
+  try {
+    if (fs.existsSync(filePath)) {
+      shell.showItemInFolder(filePath);
+      return { success: true };
+    }
+    return { success: false, error: 'File not found' };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+// Open file with default application
+ipcMain.handle('open-path', async (event, filePath) => {
+  try {
+    if (fs.existsSync(filePath)) {
+      const result = await shell.openPath(filePath);
+      if (result) {
+        return { success: false, error: result };
+      }
+      return { success: true };
+    }
+    return { success: false, error: 'File not found' };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
 });
 
 // Read image as base64 data URL

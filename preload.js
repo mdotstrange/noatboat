@@ -58,6 +58,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // File drag and drop - get path from File object
   getPathForFile: (file) => webUtils.getPathForFile(file),
   
+  // Open file in OS file explorer
+  showItemInFolder: (filePath) => ipcRenderer.invoke('show-item-in-folder', filePath),
+  openPath: (filePath) => ipcRenderer.invoke('open-path', filePath),
+  
   // Path utilities
   joinPath: (...parts) => path.join(...parts),
   basename: (p, ext) => path.basename(p, ext),

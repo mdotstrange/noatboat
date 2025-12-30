@@ -5099,13 +5099,38 @@ els.editor.addEventListener('drop', (e) => {
   editor.focus();
 });
 
-// Double-click on [[Note Title]] links to open the linked note
-els.editor.addEventListener('dblclick', (e) => {
+// Double-click to open file paths or [[Note Title]] links
+els.editor.addEventListener('dblclick', async (e) => {
   const editor = els.editor;
   const value = editor.value;
   const cursorPos = editor.selectionStart;
   
-  // Find if cursor is within a [[...]] link
+  // Find the line containing the cursor
+  let lineStart = value.lastIndexOf('\n', cursorPos - 1) + 1;
+  let lineEnd = value.indexOf('\n', cursorPos);
+  if (lineEnd === -1) lineEnd = value.length;
+  const line = value.substring(lineStart, lineEnd).trim();
+  
+  // Check if this line looks like a file path
+  // Windows: C:\... D:\... etc.  macOS/Linux: /...
+  const isFilePath = /^([A-Za-z]:\\|\/|~\/)/.test(line);
+  if (isFilePath && line.length > 1) {
+    // Expand ~ to home directory if needed
+    let filePath = line;
+    if (filePath.startsWith('~/')) {
+      // Let the main process handle ~ expansion, or we handle common case
+      filePath = line; // Keep as-is, shell will expand
+    }
+    
+    // Try to show the file in the folder
+    const result = await api.showItemInFolder(filePath);
+    if (!result.success) {
+      api.showAlert(`Could not open file: ${result.error || 'File not found'}`);
+    }
+    return;
+  }
+  
+  // Check for [[Note Title]] links
   // Search backwards from cursor for [[
   let linkStart = -1;
   for (let i = cursorPos - 1; i >= 0 && i >= cursorPos - 200; i--) {
