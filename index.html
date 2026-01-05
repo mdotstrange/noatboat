@@ -2701,11 +2701,21 @@ async function githubGetFile(token, owner, repo, path) {
 }
 
 // Upload or update a file on GitHub
+// Properly encode UTF-8 string to base64 (handles emojis and special characters)
+function utf8ToBase64(str) {
+  const bytes = new TextEncoder().encode(str);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
 async function githubPutFile(token, owner, repo, path, content, message, isBinary = false, sha = null) {
   try {
     const body = {
       message: message,
-      content: isBinary ? content : btoa(unescape(encodeURIComponent(content)))
+      content: isBinary ? content : utf8ToBase64(content)
     };
     if (sha) body.sha = sha;
     
