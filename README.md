@@ -21,8 +21,8 @@ A minimalistic note taking application for creative humans that use computers
 
 ### Publishing & Sharing
 - **GitHub Pages publishing** - Publish notes directly to your GitHub repository
-- For your "ahoy" page on your published site just make published a note titled "ahoy" (without the "")
-- 
+- ** For your "ahoy" page on your published site just make published a note titled "ahoy" (without the "")
+  
 - **Cryptocurrency tipping** - Add Bitcoin and Ethereum tip addresses to published notes
 - **Custom publishing name** - Brand your published notes with your name
 
