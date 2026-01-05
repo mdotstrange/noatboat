@@ -1,4 +1,4 @@
-![alt text](https://github.com/mdotstrange/noatboat/blob/main/noatboatIcon1.png "Noat Boat Main Image")
+![alt text](https://noatboatwebring.netlify.app/nbicon.png "Noat Boat Main Image")
 
 A minimalistic note taking application for creative humans that use computers
 
