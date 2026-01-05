@@ -212,12 +212,15 @@ function createMenu() {
 }
 
 function createWindow() {
+  const isWindows = process.platform === 'win32';
+  
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
     minWidth: 600,
     minHeight: 400,
-    fullscreen: true,
+    fullscreen: !isWindows,
+    simpleFullscreen: isWindows,
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -234,10 +237,15 @@ function createWindow() {
   mainWindow.loadFile('index.html');
 
   mainWindow.once('ready-to-show', () => {
+    const isWindows = process.platform === 'win32';
     // Ensure app menu (and its shortcuts like Cmd/Ctrl+,) exists
     mainWindow.setMenuBarVisibility(true);
-    // Some environments behave more reliably if you call it here too:
-    mainWindow.setFullScreen(true);
+    // On Windows, use maximize for simpleFullscreen; on macOS use true fullscreen
+    if (isWindows) {
+      mainWindow.maximize();
+    } else {
+      mainWindow.setFullScreen(true);
+    }
     mainWindow.show();
   });
 }
