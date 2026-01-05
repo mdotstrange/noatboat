@@ -1,30 +1,17 @@
 ![alt text](https://github.com/mdotstrange/noatboat/blob/main/noatboatIcon1.png "Noat Boat Main Image")
 
-A minimalistic note taking application for creative humans that use computers(smart phones suck for creativity)
+A minimalistic note taking application for creative humans that use computers
 
 ## Features
 
-### Core Note-Taking
-- **Fast note searching** - Instantly find notes with real-time search
-- **Auto-save** - Notes are automatically saved as plain text (.txt) files
-- **Folder organization** - Navigate subfolders within your notes directory
-- **Auto-loads last folder** - The app remembers your notes folder and loads it automatically
+- Free- no account or subscription required
+- Works offline (only needs to be online once to make image canvas work)
+- Doesn't manage syncing notes (use Dropbox/SyncThing/OneDrive/Google Drive/whatever to manage it yourself
 
 ### Rich Media Attachments
-- **Image attachments** - Attach images to any note (PNG, JPG, GIF, WebP)
+- **Image attachments** - Attach images to any note (PNG, JPG, GIF, WebP) via drag/drop from a browser or whatever
 - **Audio attachments** - Attach and play audio files with built-in player (supports MP3, WAV, and more with automatic transcoding)
 - **Built-in drawing pad** - Create hand-drawn sketches and diagrams with Fabric.js canvas
-- **Image lightbox** - Click images to view them full-size
-
-### AI-Powered Text Correction
-- **Smart text correction** - Fix spelling, grammar, and typos using AI
-- **Two correction modes:**
-  - **Manual mode** - Select text and click fix to correct only the highlighted portion
-  - **Auto mode** - Automatically corrects newly typed text (tracks dirty regions for efficiency)
-- **Multiple providers:**
-  - **OpenAI** - Uses GPT-4o-mini for fast, accurate corrections
-  - **Local LLM** - Use your own GGUF model files for offline correction
-- **Preserves formatting** - Respects line breaks, paragraphs, and document structure
 
 ### Export Options
 - **PDF Document** - Export all notes in a folder as a single PDF
@@ -37,19 +24,20 @@ A minimalistic note taking application for creative humans that use computers(sm
 - **Cryptocurrency tipping** - Add Bitcoin and Ethereum tip addresses to published notes
 - **Custom publishing name** - Brand your published notes with your name
 
-### User Experience
-- **Dark mode** - Easy on the eyes with full dark theme support
-- **Focus mode** - Dim distractions and concentrate on writing (adjustable strength)
-- **Full-screen mode** - Immersive writing experience
-- **Keyboard shortcuts** - Efficient navigation and editing
+### AI-Powered Text Correction
+- **Smart text correction** - Fix spelling, grammar, and typos using AI
+- **Two correction modes:**
+  - **Manual mode** - Select text and click fix to correct only the highlighted portion
+  - **Auto mode** - Automatically corrects newly typed text (tracks dirty regions for efficiency)
+- **Multiple providers:**
+  - **OpenAI** - Uses GPT-4o-mini for fast, accurate corrections
+  - **Local LLM** - Use your own GGUF model files for offline correction
+- **Preserves formatting** - Respects line breaks, paragraphs, and document structure
 
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
-| `Cmd/Ctrl + ,` | Open Preferences |
-| `Tab` | Indent text/selection |
-| `Shift + Tab` | Outdent text/selection |
 | `Arrow Up/Down` | Navigate note list |
 | `Spacebar` | Toggle Select/Draw mode (on canvas) |
 | `Delete/Backspace` | Delete selected canvas objects |
