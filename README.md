@@ -1,4 +1,4 @@
-# Noat Boat
+![alt text](https://github.com/mdotstrange/noatboat/blob/main/noatboatIcon1.png "Noat Boat Main Image")
 
 A feature-rich, cross-platform note-taking application built with Electron. Designed for writers, thinkers, and creators who want a distraction-free environment with powerful organization and export capabilities.
 
