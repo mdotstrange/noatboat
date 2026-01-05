@@ -2181,6 +2181,11 @@ let autoFixTimer = null;
 let isAutoFixing = false;
 const AUTO_FIX_DEBOUNCE_MS = 1500; // Wait 1.5s after typing stops before fixing
 
+// Track dirty regions for incremental auto-fix
+let autoFixDirtyStart = null;
+let autoFixDirtyEnd = null;
+let autoFixLastCursorPos = null;
+
 function setPrefsModalOpen(on) {
   prefsIsOpen = !!on;
   els.prefsModal.classList.toggle('open', prefsIsOpen);
@@ -3994,12 +3999,55 @@ async function fixText(isManual = false) {
   if (currentIndex == null || !notes[currentIndex]) return;
   
   const editor = els.editor;
-  const text = editor.value;
-  if (!text || text.trim().length < 10) return; // Don't fix very short text
+  const fullText = editor.value;
+  if (!fullText || fullText.trim().length < 3) return;
+  
+  // Determine what text to fix and where
+  let textToFix = '';
+  let replaceStart = 0;
+  let replaceEnd = fullText.length;
+  let hasSelection = false;
+  
+  if (isManual) {
+    // Manual mode: check for text selection
+    const selStart = editor.selectionStart;
+    const selEnd = editor.selectionEnd;
+    
+    if (selStart !== selEnd) {
+      // User has selected text - only fix the selection
+      hasSelection = true;
+      textToFix = fullText.substring(selStart, selEnd);
+      replaceStart = selStart;
+      replaceEnd = selEnd;
+      console.log('Manual fix with selection:', textToFix.length, 'chars');
+    } else {
+      // No selection - fix entire text
+      textToFix = fullText;
+    }
+  } else {
+    // Auto mode: only fix the dirty region if available
+    if (autoFixDirtyStart !== null && autoFixDirtyEnd !== null) {
+      // Expand dirty region to sentence boundaries for better context
+      const expandedRange = expandToSentenceBoundaries(fullText, autoFixDirtyStart, autoFixDirtyEnd);
+      replaceStart = expandedRange.start;
+      replaceEnd = expandedRange.end;
+      textToFix = fullText.substring(replaceStart, replaceEnd);
+      console.log('Auto fix dirty region:', replaceStart, '-', replaceEnd, '(', textToFix.length, 'chars)');
+    } else {
+      // No dirty region tracked, fix entire text (fallback)
+      textToFix = fullText;
+    }
+  }
+  
+  // Don't fix very short text
+  if (textToFix.trim().length < 5) {
+    resetDirtyRegion();
+    return;
+  }
   
   isAutoFixing = true;
   const originalSaveState = els.saveState.textContent;
-  els.saveState.textContent = 'fixing...';
+  els.saveState.textContent = hasSelection ? 'fixing selection...' : 'fixing...';
   
   // Add visual feedback for manual fix button
   if (isManual) {
@@ -4009,33 +4057,47 @@ async function fixText(isManual = false) {
   try {
     let fixedText;
     
-    console.log('Fix starting, provider:', autoFixProvider, 'manual:', isManual);
+    console.log('Fix starting, provider:', autoFixProvider, 'manual:', isManual, 'textLength:', textToFix.length);
     
     if (autoFixProvider === 'openai') {
-      fixedText = await fixTextWithOpenAI(text);
+      fixedText = await fixTextWithOpenAI(textToFix);
     } else {
-      fixedText = await fixTextWithLocalLLM(text);
+      fixedText = await fixTextWithLocalLLM(textToFix);
     }
     
     console.log('Fix result:', fixedText ? 'got response' : 'no response');
-    if (fixedText) {
-      console.log('Original text:', JSON.stringify(text));
-      console.log('Fixed text:', JSON.stringify(fixedText));
-      console.log('Are they different?', fixedText.trim() !== text.trim());
-    }
     
-    if (fixedText && fixedText.trim() !== text.trim()) {
-      // Preserve cursor position as best we can
-      const cursorPos = editor.selectionStart;
-      const cursorRatio = cursorPos / text.length;
+    if (fixedText && fixedText.trim() !== textToFix.trim()) {
+      // Build the new full text by splicing in the fixed portion
+      const before = fullText.substring(0, replaceStart);
+      const after = fullText.substring(replaceEnd);
+      const newFullText = before + fixedText + after;
       
-      editor.value = fixedText;
-      notes[currentIndex].content = fixedText;
+      // Calculate new cursor position
+      const oldCursorPos = editor.selectionStart;
+      let newCursorPos;
+      
+      if (oldCursorPos <= replaceStart) {
+        // Cursor before the replaced region - keep it where it was
+        newCursorPos = oldCursorPos;
+      } else if (oldCursorPos >= replaceEnd) {
+        // Cursor after the replaced region - adjust by length difference
+        const lengthDiff = fixedText.length - (replaceEnd - replaceStart);
+        newCursorPos = oldCursorPos + lengthDiff;
+      } else {
+        // Cursor inside the replaced region - proportional positioning
+        const posInRegion = oldCursorPos - replaceStart;
+        const ratio = posInRegion / (replaceEnd - replaceStart);
+        newCursorPos = replaceStart + Math.round(ratio * fixedText.length);
+      }
+      
+      editor.value = newFullText;
+      notes[currentIndex].content = newFullText;
       dirty = true;
       scheduleSave();
       
-      // Restore cursor position proportionally
-      const newCursorPos = Math.min(Math.round(cursorRatio * fixedText.length), fixedText.length);
+      // Restore cursor position
+      newCursorPos = Math.min(Math.max(0, newCursorPos), newFullText.length);
       editor.selectionStart = editor.selectionEnd = newCursorPos;
       
       els.saveState.textContent = 'fixed ✓';
@@ -4059,6 +4121,10 @@ async function fixText(isManual = false) {
         }
       }, 2000);
     }
+    
+    // Reset dirty region after successful fix
+    resetDirtyRegion();
+    
   } catch (err) {
     console.error('Fix error:', err);
     els.saveState.textContent = 'fix error';
@@ -4071,6 +4137,57 @@ async function fixText(isManual = false) {
     isAutoFixing = false;
     els.fixBtn.classList.remove('fixing');
   }
+}
+
+// Expand a range to sentence boundaries for better LLM context
+function expandToSentenceBoundaries(text, start, end) {
+  // Find sentence start (look backwards for sentence-ending punctuation or start of text)
+  let sentenceStart = start;
+  while (sentenceStart > 0) {
+    const char = text[sentenceStart - 1];
+    if (char === '.' || char === '!' || char === '?' || char === '\n') {
+      break;
+    }
+    sentenceStart--;
+  }
+  // Skip any whitespace after sentence boundary
+  while (sentenceStart < start && /\s/.test(text[sentenceStart])) {
+    sentenceStart++;
+  }
+  
+  // Find sentence end (look forwards for sentence-ending punctuation or end of text)
+  let sentenceEnd = end;
+  while (sentenceEnd < text.length) {
+    const char = text[sentenceEnd];
+    if (char === '.' || char === '!' || char === '?' || char === '\n') {
+      sentenceEnd++; // Include the punctuation
+      break;
+    }
+    sentenceEnd++;
+  }
+  
+  return { start: sentenceStart, end: sentenceEnd };
+}
+
+// Reset dirty region tracking
+function resetDirtyRegion() {
+  autoFixDirtyStart = null;
+  autoFixDirtyEnd = null;
+  autoFixLastCursorPos = null;
+}
+
+// Update dirty region based on current edit
+function updateDirtyRegion(cursorPos) {
+  if (autoFixDirtyStart === null) {
+    // First edit - initialize dirty region around cursor
+    autoFixDirtyStart = cursorPos;
+    autoFixDirtyEnd = cursorPos;
+  } else {
+    // Expand dirty region to include new cursor position
+    autoFixDirtyStart = Math.min(autoFixDirtyStart, cursorPos);
+    autoFixDirtyEnd = Math.max(autoFixDirtyEnd, cursorPos);
+  }
+  autoFixLastCursorPos = cursorPos;
 }
 
 async function fixTextWithOpenAI(text) {
@@ -4655,6 +4772,9 @@ async function openNoteByIndex(idx, opts = {}) {
   closeLightbox();
   stopAudio();
   
+  // Reset auto-fix dirty region tracking when switching notes
+  resetDirtyRegion();
+  
   // Save current canvas before switching
   if (canvasDirty && fabricCanvas && currentIndex != null) {
     await saveCanvasState();
@@ -5021,6 +5141,10 @@ els.editor.addEventListener('input', () => {
   dirty = true;
   els.saveState.textContent = 'modified';
   scheduleSave();
+  
+  // Track dirty region for incremental auto-fix
+  updateDirtyRegion(els.editor.selectionStart);
+  
   scheduleAutoFix();
   // Don't call renderList() here - it's expensive and causes UI stutter
   // The list will update after save completes
