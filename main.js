@@ -688,7 +688,7 @@ ipcMain.handle('run-local-llm', async (event, modelPath, text) => {
       
       // Use a structured prompt with clear delimiters that works better with various models
       // Many local models respond better to example-based or clearly delimited prompts
-      const prompt = `You are a spelling and grammar correction assistant. Your task is to fix spelling mistakes and grammar errors in the text below. Only fix errors - do not change the meaning, style, or add any commentary.
+      const prompt = `You are a spelling and grammar correction assistant. Your task is to fix spelling mistakes and grammar errors in the text below. Only fix errors - do not change the meaning, style, or add any commentary. IMPORTANT: Preserve ALL line breaks, blank lines, and paragraph structure exactly as they appear. Do not merge lines or remove empty lines. Only fix the words themselves.
 
 INPUT TEXT:
 ${text}

@@ -4021,8 +4021,14 @@ async function fixText(isManual = false) {
       replaceEnd = selEnd;
       console.log('Manual fix with selection:', textToFix.length, 'chars');
     } else {
-      // No selection - fix entire text
-      textToFix = fullText;
+      // No selection - show message and return
+      els.saveState.textContent = 'no text selected';
+      setTimeout(() => {
+        if (els.saveState.textContent === 'no text selected') {
+          els.saveState.textContent = dirty ? 'modified' : 'saved';
+        }
+      }, 2000);
+      return;
     }
   } else {
     // Auto mode: only fix the dirty region if available
@@ -4202,7 +4208,7 @@ async function fixTextWithOpenAI(text) {
       messages: [
         {
           role: 'system',
-          content: 'You are a text correction assistant. Fix spelling, grammar, and typos in the user\'s text. Keep the exact same meaning, tone, and structure. Only fix obvious errors. Return ONLY the corrected text with no explanations or quotes. If the text has no errors, return it unchanged.'
+          content: 'You are a text correction assistant. Fix spelling, grammar, and typos in the user\'s text. IMPORTANT: Preserve ALL line breaks, blank lines, and paragraph structure exactly as they appear. Do not merge lines or remove empty lines. Only fix the words themselves and spacing between words on the same line. Keep the exact same meaning and tone. Return ONLY the corrected text with no explanations or quotes. If the text has no errors, return it unchanged.'
         },
         {
           role: 'user',
