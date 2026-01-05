@@ -152,3 +152,4 @@ The app stores its configuration in:
 ## License
 
 MIT
+
