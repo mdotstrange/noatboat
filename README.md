@@ -34,6 +34,7 @@ A minimalistic note taking application for creative humans that use computers
 - **Multiple providers:**
   - **OpenAI** - Uses GPT-4o-mini for fast, accurate corrections
   - **Local LLM** - Use your own GGUF model files for offline correction
+  - ** A small, fast well balanced Local LLM to use is gemma-2-2b-it-Q4_K_M.gguf
 - **Preserves formatting** - Respects line breaks, paragraphs, and document structure
 
 ## Keyboard Shortcuts
