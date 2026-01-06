@@ -37,6 +37,10 @@ A minimalistic note taking application for creative humans that use computers ma
   - ** A small, fast well balanced Local LLM to use is gemma-2-2b-it-Q4_K_M.gguf
 - **Preserves formatting** - Respects line breaks, paragraphs, and document structure
 
+### Random stuff
+- drag/drop notes from the note list into the active note- then double click the [[note name]] to go to that note
+- drag/drop files from the Operating system into the active note- then double click the path text to go to that file
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
