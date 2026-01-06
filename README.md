@@ -1,6 +1,6 @@
 ![alt text](https://noatboatwebring.netlify.app/nbicon.png "Noat Boat Main Image")
 
-A minimalistic note taking application for creative humans that use computers
+A minimalistic note taking application for creative humans that use computers made by some weirdo w/Claude Opus 4.5
 
 ## Features
 
