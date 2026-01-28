@@ -7,6 +7,12 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9B%B3%3C/text%3E%3C/svg%3E">
   <script src="./fabric.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
+  <script src="./signature/signature-mark.js"></script>
+  <script src="./signature/signature-mark/variables.js"></script>
+  <script src="./signature/signature-mark/helpers.js"></script>
+  <script src="./signature/signature-mark/painters.js"></script>
+  <script src="./signature/signature-mark/stroke.js"></script>
+  <script src="./signature/signature-mark/events.js"></script>
   <style>
     :root{
       --bg:#f2f2f2;
@@ -352,6 +358,18 @@
     }
     .canvasContainer canvas{ display:block; }
     .canvasContainer .canvas-container{ position:absolute !important; }
+    #drawOverlay{
+      position:absolute;
+      inset:0;
+      z-index:10;
+      pointer-events:none;
+      display:none;
+      cursor:crosshair;
+    }
+    #drawOverlay.active{
+      display:block;
+      pointer-events:auto;
+    }
     .dropZone{
       position:absolute;
       inset:0;
@@ -805,6 +823,7 @@
           </div>
           <div id="canvasContainer" class="canvasContainer">
             <canvas id="fabricCanvas"></canvas>
+            <canvas id="drawOverlay"></canvas>
             <div id="dropZone" class="dropZone empty">
               <div class="dropIcon">🖼️</div>
               <div class="dropText">
@@ -1092,6 +1111,7 @@ const els = {
   canvasWorkspace: document.getElementById('canvasWorkspace'),
   canvasContainer: document.getElementById('canvasContainer'),
   fabricCanvas: document.getElementById('fabricCanvas'),
+  drawOverlay: document.getElementById('drawOverlay'),
   dropZone: document.getElementById('dropZone'),
   dropBrowseBtn: document.getElementById('dropBrowseBtn'),
   canvasStatus: document.getElementById('canvasStatus'),
@@ -1142,6 +1162,7 @@ let currentListOrder = [];
 // Fabric.js canvas
 let fabricCanvas = null;
 let canvasDrawingMode = false;
+let canvasSignatureMark = null;
 let canvasDirty = false;
 let canvasSaveTimer = null;
 
@@ -1301,10 +1322,8 @@ function initFabricCanvas() {
     preserveObjectStacking: true
   });
   
-  // Set up drawing brush
-  fabricCanvas.freeDrawingBrush.width = 3;
-  fabricCanvas.freeDrawingBrush.color = '#000000';
-  
+  // Drawing is handled by SignatureMark overlay, not Fabric's built-in brush
+
   // Track changes
   fabricCanvas.on('object:added', onCanvasModified);
   fabricCanvas.on('object:modified', onCanvasModified);
@@ -1397,15 +1416,118 @@ function updateCanvasStatus(text) {
   }, 2000);
 }
 
-function setCanvasDrawingMode(enabled) {
-  canvasDrawingMode = enabled;
-  if (fabricCanvas) {
-    fabricCanvas.isDrawingMode = enabled;
+async function setCanvasDrawingMode(enabled) {
+  // If switching from drawing to select, capture the drawing first
+  if (canvasDrawingMode && !enabled) {
+    await captureOverlayToFabric();
   }
+
+  canvasDrawingMode = enabled;
+
+  // Disable fabric's built-in drawing mode - we use SignatureMark overlay instead
+  if (fabricCanvas) {
+    fabricCanvas.isDrawingMode = false;
+  }
+
+  // Show/hide the drawing overlay
+  els.drawOverlay.classList.toggle('active', enabled);
+
+  if (enabled) {
+    // Resize overlay to match container and initialize SignatureMark
+    resizeDrawOverlay();
+    initCanvasSignatureMark();
+  }
+
   els.canvasSelectBtn.classList.toggle('active', !enabled);
   els.canvasDrawBtn.classList.toggle('active', enabled);
   // Hide drop zone when in drawing mode so user can draw on empty canvas
   updateDropZoneVisibility();
+}
+
+function resizeDrawOverlay() {
+  const container = els.canvasContainer;
+  const rect = container.getBoundingClientRect();
+
+  // Calculate the same scale as fabric canvas
+  const scaleX = rect.width / CANVAS_WIDTH;
+  const scaleY = rect.height / CANVAS_HEIGHT;
+  const scale = Math.min(scaleX, scaleY);
+
+  // Set overlay to match fabric canvas VISUAL size (full canvas area)
+  const scaledWidth = Math.round(CANVAS_WIDTH * scale);
+  const scaledHeight = Math.round(CANVAS_HEIGHT * scale);
+  els.drawOverlay.width = scaledWidth;
+  els.drawOverlay.height = scaledHeight;
+
+  // Reset any transforms
+  els.drawOverlay.style.transform = '';
+  els.drawOverlay.style.transformOrigin = '';
+
+  // Center like fabric canvas
+  const offsetX = (rect.width - scaledWidth) / 2;
+  const offsetY = (rect.height - scaledHeight) / 2;
+  els.drawOverlay.style.marginLeft = `${offsetX}px`;
+  els.drawOverlay.style.marginTop = `${offsetY}px`;
+
+  // Clear with transparent background
+  const ctx = els.drawOverlay.getContext('2d');
+  ctx.clearRect(0, 0, els.drawOverlay.width, els.drawOverlay.height);
+}
+
+function initCanvasSignatureMark() {
+  if (typeof SignatureMark !== 'undefined') {
+    canvasSignatureMark = new SignatureMark(els.drawOverlay);
+    // Set thinner stroke width (default is 2.5)
+    if (canvasSignatureMark && canvasSignatureMark.context) {
+      canvasSignatureMark.context.lineWidth = 1.25;
+    }
+  }
+}
+
+async function captureOverlayToFabric() {
+  if (!fabricCanvas || !els.drawOverlay) return;
+
+  const ctx = els.drawOverlay.getContext('2d');
+  const imageData = ctx.getImageData(0, 0, els.drawOverlay.width, els.drawOverlay.height);
+
+  // Check if there's any non-transparent content
+  let hasContent = false;
+  for (let i = 3; i < imageData.data.length; i += 4) {
+    if (imageData.data[i] > 0) {
+      hasContent = true;
+      break;
+    }
+  }
+
+  if (!hasContent) return;
+
+  // Convert overlay to image and scale to match fabric canvas coordinates
+  // Overlay is at visual size, scale to fabric internal coordinates
+  const fabricScale = CANVAS_WIDTH / els.drawOverlay.width;
+  const dataUrl = els.drawOverlay.toDataURL('image/png');
+  await new Promise((resolve) => {
+    fabric.Image.fromURL(dataUrl, (img) => {
+      if (!img) {
+        resolve();
+        return;
+      }
+      img.set({
+        left: 0,
+        top: 0,
+        scaleX: fabricScale,
+        scaleY: fabricScale,
+        selectable: true
+      });
+      fabricCanvas.add(img);
+      fabricCanvas.setActiveObject(img);
+      fabricCanvas.renderAll();
+      updateCanvasStatus('Drawing added');
+      resolve();
+    });
+  });
+
+  // Clear the overlay
+  ctx.clearRect(0, 0, els.drawOverlay.width, els.drawOverlay.height);
 }
 
 function setupCanvasDragDrop() {
@@ -1588,6 +1710,8 @@ function clearCanvas() {
   fabricCanvas.clear();
   fabricCanvas.backgroundColor = null;
   fabricCanvas.renderAll();
+  // Also clear the drawing overlay
+  clearDrawOverlay();
   updateDropZoneVisibility();
   updateCanvasStatus('Canvas cleared');
 }
@@ -1681,6 +1805,8 @@ async function deleteCanvasState() {
 
 function showCanvasWorkspace() {
   els.canvasWorkspace.style.display = 'flex';
+  // Clear overlay for new note (drawing should have been saved in openNoteByIndex)
+  clearDrawOverlay();
   if (!fabricCanvas) {
     initFabricCanvas();
   }
@@ -1689,6 +1815,15 @@ function showCanvasWorkspace() {
 
 function hideCanvasWorkspace() {
   els.canvasWorkspace.style.display = 'none';
+  // Clear drawing overlay when hiding (drawing should have been saved before switching)
+  clearDrawOverlay();
+}
+
+function clearDrawOverlay() {
+  if (!els.drawOverlay) return;
+  els.drawOverlay.classList.remove('active');
+  const ctx = els.drawOverlay.getContext('2d');
+  ctx.clearRect(0, 0, els.drawOverlay.width, els.drawOverlay.height);
 }
 
 async function renderImage() {
@@ -1716,8 +1851,7 @@ function closeLightbox() {
 
 // --- drawing pad ---
 let drawIsOpen = false;
-let drawIsDown = false;
-let drawLast = null;
+let signatureMark = null;
 
 function setDrawModalOpen(on) {
   drawIsOpen = !!on;
@@ -1727,6 +1861,13 @@ function setDrawModalOpen(on) {
 
 function drawCtx() {
   return els.drawCanvas.getContext('2d', { willReadFrequently: false });
+}
+
+function initSignatureMark() {
+  // SignatureMark sets up its own event listeners, so we just initialize it
+  if (typeof SignatureMark !== 'undefined') {
+    signatureMark = new SignatureMark(els.drawCanvas);
+  }
 }
 
 function resizeDrawCanvas(preserve = true) {
@@ -1747,6 +1888,8 @@ function resizeDrawCanvas(preserve = true) {
   els.drawCanvas.width = targetW;
   els.drawCanvas.height = targetH;
   clearCanvasWhite();
+  // Reinitialize SignatureMark after canvas resize
+  initSignatureMark();
 
   if (snapshot) {
     try {
@@ -1767,41 +1910,6 @@ function clearCanvasWhite() {
   ctx.fillStyle = '#fff';
   ctx.fillRect(0,0,els.drawCanvas.width, els.drawCanvas.height);
   ctx.restore();
-}
-
-function canvasPointFromEvent(e) {
-  const rect = els.drawCanvas.getBoundingClientRect();
-  const x = (e.clientX - rect.left) * (els.drawCanvas.width / rect.width);
-  const y = (e.clientY - rect.top) * (els.drawCanvas.height / rect.height);
-  return {x,y};
-}
-
-function beginStroke(e) {
-  drawIsDown = true;
-  drawLast = canvasPointFromEvent(e);
-  const ctx = drawCtx();
-  ctx.strokeStyle = '#000';
-  const rect = els.drawCanvas.getBoundingClientRect();
-  const scale = els.drawCanvas.width / Math.max(1, rect.width);
-  ctx.lineWidth = 6 * scale;
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
-  ctx.beginPath();
-  ctx.moveTo(drawLast.x, drawLast.y);
-}
-
-function moveStroke(e) {
-  if (!drawIsDown) return;
-  const p = canvasPointFromEvent(e);
-  const ctx = drawCtx();
-  ctx.lineTo(p.x, p.y);
-  ctx.stroke();
-  drawLast = p;
-}
-
-function endStroke() {
-  drawIsDown = false;
-  drawLast = null;
 }
 
 async function loadCurrentImageIntoCanvasIfAny() {
@@ -1843,6 +1951,8 @@ async function openDrawModal() {
   resizeDrawCanvas(false);
   requestAnimationFrame(() => resizeDrawCanvas(false));
   await loadCurrentImageIntoCanvasIfAny();
+  // Initialize SignatureMark for drawing (in case resize didn't trigger)
+  initSignatureMark();
 }
 
 function closeDrawModal() {
@@ -4791,9 +4901,20 @@ async function openNoteByIndex(idx, opts = {}) {
   // Reset auto-fix dirty region tracking when switching notes
   resetDirtyRegion();
   
-  // Save current canvas before switching
-  if (canvasDirty && fabricCanvas && currentIndex != null) {
-    await saveCanvasState();
+  // Capture any active drawing and save current canvas before switching
+  if (currentIndex != null && fabricCanvas) {
+    // If drawing mode is on, capture the overlay to fabric canvas first
+    if (canvasDrawingMode) {
+      await captureOverlayToFabric();
+      clearDrawOverlay();
+      canvasDrawingMode = false;
+      els.drawOverlay.classList.remove('active');
+      els.canvasSelectBtn.classList.add('active');
+      els.canvasDrawBtn.classList.remove('active');
+    }
+    if (canvasDirty) {
+      await saveCanvasState();
+    }
   }
   
   // Auto-delete the previous note if it was empty (Apple Notes-like behavior)
@@ -5046,7 +5167,7 @@ els.attachBtn.addEventListener('click', addImageFromDialog);
 els.drawBtn.addEventListener('click', openDrawModal);
 els.drawSaveBtn.addEventListener('click', saveDrawingAsAttachment);
 els.drawCloseBtn.addEventListener('click', closeDrawModal);
-els.drawNewBtn.addEventListener('click', () => clearCanvasWhite());
+els.drawNewBtn.addEventListener('click', () => { clearCanvasWhite(); initSignatureMark(); });
 els.drawDeleteBtn.addEventListener('click', deleteDrawingAttachment);
 
 els.audioBtn.addEventListener('click', openAudioModal);
@@ -5115,10 +5236,7 @@ els.fixBtn.addEventListener('click', () => manualFix());
 // Listen for menu open-preferences event
 api.onOpenPreferences(() => openPrefsModal());
 
-els.drawCanvas.addEventListener('pointerdown', (e) => { e.preventDefault(); els.drawCanvas.setPointerCapture(e.pointerId); beginStroke(e); });
-els.drawCanvas.addEventListener('pointermove', (e) => { if (!drawIsDown) return; e.preventDefault(); moveStroke(e); });
-els.drawCanvas.addEventListener('pointerup', (e) => { e.preventDefault(); endStroke(); });
-els.drawCanvas.addEventListener('pointercancel', () => endStroke());
+// SignatureMark handles drawing events internally via its initEvents() method
 
 els.drawModal.addEventListener('mousedown', (e) => { if (e.target === els.drawModal) closeDrawModal(); });
 els.searchInput.addEventListener('focus', async () => {
