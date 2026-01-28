@@ -1749,14 +1749,20 @@ async function saveCanvasState() {
 
 async function loadCanvasState() {
   if (!fabricCanvas) return;
+
+  // Cancel any pending save to prevent overwriting with wrong content
+  if (canvasSaveTimer) {
+    clearTimeout(canvasSaveTimer);
+    canvasSaveTimer = null;
+  }
+  canvasDirty = false;
+
   if (!folderPath || currentIndex == null || !notes[currentIndex]) {
-    clearCanvas();
+    fabricCanvas.clear();
+    fabricCanvas.renderAll();
+    updateDropZoneVisibility();
     return;
   }
-
-  // Always clear canvas first to prevent stale content from showing
-  fabricCanvas.clear();
-  fabricCanvas.backgroundColor = null;
 
   const n = notes[currentIndex];
   const base = noteTitleFromName(n.name);
@@ -1765,6 +1771,7 @@ async function loadCanvasState() {
   try {
     const result = await api.readCanvasJson(jsonPath);
     if (result.success && result.data) {
+      // loadFromJSON replaces all content
       await new Promise((resolve) => {
         fabricCanvas.loadFromJSON(result.data, () => {
           fabricCanvas.renderAll();
@@ -1774,22 +1781,29 @@ async function loadCanvasState() {
         });
       });
     } else {
-      // No existing canvas, check for legacy image
+      // No existing canvas JSON, check for legacy image
       if (n.image && n.image.path) {
-        // Load legacy single image into canvas
         const imgResult = await api.readImageBase64(n.image.path);
         if (imgResult.success) {
+          fabricCanvas.clear();
           await addImageUrlToCanvas(imgResult.dataUrl);
           canvasDirty = false;
         } else {
+          fabricCanvas.clear();
+          fabricCanvas.renderAll();
           updateDropZoneVisibility();
         }
       } else {
+        // No canvas and no image - show empty
+        fabricCanvas.clear();
+        fabricCanvas.renderAll();
         updateDropZoneVisibility();
       }
     }
   } catch (err) {
     console.error('Failed to load canvas:', err);
+    fabricCanvas.clear();
+    fabricCanvas.renderAll();
     updateDropZoneVisibility();
   }
 }
