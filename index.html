@@ -1753,18 +1753,25 @@ async function loadCanvasState() {
     clearCanvas();
     return;
   }
-  
+
+  // Always clear canvas first to prevent stale content from showing
+  fabricCanvas.clear();
+  fabricCanvas.backgroundColor = null;
+
   const n = notes[currentIndex];
   const base = noteTitleFromName(n.name);
   const jsonPath = api.joinPath(folderPath, `${base}.canvas.json`);
-  
+
   try {
     const result = await api.readCanvasJson(jsonPath);
     if (result.success && result.data) {
-      fabricCanvas.loadFromJSON(result.data, () => {
-        fabricCanvas.renderAll();
-        updateDropZoneVisibility();
-        canvasDirty = false;
+      await new Promise((resolve) => {
+        fabricCanvas.loadFromJSON(result.data, () => {
+          fabricCanvas.renderAll();
+          updateDropZoneVisibility();
+          canvasDirty = false;
+          resolve();
+        });
       });
     } else {
       // No existing canvas, check for legacy image
@@ -1772,17 +1779,18 @@ async function loadCanvasState() {
         // Load legacy single image into canvas
         const imgResult = await api.readImageBase64(n.image.path);
         if (imgResult.success) {
-          clearCanvas();
           await addImageUrlToCanvas(imgResult.dataUrl);
           canvasDirty = false;
+        } else {
+          updateDropZoneVisibility();
         }
       } else {
-        clearCanvas();
+        updateDropZoneVisibility();
       }
     }
   } catch (err) {
     console.error('Failed to load canvas:', err);
-    clearCanvas();
+    updateDropZoneVisibility();
   }
 }
 
