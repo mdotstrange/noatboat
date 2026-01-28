@@ -31,14 +31,20 @@
   };
 
   SignatureMark.prototype.setMouseXAndMouseY = function(self, event) {
+    var rawX, rawY;
     if (!!self.touch_supported) {
       target                 = event.touches[0];
-      self.mouseX            = target.pageX - self.canvasOffsetLeft;
-      self.mouseY            = target.pageY - self.canvasOffsetTop;
+      rawX                   = target.pageX - self.canvasOffsetLeft;
+      rawY                   = target.pageY - self.canvasOffsetTop;
     } else {
-      self.mouseX            = event.pageX - self.canvasOffsetLeft;
-      self.mouseY            = event.pageY - self.canvasOffsetTop;
+      rawX                   = event.pageX - self.canvasOffsetLeft;
+      rawY                   = event.pageY - self.canvasOffsetTop;
     }
+    // Scale from CSS pixels to canvas internal pixels (fixes Retina/scaled displays)
+    var scaleX = self.canvas.width / self.canvas.offsetWidth;
+    var scaleY = self.canvas.height / self.canvas.offsetHeight;
+    self.mouseX            = rawX * scaleX;
+    self.mouseY            = rawY * scaleY;
   };
 
   SignatureMark.prototype.setCanvasOffset = function(self) {
