@@ -1,6 +1,5 @@
 (function(SignatureMark){
   SignatureMark.prototype.initVariables = function() {
-    this.touch_supported      = (('ontouchstart' in window) || window.DocumentTouch && document instanceof DocumentTouch) ? true : false;
     this.context              = this.canvas.getContext('2d');
     this.color                = [0, 0, 0];
     this.brush_pressure       = 0.5;
@@ -13,18 +12,6 @@
     this.refresh_rate         = 5;
     this.max_strokes          = 12;
     this.easing               = 0.7;
-    this.mouse_down           = "mousedown";
-    this.mouse_move           = "mousemove";
-    this.mouse_up             = "mouseup";
-
-    if (!!this.touch_supported) {
-      this.mouse_down         = "touchstart";
-      this.mouse_move         = "touchmove";
-      this.mouse_up           = "touchend";
-    } else {
-      this.refresh_rate       = 10;
-      this.max_strokes        = 100;
-    }
   };
 
 }(SignatureMark));

@@ -1,12 +1,18 @@
 (function(SignatureMark){
   SignatureMark.prototype.initEvents = function() {
     var self = this;
-    self.canvas.addEventListener(self.mouse_down, function(e)     { self.onCanvasMouseDown(self, e); }, false);
-    self.canvas.addEventListener(self.mouse_move, function(e)     { self.onCanvasMouseMove(self, e); }, false);
-    self.canvas.addEventListener('contextmenu', function(e)       { self.preventRightClick(self, e); }, false);
 
-    document.addEventListener(self.mouse_up, function(e)          { self.onCanvasMouseUp(self, e); }, false);
-    self.canvas.addEventListener(self.mouse_up, function(e)       { self.onCanvasMouseUp(self, e); }, false);  
+    // Use PointerEvents for unified mouse, touch, and pen (Wacom) support
+    self.canvas.addEventListener('pointerdown', function(e)  { self.onCanvasMouseDown(self, e); }, false);
+    self.canvas.addEventListener('pointermove', function(e)  { self.onCanvasMouseMove(self, e); }, false);
+    self.canvas.addEventListener('pointerup', function(e)    { self.onCanvasMouseUp(self, e); }, false);
+    self.canvas.addEventListener('pointercancel', function(e){ self.onCanvasMouseUp(self, e); }, false);
+    self.canvas.addEventListener('contextmenu', function(e)  { self.preventRightClick(self, e); }, false);
+
+    document.addEventListener('pointerup', function(e)       { self.onCanvasMouseUp(self, e); }, false);
+
+    // Prevent touch scrolling while drawing
+    self.canvas.style.touchAction = 'none';
   };
 
   SignatureMark.prototype.preventRightClick = function(self, e) {
@@ -15,6 +21,7 @@
 
   SignatureMark.prototype.onCanvasMouseDown = function(self, e) {
     e.preventDefault();
+    self.canvas.setPointerCapture(e.pointerId);
     self.setCanvasOffset(self);
     self.startDrawingStroke(self);
     self.setMouseXAndMouseY(self, e);
@@ -31,20 +38,14 @@
   };
 
   SignatureMark.prototype.setMouseXAndMouseY = function(self, event) {
-    var rawX, rawY;
-    if (!!self.touch_supported) {
-      target                 = event.touches[0];
-      rawX                   = target.pageX - self.canvasOffsetLeft;
-      rawY                   = target.pageY - self.canvasOffsetTop;
-    } else {
-      rawX                   = event.pageX - self.canvasOffsetLeft;
-      rawY                   = event.pageY - self.canvasOffsetTop;
-    }
+    // PointerEvents always have pageX/pageY directly on the event
+    var rawX = event.pageX - self.canvasOffsetLeft;
+    var rawY = event.pageY - self.canvasOffsetTop;
     // Scale from CSS pixels to canvas internal pixels (fixes Retina/scaled displays)
     var scaleX = self.canvas.width / self.canvas.offsetWidth;
     var scaleY = self.canvas.height / self.canvas.offsetHeight;
-    self.mouseX            = rawX * scaleX;
-    self.mouseY            = rawY * scaleY;
+    self.mouseX = rawX * scaleX;
+    self.mouseY = rawY * scaleY;
   };
 
   SignatureMark.prototype.setCanvasOffset = function(self) {
