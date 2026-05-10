@@ -299,7 +299,46 @@
       min-width:0;
       min-height:0;
     }
+    .editorContainer{
+      position:relative;
+      flex: 1 1 50%;
+      min-width: 200px;
+      max-width: 50%;
+      overflow:hidden;
+      background-color:var(--editor-bg);
+      background-image:
+        repeating-linear-gradient(0deg, var(--editor-grid) 0, var(--editor-grid) 1px, transparent 1px, transparent 24px),
+        repeating-linear-gradient(90deg, var(--editor-grid) 0, var(--editor-grid) 1px, transparent 1px, transparent 24px),
+        repeating-linear-gradient(0deg, var(--editor-grid-major) 0, var(--editor-grid-major) 1px, transparent 1px, transparent 120px),
+        repeating-linear-gradient(90deg, var(--editor-grid-major) 0, var(--editor-grid-major) 1px, transparent 1px, transparent 120px);
+    }
+    .editorHighlight{
+      position:absolute;
+      top:0; left:0; right:0; bottom:0;
+      overflow:hidden;
+      pointer-events:none;
+      z-index:0;
+    }
+    .editorHighlight .highlightInner{
+      padding:14px 16px;
+      font-size:14px;
+      line-height:1.55;
+      font-family:var(--mono);
+      white-space:pre-wrap;
+      word-wrap:break-word;
+      color:transparent;
+    }
+    .editorHighlight mark{
+      background:rgba(255,200,0,0.35);
+      color:transparent;
+      border-radius:2px;
+    }
+    .dark-mode .editorHighlight mark{
+      background:rgba(255,200,0,0.25);
+    }
     textarea{
+      position:relative;
+      z-index:1;
       border:0;
       resize:none;
       padding:14px 16px;
@@ -308,17 +347,10 @@
       font-size:14px;
       line-height:1.55;
       font-family:var(--mono);
-      flex: 1 1 50%;
-      min-width: 200px;
-      max-width: 50%;
-      background-color:var(--editor-bg);
+      width:100%;
+      height:100%;
+      background:transparent;
       color:var(--text);
-      background-image:
-        repeating-linear-gradient(0deg, var(--editor-grid) 0, var(--editor-grid) 1px, transparent 1px, transparent 24px),
-        repeating-linear-gradient(90deg, var(--editor-grid) 0, var(--editor-grid) 1px, transparent 1px, transparent 24px),
-        repeating-linear-gradient(0deg, var(--editor-grid-major) 0, var(--editor-grid-major) 1px, transparent 1px, transparent 120px),
-        repeating-linear-gradient(90deg, var(--editor-grid-major) 0, var(--editor-grid-major) 1px, transparent 1px, transparent 120px);
-      background-attachment: local;
     }
     .canvasWorkspace{
       flex: 1 1 50%;
@@ -748,7 +780,7 @@
     }
     @media (max-width: 860px){
       .editorWrap{ flex-direction:column; }
-      textarea{ max-width:none; min-width:0; flex: 1 1 auto; }
+      .editorContainer{ max-width:none; min-width:0; flex: 1 1 auto; }
       .thumb{ min-width:0; height:48vh; }
       .canvasWorkspace{ min-width:0; height:48vh; max-width:none; flex: 0 0 48vh; }
     }
@@ -784,6 +816,8 @@
     <div class="gapWide"></div>
     <button id="newBtn" class="btn newTint" disabled aria-label="New note"><span class="ico" aria-hidden="true">📄</span></button>
     <button id="fixBtn" class="btn" disabled aria-label="Fix text" title="Fix spelling & grammar" style="display:none;"><span class="ico" aria-hidden="true">✨</span></button>
+    <button id="undoBtn" class="btn" disabled aria-label="Undo" title="Undo (Ctrl+Z)"><span class="ico" aria-hidden="true">↩</span></button>
+    <button id="redoBtn" class="btn" disabled aria-label="Redo" title="Redo (Ctrl+Y)"><span class="ico" aria-hidden="true">↪</span></button>
     <div class="gapBtn"></div>
     <button id="drawBtn" class="btn" disabled aria-label="Draw"><span class="ico" aria-hidden="true">✏️</span></button>
     <button id="attachBtn" class="btn" disabled aria-label="Attach image"><span class="ico" aria-hidden="true">🖼️</span></button>
@@ -810,7 +844,10 @@
       </div>
       <div id="empty" class="empty">Open a folder, then select or create a note.</div>
       <div id="editorWrap" class="editorWrap" style="display:none;">
-        <textarea id="editor" spellcheck="false" disabled></textarea>
+        <div class="editorContainer">
+          <div id="editorHighlight" class="editorHighlight"></div>
+          <textarea id="editor" spellcheck="false" disabled></textarea>
+        </div>
         <div id="canvasWorkspace" class="canvasWorkspace">
           <div class="canvasToolbar">
             <button id="canvasSelectBtn" class="btn active" title="Select/Move">🖱️</button>
@@ -1056,6 +1093,8 @@ const els = {
   searchInput: document.getElementById('searchInput'),
   newBtn: document.getElementById('newBtn'),
   fixBtn: document.getElementById('fixBtn'),
+  undoBtn: document.getElementById('undoBtn'),
+  redoBtn: document.getElementById('redoBtn'),
   refreshBtn: document.getElementById('refreshBtn'),
   drawBtn: document.getElementById('drawBtn'),
   attachBtn: document.getElementById('attachBtn'),
@@ -1152,6 +1191,15 @@ let maxSaveTimer = null;
 let isSaving = false;
 let dirty = false;
 
+// Undo/redo
+const UNDO_MAX = 100;
+const UNDO_DEBOUNCE_MS = 400;
+let undoStack = [];
+let redoStack = [];
+let lastUndoState = null;
+let undoDebounceTimer = null;
+let isUndoRedoing = false;
+
 // Autosave timing constants (industry standard)
 const SAVE_DEBOUNCE_MS = 1000;      // Wait 1s after user stops typing
 const SAVE_MAX_INTERVAL_MS = 10000; // Force save every 10s during continuous typing
@@ -1215,6 +1263,10 @@ function setEditorEnabled(enabled) {
   els.drawBtn.disabled = !enabled;
   els.audioBtn.disabled = !enabled;
   els.fixBtn.disabled = !enabled;
+  if (!enabled) {
+    els.undoBtn.disabled = true;
+    els.redoBtn.disabled = true;
+  }
 }
 
 function fmtDate(ts) {
@@ -4553,7 +4605,7 @@ function renderList() {
 
     item.appendChild(title);
     item.appendChild(meta);
-    item.addEventListener('click', () => { setListNav(true); openNoteByIndex(idx, { focusEditor:false, focusMode:false, keepListNav:true }); });
+    item.addEventListener('click', () => { setListNav(true); openNoteByIndex(idx, { focusEditor:false, focusMode:false, keepListNav:true, searchQuery: q }); });
     
     // Drag note to create link
     item.addEventListener('dragstart', (e) => {
@@ -4587,6 +4639,7 @@ function renderCurrent() {
   els.saveState.textContent = '';
   els.editorWrap.classList.remove('hasImage');
   dirty = false;
+  resetUndoHistory();
 }
 
 async function openFolder() {
@@ -4914,8 +4967,139 @@ async function autoDeleteEmptyNote(noteIndex, editorContent = null) {
   }
 }
 
+function editorState() {
+  return { text: els.editor.value, selStart: els.editor.selectionStart, selEnd: els.editor.selectionEnd };
+}
+
+function resetUndoHistory() {
+  undoStack = [];
+  redoStack = [];
+  if (undoDebounceTimer) { clearTimeout(undoDebounceTimer); undoDebounceTimer = null; }
+  lastUndoState = editorState();
+  updateUndoButtons();
+}
+
+function flushUndoPending() {
+  if (undoDebounceTimer) {
+    clearTimeout(undoDebounceTimer);
+    undoDebounceTimer = null;
+  }
+  if (lastUndoState && els.editor.value !== lastUndoState.text) {
+    undoStack.push(lastUndoState);
+    if (undoStack.length > UNDO_MAX) undoStack.shift();
+    lastUndoState = editorState();
+    redoStack = [];
+  }
+}
+
+function scheduleUndoCapture() {
+  if (isUndoRedoing) return;
+  if (undoDebounceTimer) clearTimeout(undoDebounceTimer);
+  undoDebounceTimer = setTimeout(() => {
+    undoDebounceTimer = null;
+    if (lastUndoState && els.editor.value !== lastUndoState.text) {
+      undoStack.push(lastUndoState);
+      if (undoStack.length > UNDO_MAX) undoStack.shift();
+      lastUndoState = editorState();
+      redoStack = [];
+      updateUndoButtons();
+    }
+  }, UNDO_DEBOUNCE_MS);
+}
+
+function editorUndo() {
+  if (currentIndex == null) return;
+  flushUndoPending();
+  if (undoStack.length === 0) return;
+  redoStack.push(editorState());
+  const state = undoStack.pop();
+  isUndoRedoing = true;
+  els.editor.value = state.text;
+  els.editor.selectionStart = state.selStart;
+  els.editor.selectionEnd = state.selEnd;
+  notes[currentIndex].content = state.text;
+  lastUndoState = state;
+  dirty = true;
+  els.saveState.textContent = 'modified';
+  scheduleSave();
+  isUndoRedoing = false;
+  updateUndoButtons();
+}
+
+function editorRedo() {
+  if (currentIndex == null) return;
+  if (redoStack.length === 0) return;
+  undoStack.push(editorState());
+  const state = redoStack.pop();
+  isUndoRedoing = true;
+  els.editor.value = state.text;
+  els.editor.selectionStart = state.selStart;
+  els.editor.selectionEnd = state.selEnd;
+  notes[currentIndex].content = state.text;
+  lastUndoState = state;
+  dirty = true;
+  els.saveState.textContent = 'modified';
+  scheduleSave();
+  isUndoRedoing = false;
+  updateUndoButtons();
+}
+
+function updateUndoButtons() {
+  els.undoBtn.disabled = undoStack.length === 0 || currentIndex == null;
+  els.redoBtn.disabled = redoStack.length === 0 || currentIndex == null;
+}
+
+function highlightSearchTerm(query) {
+  const overlay = document.getElementById('editorHighlight');
+  if (!query) { overlay.innerHTML = ''; return; }
+  const editor = els.editor;
+  const text = editor.value;
+  const q = query.toLowerCase();
+
+  let html = '';
+  let lastIdx = 0;
+  let lower = text.toLowerCase();
+  let firstMatchIdx = -1;
+  let pos = lower.indexOf(q);
+  while (pos !== -1) {
+    if (firstMatchIdx === -1) firstMatchIdx = pos;
+    html += escapeHtml(text.substring(lastIdx, pos));
+    html += '<mark>' + escapeHtml(text.substring(pos, pos + query.length)) + '</mark>';
+    lastIdx = pos + query.length;
+    pos = lower.indexOf(q, lastIdx);
+  }
+  html += escapeHtml(text.substring(lastIdx));
+  overlay.innerHTML = '<div class="highlightInner">' + html + '</div>';
+
+  syncHighlightScroll();
+
+  if (firstMatchIdx !== -1) {
+    editor.focus();
+    editor.selectionStart = firstMatchIdx;
+    editor.selectionEnd = firstMatchIdx + query.length;
+    const textBefore = text.substring(0, firstMatchIdx);
+    const linesBefore = textBefore.split('\n').length;
+    const lineHeight = parseInt(getComputedStyle(editor).lineHeight) || 20;
+    const scrollTarget = Math.max(0, (linesBefore - 3) * lineHeight);
+    editor.scrollTop = scrollTarget;
+    syncHighlightScroll();
+  }
+}
+
+function syncHighlightScroll() {
+  const inner = document.querySelector('.highlightInner');
+  if (!inner) return;
+  inner.style.transform = 'translateY(-' + els.editor.scrollTop + 'px)';
+  const scrollbarW = els.editor.offsetWidth - els.editor.clientWidth;
+  inner.style.paddingRight = (16 + scrollbarW) + 'px';
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 async function openNoteByIndex(idx, opts = {}) {
-  const { focusEditor = true, focusMode = true, keepListNav = false } = (opts || {});
+  const { focusEditor = true, focusMode = true, keepListNav = false, searchQuery = '' } = (opts || {});
   if (idx == null || !notes[idx]) return;
   closeLightbox();
   stopAudio();
@@ -4987,6 +5171,7 @@ async function openNoteByIndex(idx, opts = {}) {
   if (focusEditor) els.editor.focus();
   if (focusMode) setFocusMode(true);
   if (keepListNav) setListNav(true);
+  highlightSearchTerm(searchQuery || '');
 }
 
 async function saveCurrentNow() {
@@ -5254,6 +5439,8 @@ els.ethereumTipAddressInput.addEventListener('change', (e) => saveEthereumTipAdd
 els.ethereumTipAddressInput.addEventListener('blur', (e) => saveEthereumTipAddress(e.target.value));
 els.browseModelBtn.addEventListener('click', () => browseForModel());
 els.fixBtn.addEventListener('click', () => manualFix());
+els.undoBtn.addEventListener('click', () => editorUndo());
+els.redoBtn.addEventListener('click', () => editorRedo());
 
 // Listen for menu open-preferences event
 api.onOpenPreferences(() => openPrefsModal());
@@ -5289,6 +5476,7 @@ els.searchInput.addEventListener('input', () => { setFocusMode(false); renderLis
 els.list.addEventListener('mousedown', () => { setListNav(true); setFocusMode(false); });
 els.list.addEventListener('wheel', () => { setListNav(true); setFocusMode(false); });
 els.editor.addEventListener('focus', () => { setListNav(false); setFocusMode(true); });
+els.editor.addEventListener('scroll', syncHighlightScroll);
 
 els.editor.addEventListener('input', () => {
   setListNav(false);
@@ -5297,13 +5485,12 @@ els.editor.addEventListener('input', () => {
   dirty = true;
   els.saveState.textContent = 'modified';
   scheduleSave();
-  
+  scheduleUndoCapture();
+
   // Track dirty region for incremental auto-fix
   updateDirtyRegion(els.editor.selectionStart);
-  
+
   scheduleAutoFix();
-  // Don't call renderList() here - it's expensive and causes UI stutter
-  // The list will update after save completes
   setFocusMode(true);
 });
 
@@ -5472,6 +5659,17 @@ window.addEventListener('keydown', (e) => {
     if (audioIsOpen) { closeAudioModal(); return; }
     if (drawIsOpen) { closeDrawModal(); return; }
     closeLightbox();
+    return;
+  }
+
+  if (e.key === 'z' && (e.ctrlKey || e.metaKey) && !e.shiftKey && document.activeElement === els.editor) {
+    e.preventDefault();
+    editorUndo();
+    return;
+  }
+  if (((e.key === 'y' && (e.ctrlKey || e.metaKey)) || (e.key === 'z' && (e.ctrlKey || e.metaKey) && e.shiftKey)) && document.activeElement === els.editor) {
+    e.preventDefault();
+    editorRedo();
     return;
   }
 

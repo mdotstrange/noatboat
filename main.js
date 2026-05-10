@@ -97,6 +97,7 @@ const configPath = path.join(app.getPath('userData'), 'config.json');
 
 // Local LLM support
 let llamaModule = null;
+let llamaInstance = null;
 let currentModel = null;
 let currentModelPath = null;
 
@@ -650,12 +651,13 @@ ipcMain.handle('run-local-llm', async (event, modelPath, text) => {
         // Load new model using v3 API
         console.log('Getting llama instance...');
         const { getLlama, LlamaChatSession } = llamaModule;
-        const llama = await getLlama();
+        if (!llamaInstance) {
+          llamaInstance = await getLlama({ gpu: false });
+        }
         console.log('Loading model...');
-        const model = await llama.loadModel({ modelPath });
-        
-        // Store just the model and llama instance - we'll create fresh context/session per call
-        currentModel = { llama, model, LlamaChatSession };
+        const model = await llamaInstance.loadModel({ modelPath });
+
+        currentModel = { model, LlamaChatSession };
         currentModelPath = modelPath;
         console.log('Model loaded successfully');
       } catch (e) {
@@ -682,35 +684,27 @@ ipcMain.handle('run-local-llm', async (event, modelPath, text) => {
       console.log('Creating fresh context with size:', contextSize);
       context = await currentModel.model.createContext({ contextSize });
       session = new currentModel.LlamaChatSession({
-        contextSequence: context.getSequence()
+        contextSequence: context.getSequence(),
+        systemPrompt: 'You are a spelling and grammar correction assistant. Fix spelling mistakes and grammar errors in the user\'s text. Only fix errors - do not change the meaning, style, or add any commentary. Preserve ALL line breaks, blank lines, and paragraph structure exactly as they appear. Do not merge lines or remove empty lines. Output ONLY the corrected text with no preamble or explanation.'
       });
       console.log('Fresh session created');
-      
-      // Use a structured prompt with clear delimiters that works better with various models
-      // Many local models respond better to example-based or clearly delimited prompts
-      const prompt = `You are a spelling and grammar correction assistant. Your task is to fix spelling mistakes and grammar errors in the text below. Only fix errors - do not change the meaning, style, or add any commentary. IMPORTANT: Preserve ALL line breaks, blank lines, and paragraph structure exactly as they appear. Do not merge lines or remove empty lines. Only fix the words themselves.
 
-INPUT TEXT:
-${text}
-
-CORRECTED TEXT:`;
-      
       console.log('Calling session.prompt...');
-      
-      // Add timeout to prevent hanging (90 seconds for larger texts)
+
+      let timeoutId;
       const timeoutMs = 90000;
-      const inferencePromise = session.prompt(prompt, {
+      const inferencePromise = session.prompt(text, {
         maxTokens: Math.min(Math.ceil(text.length * 2) + 100, 4096),
         temperature: 0.2,
-        topP: 0.9,
-        stopOnAbortSignal: false
+        topP: 0.9
       });
-      
+
       const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Inference timeout after 90 seconds')), timeoutMs);
+        timeoutId = setTimeout(() => reject(new Error('Inference timeout after 90 seconds')), timeoutMs);
       });
-      
-      const response = await Promise.race([inferencePromise, timeoutPromise]);
+
+      const response = await Promise.race([inferencePromise, timeoutPromise])
+        .finally(() => clearTimeout(timeoutId));
       
       // Dispose context immediately after getting response
       try {
@@ -724,8 +718,8 @@ CORRECTED TEXT:`;
       console.log('Raw response:', JSON.stringify(response));
       console.log('Response length:', response.length);
       
-      // Clean up the response - remove common model artifacts
-      let cleanedResponse = response.trim();
+      // Strip <think> blocks from reasoning models
+      let cleanedResponse = response.replace(/<think>[\s\S]*?<\/think>/g, '').trim();
       
       // Remove common prefixes/suffixes models might add (case insensitive)
       const unwantedPrefixes = [
@@ -862,6 +856,7 @@ CORRECTED TEXT:`;
           }
           currentModel = null;
           currentModelPath = null;
+          llamaInstance = null;
         } catch (modelCleanupErr) {
           console.error('Error during model cleanup:', modelCleanupErr);
         }
