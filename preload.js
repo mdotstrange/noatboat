@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   readFile: (filePath) => ipcRenderer.invoke('read-file', filePath),
   writeFile: (filePath, content) => ipcRenderer.invoke('write-file', filePath, content),
   deleteFile: (filePath) => ipcRenderer.invoke('delete-file', filePath),
+  moveNote: (srcFolder, baseName, destFolder) => ipcRenderer.invoke('move-note', srcFolder, baseName, destFolder),
   fileExists: (filePath) => ipcRenderer.invoke('file-exists', filePath),
   createFolder: (folderPath) => ipcRenderer.invoke('create-folder', folderPath),
   

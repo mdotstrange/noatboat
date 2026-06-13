@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(git diff *)",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Read(//CreativeGit/nb/noatboat/**)",
+      "Read(//x/CreativeGit/nb/noatboat/**)"
     ]
   }
 }

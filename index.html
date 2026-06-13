@@ -226,6 +226,16 @@
       background:var(--note-hover);
       border-color:var(--note-active-border);
     }
+    .noteItem.folder.drop-target{
+      background:rgba(45,90,138,0.15);
+      border-color:#2d5a8a;
+      border-style:dashed;
+    }
+    #backBtn.drop-target-parent{
+      background:rgba(45,90,138,0.15);
+      outline:2px dashed #2d5a8a;
+      outline-offset:-2px;
+    }
     .noteItem.folder .noteTitle::before{
       content:'📁 ';
     }
@@ -4581,7 +4591,37 @@ function renderList() {
       setListNav(true);
       setFocusMode(false);
     });
-    
+
+    // Drop target for moving notes into this folder
+    let folderDragCount = 0;
+    item.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer.types.includes('application/x-noatboat-note')) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+    });
+    item.addEventListener('dragenter', (e) => {
+      if (!e.dataTransfer.types.includes('application/x-noatboat-note')) return;
+      e.preventDefault();
+      folderDragCount++;
+      item.classList.add('drop-target');
+    });
+    item.addEventListener('dragleave', () => {
+      folderDragCount--;
+      if (folderDragCount <= 0) { folderDragCount = 0; item.classList.remove('drop-target'); }
+    });
+    item.addEventListener('drop', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      folderDragCount = 0;
+      item.classList.remove('drop-target');
+      const raw = e.dataTransfer.getData('application/x-noatboat-note');
+      if (!raw) return;
+      try {
+        const data = JSON.parse(raw);
+        if (data.name) moveNoteToFolder(data.name, folder.path);
+      } catch (_) {}
+    });
+
     frag.appendChild(item);
   }
   
@@ -4609,8 +4649,8 @@ function renderList() {
     
     // Drag note to create link
     item.addEventListener('dragstart', (e) => {
-      e.dataTransfer.setData('application/x-noatboat-note', JSON.stringify({ title: n.title, idx: idx }));
-      e.dataTransfer.effectAllowed = 'link';
+      e.dataTransfer.setData('application/x-noatboat-note', JSON.stringify({ title: n.title, idx: idx, name: n.name, path: n.path }));
+      e.dataTransfer.effectAllowed = 'all';
     });
     
     frag.appendChild(item);
@@ -5323,6 +5363,29 @@ async function deleteCurrent() {
   }
 }
 
+async function moveNoteToFolder(noteName, destFolderPath) {
+  if (!folderPath || destFolderPath === folderPath) return;
+  const baseName = noteTitleFromName(noteName);
+  const noteIdx = notes.findIndex(n => n.name === noteName);
+  const isCurrentNote = (noteIdx >= 0 && noteIdx === currentIndex);
+  try {
+    await flushSaveIfNeeded();
+    const result = await api.moveNote(folderPath, baseName, destFolderPath);
+    if (!result.success) {
+      showBanner(`Could not move note. ${result.error}`);
+      return;
+    }
+    if (isCurrentNote) {
+      currentIndex = null;
+      hideCanvasWorkspace();
+      renderCurrent();
+    }
+    await reloadNotes();
+  } catch (err) {
+    showBanner(`Could not move note. ${String(err?.message || err)}`);
+  }
+}
+
 async function attachImage() {
   if (!folderPath) return;
   if (currentIndex == null || !notes[currentIndex]) return;
@@ -5366,6 +5429,40 @@ async function attachImage() {
 // Events
 els.openBtn.addEventListener('click', () => { setFocusMode(false); openFolder(); });
 els.backBtn.addEventListener('click', () => { setFocusMode(false); navigateUp(); });
+
+// Drop target on back button to move notes to parent folder
+let backBtnDragCount = 0;
+els.backBtn.addEventListener('dragover', (e) => {
+  if (!rootFolderPath || !folderPath || folderPath === rootFolderPath) return;
+  if (!e.dataTransfer.types.includes('application/x-noatboat-note')) return;
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+});
+els.backBtn.addEventListener('dragenter', (e) => {
+  if (!rootFolderPath || !folderPath || folderPath === rootFolderPath) return;
+  if (!e.dataTransfer.types.includes('application/x-noatboat-note')) return;
+  e.preventDefault();
+  backBtnDragCount++;
+  els.backBtn.classList.add('drop-target-parent');
+});
+els.backBtn.addEventListener('dragleave', () => {
+  backBtnDragCount--;
+  if (backBtnDragCount <= 0) { backBtnDragCount = 0; els.backBtn.classList.remove('drop-target-parent'); }
+});
+els.backBtn.addEventListener('drop', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  backBtnDragCount = 0;
+  els.backBtn.classList.remove('drop-target-parent');
+  if (!rootFolderPath || !folderPath || folderPath === rootFolderPath) return;
+  const raw = e.dataTransfer.getData('application/x-noatboat-note');
+  if (!raw) return;
+  try {
+    const data = JSON.parse(raw);
+    if (data.name) moveNoteToFolder(data.name, api.dirname(folderPath));
+  } catch (_) {}
+});
+
 els.newFolderBtn.addEventListener('click', () => { setFocusMode(false); newFolder(); });
 els.newBtn.addEventListener('click', newNote);
 els.refreshBtn.addEventListener('click', refreshNotes);

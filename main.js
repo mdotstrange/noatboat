@@ -450,6 +450,62 @@ ipcMain.handle('delete-file', async (event, filePath) => {
   }
 });
 
+// Move a note and all its attachments to a different folder
+ipcMain.handle('move-note', async (event, srcFolder, baseName, destFolder) => {
+  try {
+    const imgExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
+    const audioExts = ['.mp3', '.wav', '.aiff', '.aif', '.ogg', '.m4a', '.flac', '.wma'];
+    const canvasSuffixes = ['.canvas.json', '.canvas.png'];
+
+    const entries = fs.readdirSync(srcFolder);
+    const toMove = [];
+
+    for (const entry of entries) {
+      const lower = entry.toLowerCase();
+      const baseLower = baseName.toLowerCase();
+      if (lower === baseLower + '.txt') {
+        toMove.push(entry);
+      } else if (imgExts.some(ext => lower === baseLower + ext)) {
+        toMove.push(entry);
+      } else if (audioExts.some(ext => lower === baseLower + ext)) {
+        toMove.push(entry);
+      } else if (canvasSuffixes.some(suf => lower === baseLower + suf)) {
+        toMove.push(entry);
+      }
+    }
+
+    if (toMove.length === 0) {
+      return { success: false, error: `No files found for "${baseName}".` };
+    }
+
+    for (const name of toMove) {
+      const destPath = path.join(destFolder, name);
+      if (fs.existsSync(destPath)) {
+        return { success: false, error: `A file named "${name}" already exists in the destination folder.` };
+      }
+    }
+
+    for (const name of toMove) {
+      const srcPath = path.join(srcFolder, name);
+      const destPath = path.join(destFolder, name);
+      try {
+        fs.renameSync(srcPath, destPath);
+      } catch (renameErr) {
+        if (renameErr.code === 'EXDEV') {
+          fs.copyFileSync(srcPath, destPath);
+          fs.unlinkSync(srcPath);
+        } else {
+          throw renameErr;
+        }
+      }
+    }
+
+    return { success: true, movedFiles: toMove };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
 // Check if file exists
 ipcMain.handle('file-exists', async (event, filePath) => {
   return fs.existsSync(filePath);
