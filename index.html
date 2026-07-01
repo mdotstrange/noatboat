@@ -297,6 +297,60 @@
       padding:20px;
       color:var(--muted);
       font-size:14px;
+      overflow:auto;
+    }
+    .splashScreen{
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      max-width:900px;
+      margin:0 auto;
+      padding:20px 10px;
+    }
+    .splashLogo{
+      width:180px;
+      height:auto;
+      margin-bottom:24px;
+      image-rendering:pixelated;
+    }
+    .splashGrid{
+      display:grid;
+      grid-template-columns:1fr 1fr 1fr;
+      gap:12px;
+      width:100%;
+    }
+    .splashGrid img{
+      width:100%;
+      aspect-ratio:1;
+      object-fit:cover;
+      border-radius:8px;
+      cursor:pointer;
+      border:2px solid transparent;
+      transition:border-color 0.15s, transform 0.15s;
+    }
+    .splashGrid img:hover{
+      border-color:var(--note-active-border);
+      transform:scale(1.03);
+    }
+    .randomNoteBtn{
+      margin-top:20px;
+      padding:10px 28px;
+      font-size:14px;
+      font-weight:700;
+      letter-spacing:1px;
+      cursor:pointer;
+      background:var(--panel);
+      color:var(--fg);
+      border:2px solid var(--border);
+      border-radius:6px;
+      transition:background 0.15s, border-color 0.15s;
+    }
+    .randomNoteBtn:hover{
+      background:var(--note-hover);
+      border-color:var(--note-active-border);
+    }
+    .emptyText{
+      text-align:center;
     }
     .editorWrap{
       position:relative;
@@ -852,7 +906,14 @@
         <div id="currentTitle" class="currentTitle">No note selected</div>
         <div id="saveState" class="saveState"></div>
       </div>
-      <div id="empty" class="empty">Open a folder, then select or create a note.</div>
+      <div id="empty" class="empty">
+        <div id="splashScreen" class="splashScreen" style="display:none;">
+          <img id="splashLogo" class="splashLogo" src="icon.png" alt="Noat Boat">
+          <div id="splashGrid" class="splashGrid"></div>
+          <button id="randomNoteBtn" class="randomNoteBtn" style="display:none;">RANDOM NOTE</button>
+        </div>
+        <div id="emptyText" class="emptyText">Open a folder, then select or create a note.</div>
+      </div>
       <div id="editorWrap" class="editorWrap" style="display:none;">
         <div class="editorContainer">
           <div id="editorHighlight" class="editorHighlight"></div>
@@ -4658,6 +4719,75 @@ function renderList() {
   els.list.appendChild(frag);
 }
 
+async function renderSplashScreen() {
+  const splash = document.getElementById('splashScreen');
+  const grid = document.getElementById('splashGrid');
+  const emptyText = document.getElementById('emptyText');
+  const randBtn = document.getElementById('randomNoteBtn');
+  grid.innerHTML = '';
+  randBtn.style.display = 'none';
+
+  const candidates = [];
+  for (let i = 0; i < notes.length; i++) {
+    const n = notes[i];
+    if (n.image?.path && n.image.size > 0) {
+      candidates.push({ idx: i, path: n.image.path, title: n.title });
+    } else if (n.canvas?.pngPath) {
+      candidates.push({ idx: i, path: n.canvas.pngPath, title: n.title });
+    }
+  }
+
+  if (candidates.length === 0) {
+    splash.style.display = 'none';
+    emptyText.style.display = 'block';
+    return;
+  }
+
+  splash.style.display = 'flex';
+  emptyText.style.display = 'none';
+
+  for (let i = candidates.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+  }
+
+  const valid = [];
+  for (const c of candidates) {
+    if (valid.length >= 6) break;
+    const r = await api.readImageBase64(c.path);
+    if (!r || !r.success) continue;
+    const isCanvasPng = c.path.toLowerCase().endsWith('.canvas.png');
+    if (isCanvasPng && r.fileSize < 102400) continue;
+    valid.push({ ...c, dataUrl: r.dataUrl });
+  }
+
+  if (valid.length === 0) {
+    splash.style.display = 'none';
+    emptyText.style.display = 'block';
+    return;
+  }
+
+  for (const v of valid) {
+    const img = document.createElement('img');
+    img.src = v.dataUrl;
+    img.alt = v.title;
+    img.title = v.title;
+    const noteIdx = v.idx;
+    img.addEventListener('click', () => {
+      openNoteByIndex(noteIdx, { focusEditor: false, focusMode: false });
+    });
+    grid.appendChild(img);
+  }
+
+  if (notes.length > 0) {
+    randBtn.style.display = '';
+    randBtn.onclick = () => {
+      const idx = Math.floor(Math.random() * notes.length);
+      openNoteByIndex(idx, { focusEditor: false, focusMode: false });
+    };
+  }
+}
+
 function renderCurrent() {
   if (currentIndex == null || !notes[currentIndex]) {
     els.currentTitle.textContent = 'No note selected';
@@ -4667,6 +4797,7 @@ function renderCurrent() {
     setEditorEnabled(false);
     clearThumb();
     hideCanvasWorkspace();
+    renderSplashScreen();
     return;
   }
 

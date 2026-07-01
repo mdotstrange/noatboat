@@ -549,9 +549,9 @@ ipcMain.handle('read-image-base64', async (event, filePath) => {
     if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
     else if (ext === 'gif') mimeType = 'image/gif';
     else if (ext === 'webp') mimeType = 'image/webp';
-    
+
     const base64 = buffer.toString('base64');
-    return { success: true, dataUrl: `data:${mimeType};base64,${base64}` };
+    return { success: true, dataUrl: `data:${mimeType};base64,${base64}`, fileSize: buffer.length };
   } catch (e) {
     return { success: false, error: e.message };
   }
