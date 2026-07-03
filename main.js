@@ -511,6 +511,15 @@ ipcMain.handle('file-exists', async (event, filePath) => {
   return fs.existsSync(filePath);
 });
 
+ipcMain.handle('file-size', async (event, filePath) => {
+  try {
+    const stats = fs.statSync(filePath);
+    return { success: true, size: stats.size };
+  } catch (e) {
+    return { success: false, size: 0 };
+  }
+});
+
 // Show file in OS file explorer
 ipcMain.handle('show-item-in-folder', async (event, filePath) => {
   try {

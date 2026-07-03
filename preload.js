@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteFile: (filePath) => ipcRenderer.invoke('delete-file', filePath),
   moveNote: (srcFolder, baseName, destFolder) => ipcRenderer.invoke('move-note', srcFolder, baseName, destFolder),
   fileExists: (filePath) => ipcRenderer.invoke('file-exists', filePath),
+  fileSize: (filePath) => ipcRenderer.invoke('file-size', filePath),
   createFolder: (folderPath) => ipcRenderer.invoke('create-folder', folderPath),
   
   // Image operations

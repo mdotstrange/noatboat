@@ -332,8 +332,13 @@
       border-color:var(--note-active-border);
       transform:scale(1.03);
     }
-    .randomNoteBtn{
+    .splashButtons{
+      display:flex;
+      gap:12px;
+      justify-content:center;
       margin-top:20px;
+    }
+    .randomNoteBtn{
       padding:10px 28px;
       font-size:14px;
       font-weight:700;
@@ -348,6 +353,30 @@
     .randomNoteBtn:hover{
       background:var(--note-hover);
       border-color:var(--note-active-border);
+    }
+    .splashProgress{
+      margin-top:14px;
+      width:100%;
+      max-width:300px;
+      text-align:center;
+    }
+    .splashProgressTrack{
+      width:100%;
+      height:12px;
+      background:var(--border);
+      border-radius:6px;
+      overflow:hidden;
+    }
+    .splashProgressFill{
+      height:100%;
+      background:#22c55e;
+      border-radius:6px;
+      transition:width 0.3s;
+    }
+    .splashProgressLabel{
+      font-size:11px;
+      color:var(--muted);
+      margin-top:4px;
     }
     .emptyText{
       text-align:center;
@@ -910,7 +939,15 @@
         <div id="splashScreen" class="splashScreen" style="display:none;">
           <img id="splashLogo" class="splashLogo" src="icon.png" alt="Noat Boat">
           <div id="splashGrid" class="splashGrid"></div>
-          <button id="randomNoteBtn" class="randomNoteBtn" style="display:none;">RANDOM NOTE</button>
+          <div class="splashButtons">
+            <button id="drawRandomBtn" class="randomNoteBtn" style="display:none;">✏️ DRAW RANDOM</button>
+          </div>
+          <div id="splashProgress" class="splashProgress" style="display:none;">
+            <div class="splashProgressTrack">
+              <div id="splashProgressFill" class="splashProgressFill"></div>
+            </div>
+            <div id="splashProgressLabel" class="splashProgressLabel"></div>
+          </div>
         </div>
         <div id="emptyText" class="emptyText">Open a folder, then select or create a note.</div>
       </div>
@@ -4723,9 +4760,9 @@ async function renderSplashScreen() {
   const splash = document.getElementById('splashScreen');
   const grid = document.getElementById('splashGrid');
   const emptyText = document.getElementById('emptyText');
-  const randBtn = document.getElementById('randomNoteBtn');
+  const drawBtn = document.getElementById('drawRandomBtn');
   grid.innerHTML = '';
-  randBtn.style.display = 'none';
+  drawBtn.style.display = 'none';
 
   const candidates = [];
   for (let i = 0; i < notes.length; i++) {
@@ -4780,11 +4817,41 @@ async function renderSplashScreen() {
   }
 
   if (notes.length > 0) {
-    randBtn.style.display = '';
-    randBtn.onclick = () => {
-      const idx = Math.floor(Math.random() * notes.length);
+    drawBtn.style.display = '';
+    drawBtn.onclick = async () => {
+      const candidates = [];
+      for (let i = 0; i < notes.length; i++) {
+        const n = notes[i];
+        if (n.image && n.image.size > 0) continue;
+        if (n.canvas?.pngPath) {
+          const info = await api.fileSize(n.canvas.pngPath);
+          if (info.success && info.size >= 102400) continue;
+        }
+        candidates.push(i);
+      }
+      if (candidates.length === 0) {
+        showBanner('All notes already have drawings!');
+        return;
+      }
+      const idx = candidates[Math.floor(Math.random() * candidates.length)];
       openNoteByIndex(idx, { focusEditor: false, focusMode: false });
     };
+
+    const progressEl = document.getElementById('splashProgress');
+    const fillEl = document.getElementById('splashProgressFill');
+    const labelEl = document.getElementById('splashProgressLabel');
+    let withDrawing = 0;
+    for (const n of notes) {
+      if (n.image && n.image.size > 0) { withDrawing++; continue; }
+      if (n.canvas?.pngPath) {
+        const info = await api.fileSize(n.canvas.pngPath);
+        if (info.success && info.size >= 102400) { withDrawing++; }
+      }
+    }
+    const pct = Math.round((withDrawing / notes.length) * 100);
+    fillEl.style.width = pct + '%';
+    labelEl.textContent = `${withDrawing} / ${notes.length} notes illustrated (${pct}%)`;
+    progressEl.style.display = '';
   }
 }
 
