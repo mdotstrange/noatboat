@@ -469,6 +469,27 @@
     .canvasToolbar .btn{ padding:5px 8px; font-size:12px; }
     .canvasToolbar .btn.active{ background:var(--note-active-bg); border-color:var(--note-active-border); }
     .canvasToolbar .separator{ width:1px; height:20px; background:var(--border); margin:0 4px; }
+    .penSizeBtn{ font-weight:700; min-width:28px; }
+    .penSizePreview{
+      width:28px; height:28px;
+      display:flex; align-items:center; justify-content:center;
+      background:var(--bg); border:1px solid var(--border); border-radius:6px;
+    }
+    .penSizeDot{
+      display:block; border-radius:50%; background:var(--fg);
+    }
+    .colorSwatch{
+      width:22px; height:22px; border-radius:50%;
+      border:2px solid var(--border); flex-shrink:0;
+    }
+    .colorPalette{ display:flex; gap:4px; align-items:center; }
+    .colorBtn, .drawColorBtn{
+      width:22px; height:22px; border-radius:50%; border:2px solid var(--border);
+      cursor:pointer; padding:0; flex-shrink:0;
+      transition:transform 0.1s;
+    }
+    .colorBtn:hover, .drawColorBtn:hover{ transform:scale(1.15); }
+    .colorBtn.active, .drawColorBtn.active{ border-color:var(--fg); box-shadow:0 0 0 2px var(--bg), 0 0 0 4px var(--fg); }
     .canvasContainer{
       flex:1;
       position:relative;
@@ -961,6 +982,23 @@
             <button id="canvasSelectBtn" class="btn active" title="Select/Move">🖱️</button>
             <button id="canvasDrawBtn" class="btn" title="Draw">✏️</button>
             <div class="separator"></div>
+            <button id="penSizeUp" class="btn penSizeBtn" title="Increase pen size">+</button>
+            <div id="penSizePreview" class="penSizePreview"><span id="penSizeDot" class="penSizeDot"></span></div>
+            <button id="penSizeDown" class="btn penSizeBtn" title="Decrease pen size">−</button>
+            <div class="separator"></div>
+            <div id="currentColorSwatch" class="colorSwatch" style="background:#000000;" title="Current color"></div>
+            <div id="colorPalette" class="colorPalette">
+              <button class="colorBtn" data-color="#000000" style="background:#000000;" title="Black"></button>
+              <button class="colorBtn" data-color="#00FF2F" style="background:#00FF2F;" title="Green"></button>
+              <button class="colorBtn" data-color="#FF00D0" style="background:#FF00D0;" title="Pink"></button>
+              <button class="colorBtn" data-color="#00EAFF" style="background:#00EAFF;" title="Cyan"></button>
+              <button class="colorBtn" data-color="#FF1500" style="background:#FF1500;" title="Red"></button>
+              <button class="colorBtn" data-color="#FC4C00" style="background:#FC4C00;" title="Orange"></button>
+              <button class="colorBtn" data-color="#0032FC" style="background:#0032FC;" title="Blue"></button>
+              <button class="colorBtn" data-color="#FCEF00" style="background:#FCEF00;" title="Yellow"></button>
+              <button class="colorBtn" data-color="#A400FC" style="background:#A400FC;" title="Purple"></button>
+            </div>
+            <div class="separator"></div>
             <button id="canvasAddImageBtn" class="btn" title="Add Image">🖼️</button>
             <div class="separator"></div>
             <button id="canvasDeleteObjBtn" class="btn" title="Delete Selected">🗑️</button>
@@ -998,11 +1036,29 @@
           <button id="drawCloseBtn" class="btn">Close</button>
         </div>
       </div>
+      <div class="drawToolbar canvasToolbar">
+        <button id="drawPenSizeUp" class="btn penSizeBtn" title="Increase pen size">+</button>
+        <div id="drawPenSizePreview" class="penSizePreview"><span id="drawPenSizeDot" class="penSizeDot"></span></div>
+        <button id="drawPenSizeDown" class="btn penSizeBtn" title="Decrease pen size">−</button>
+        <div class="separator"></div>
+        <div id="drawCurrentColorSwatch" class="colorSwatch" style="background:#000000;" title="Current color"></div>
+        <div id="drawColorPalette" class="colorPalette">
+          <button class="drawColorBtn" data-color="#000000" style="background:#000000;" title="Black"></button>
+          <button class="drawColorBtn" data-color="#00FF2F" style="background:#00FF2F;" title="Green"></button>
+          <button class="drawColorBtn" data-color="#FF00D0" style="background:#FF00D0;" title="Pink"></button>
+          <button class="drawColorBtn" data-color="#00EAFF" style="background:#00EAFF;" title="Cyan"></button>
+          <button class="drawColorBtn" data-color="#FF1500" style="background:#FF1500;" title="Red"></button>
+          <button class="drawColorBtn" data-color="#FC4C00" style="background:#FC4C00;" title="Orange"></button>
+          <button class="drawColorBtn" data-color="#0032FC" style="background:#0032FC;" title="Blue"></button>
+          <button class="drawColorBtn" data-color="#FCEF00" style="background:#FCEF00;" title="Yellow"></button>
+          <button class="drawColorBtn" data-color="#A400FC" style="background:#A400FC;" title="Purple"></button>
+        </div>
+      </div>
       <div class="drawBody">
         <div class="drawCanvasWrap">
           <canvas id="drawCanvas" width="900" height="1200"></canvas>
         </div>
-        <div class="drawHint">Black pen on white. No eraser.</div>
+        <div class="drawHint">No eraser.</div>
       </div>
     </div>
   </div>
@@ -1321,6 +1377,20 @@ let canvasDrawingMode = false;
 let canvasSignatureMark = null;
 let canvasDirty = false;
 let canvasSaveTimer = null;
+let canvasPenSize = 1.25;
+let canvasPenColorIdx = 0;
+const PEN_SIZES = [0.5, 1, 1.25, 2, 3, 5, 8, 12, 20];
+const PEN_COLORS = [
+  { hex: '#000000', rgb: [0, 0, 0] },
+  { hex: '#00FF2F', rgb: [0, 255, 47] },
+  { hex: '#FF00D0', rgb: [255, 0, 208] },
+  { hex: '#00EAFF', rgb: [0, 234, 255] },
+  { hex: '#FF1500', rgb: [255, 21, 0] },
+  { hex: '#FC4C00', rgb: [252, 76, 0] },
+  { hex: '#0032FC', rgb: [0, 50, 252] },
+  { hex: '#FCEF00', rgb: [252, 239, 0] },
+  { hex: '#A400FC', rgb: [164, 0, 252] }
+];
 
 function setFocusMode(on) {
   document.body.classList.toggle('focusMode', !!on);
@@ -1637,9 +1707,10 @@ function resizeDrawOverlay() {
 function initCanvasSignatureMark() {
   if (typeof SignatureMark !== 'undefined') {
     canvasSignatureMark = new SignatureMark(els.drawOverlay);
-    // Set thinner stroke width (default is 2.5)
     if (canvasSignatureMark && canvasSignatureMark.context) {
-      canvasSignatureMark.context.lineWidth = 1.25;
+      canvasSignatureMark.context.lineWidth = canvasPenSize;
+      canvasSignatureMark.color = PEN_COLORS[canvasPenColorIdx].rgb;
+      canvasSignatureMark.context.strokeStyle = 'rgba(' + canvasSignatureMark.color.join(',') + ',' + canvasSignatureMark.brush_pressure + ')';
     }
   }
 }
@@ -2046,9 +2117,13 @@ function drawCtx() {
 }
 
 function initSignatureMark() {
-  // SignatureMark sets up its own event listeners, so we just initialize it
   if (typeof SignatureMark !== 'undefined') {
     signatureMark = new SignatureMark(els.drawCanvas);
+    if (signatureMark && signatureMark.context) {
+      signatureMark.context.lineWidth = canvasPenSize;
+      signatureMark.color = PEN_COLORS[canvasPenColorIdx].rgb;
+      signatureMark.context.strokeStyle = 'rgba(' + PEN_COLORS[canvasPenColorIdx].rgb.join(',') + ',' + signatureMark.brush_pressure + ')';
+    }
   }
 }
 
@@ -4614,6 +4689,8 @@ async function loadPreferences() {
     publishedSiteUrl = prefs.publishedSiteUrl || '';
     bitcoinTipAddress = prefs.bitcoinTipAddress || '';
     ethereumTipAddress = prefs.ethereumTipAddress || '';
+    if (prefs.penSize != null && PEN_SIZES.includes(prefs.penSize)) canvasPenSize = prefs.penSize;
+    if (prefs.penColorIdx != null && prefs.penColorIdx >= 0 && prefs.penColorIdx < PEN_COLORS.length) canvasPenColorIdx = prefs.penColorIdx;
     document.body.classList.toggle('dark-mode', currentTheme === 'dark');
     document.documentElement.style.setProperty('--focus-strength', (currentFocusStrength / 100).toFixed(2));
     
@@ -5683,6 +5760,81 @@ els.audioModal.addEventListener('mousedown', (e) => { if (e.target === els.audio
 // Canvas workspace event listeners
 els.canvasSelectBtn.addEventListener('click', () => setCanvasDrawingMode(false));
 els.canvasDrawBtn.addEventListener('click', () => setCanvasDrawingMode(true));
+
+function updatePenSizePreview() {
+  const hex = PEN_COLORS[canvasPenColorIdx].hex;
+  const px = Math.max(4, Math.min(24, canvasPenSize * 4));
+  for (const id of ['penSizeDot', 'drawPenSizeDot']) {
+    const dot = document.getElementById(id);
+    if (dot) { dot.style.width = px + 'px'; dot.style.height = px + 'px'; dot.style.background = hex; }
+  }
+  for (const id of ['currentColorSwatch', 'drawCurrentColorSwatch']) {
+    const el = document.getElementById(id);
+    if (el) el.style.background = hex;
+  }
+}
+
+function applyPenSettings() {
+  const rgb = PEN_COLORS[canvasPenColorIdx].rgb;
+  for (const sm of [canvasSignatureMark, signatureMark]) {
+    if (sm && sm.context) {
+      sm.context.lineWidth = canvasPenSize;
+      sm.color = rgb;
+      sm.context.strokeStyle = 'rgba(' + rgb.join(',') + ',' + sm.brush_pressure + ')';
+    }
+  }
+  updatePenSizePreview();
+  document.querySelectorAll('.colorBtn, .drawColorBtn').forEach(b => {
+    b.classList.toggle('active', b.dataset.color === PEN_COLORS[canvasPenColorIdx].hex);
+  });
+  api.savePreferences({ penSize: canvasPenSize, penColorIdx: canvasPenColorIdx });
+}
+
+document.getElementById('penSizeUp').addEventListener('click', () => {
+  const i = PEN_SIZES.indexOf(canvasPenSize);
+  if (i < PEN_SIZES.length - 1) canvasPenSize = PEN_SIZES[i + 1];
+  else if (i === -1) canvasPenSize = PEN_SIZES.find(s => s > canvasPenSize) || PEN_SIZES[PEN_SIZES.length - 1];
+  applyPenSettings();
+});
+
+document.getElementById('penSizeDown').addEventListener('click', () => {
+  const i = PEN_SIZES.indexOf(canvasPenSize);
+  if (i > 0) canvasPenSize = PEN_SIZES[i - 1];
+  else if (i === -1) canvasPenSize = [...PEN_SIZES].reverse().find(s => s < canvasPenSize) || PEN_SIZES[0];
+  applyPenSettings();
+});
+
+document.querySelectorAll('.colorBtn').forEach((btn, idx) => {
+  btn.addEventListener('click', () => {
+    canvasPenColorIdx = idx;
+    applyPenSettings();
+  });
+});
+
+// Draw modal pen size and color controls
+document.getElementById('drawPenSizeUp').addEventListener('click', () => {
+  const i = PEN_SIZES.indexOf(canvasPenSize);
+  if (i < PEN_SIZES.length - 1) canvasPenSize = PEN_SIZES[i + 1];
+  else if (i === -1) canvasPenSize = PEN_SIZES.find(s => s > canvasPenSize) || PEN_SIZES[PEN_SIZES.length - 1];
+  applyPenSettings();
+});
+
+document.getElementById('drawPenSizeDown').addEventListener('click', () => {
+  const i = PEN_SIZES.indexOf(canvasPenSize);
+  if (i > 0) canvasPenSize = PEN_SIZES[i - 1];
+  else if (i === -1) canvasPenSize = [...PEN_SIZES].reverse().find(s => s < canvasPenSize) || PEN_SIZES[0];
+  applyPenSettings();
+});
+
+document.querySelectorAll('.drawColorBtn').forEach((btn, idx) => {
+  btn.addEventListener('click', () => {
+    canvasPenColorIdx = idx;
+    applyPenSettings();
+  });
+});
+
+applyPenSettings();
+
 els.canvasAddImageBtn.addEventListener('click', addImageFromDialog);
 els.canvasDeleteObjBtn.addEventListener('click', deleteSelectedObjects);
 els.canvasClearBtn.addEventListener('click', async () => {
