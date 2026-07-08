@@ -99,6 +99,8 @@ Thumbs.db
 *.swp
 .vscode/
 .idea/
+.claude/
+.claude
 
 # Gatsby files
 .cache/
