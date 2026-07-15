@@ -419,15 +419,31 @@
       font-family:var(--mono);
       white-space:pre-wrap;
       word-wrap:break-word;
-      color:transparent;
+      color:var(--text);
     }
     .editorHighlight mark{
       background:rgba(255,200,0,0.35);
-      color:transparent;
+      color:inherit;
       border-radius:2px;
     }
     .dark-mode .editorHighlight mark{
       background:rgba(255,200,0,0.25);
+    }
+    .fmt-bold{ font-weight:700; }
+    .fmt-italic{ font-style:italic; }
+    .fmt-underline{ text-decoration:underline; }
+    .fmt-strikethrough{ text-decoration:line-through; }
+    .fmt-underline.fmt-strikethrough{ text-decoration:underline line-through; }
+    .fmt-list{
+      display:inline;
+      border-left:3px solid var(--accent, #4a9eff);
+      padding-left:4px;
+      margin-left:-7px;
+      background:rgba(74,158,255,0.04);
+    }
+    .dark-mode .fmt-list{ background:rgba(74,158,255,0.08); }
+    .fmt-line{
+      display:block;
     }
     textarea{
       position:relative;
@@ -443,7 +459,12 @@
       width:100%;
       height:100%;
       background:transparent;
+      color:transparent;
+      caret-color:var(--text);
+    }
+    textarea::selection{
       color:var(--text);
+      background:rgba(0,100,255,0.3);
     }
     .canvasWorkspace{
       flex: 1 1 50%;
@@ -1367,6 +1388,13 @@ let isUndoRedoing = false;
 // Autosave timing constants (industry standard)
 const SAVE_DEBOUNCE_MS = 1000;      // Wait 1s after user stops typing
 const SAVE_MAX_INTERVAL_MS = 10000; // Force save every 10s during continuous typing
+
+// Rich text formatting (overlay-based, .txt stays plain)
+let currentFormatSpans = [];
+let formatDirty = false;
+let currentSearchQuery = '';
+let prevEditorText = '';
+
 let currentImageURL = null;
 let listNavActive = false;
 let currentListOrder = [];
@@ -4478,7 +4506,8 @@ async function fixText(isManual = false) {
       notes[currentIndex].content = newFullText;
       dirty = true;
       scheduleSave();
-      
+      syncFormatSpansToText();
+
       // Restore cursor position
       newCursorPos = Math.min(Math.max(0, newCursorPos), newFullText.length);
       editor.selectionStart = editor.selectionEnd = newCursorPos;
@@ -4948,6 +4977,7 @@ function renderCurrent() {
   const n = notes[currentIndex];
   els.currentTitle.textContent = n.name;
   els.editor.value = n.content ?? '';
+  prevEditorText = els.editor.value;
   els.editorWrap.style.display = 'flex';
   els.empty.style.display = 'none';
   setEditorEnabled(true);
@@ -4955,6 +4985,7 @@ function renderCurrent() {
   els.editorWrap.classList.remove('hasImage');
   dirty = false;
   resetUndoHistory();
+  renderEditorOverlay();
 }
 
 async function openFolder() {
@@ -5191,7 +5222,7 @@ async function flushSaveIfNeeded() {
     clearTimeout(autoFixTimer);
     autoFixTimer = null;
   }
-  if (dirty && !isSaving) {
+  if ((dirty || formatDirty) && !isSaving) {
     await saveCurrentNow();
   }
 }
@@ -5271,10 +5302,16 @@ async function autoDeleteEmptyNote(noteIndex, editorContent = null) {
     const base = noteTitleFromName(n.name);
     const basePath = api.joinPath(folderPath, base);
     await api.deleteCanvasFiles(basePath);
-    
+
+    // Delete format file
+    const fmtPath = getFormatPath(base);
+    if (fmtPath) {
+      try { await api.deleteFile(fmtPath); } catch (e) {}
+    }
+
     // Remove from notes array
     notes.splice(noteIndex, 1);
-    
+
     console.log('[AutoDelete] Successfully auto-deleted empty note:', n.name);
   } catch (err) {
     // Silently ignore errors - the note might already be deleted
@@ -5338,6 +5375,7 @@ function editorUndo() {
   els.saveState.textContent = 'modified';
   scheduleSave();
   isUndoRedoing = false;
+  syncFormatSpansToText();
   updateUndoButtons();
 }
 
@@ -5356,6 +5394,7 @@ function editorRedo() {
   els.saveState.textContent = 'modified';
   scheduleSave();
   isUndoRedoing = false;
+  syncFormatSpansToText();
   updateUndoButtons();
 }
 
@@ -5364,40 +5403,131 @@ function updateUndoButtons() {
   els.redoBtn.disabled = redoStack.length === 0 || currentIndex == null;
 }
 
-function highlightSearchTerm(query) {
+function renderEditorOverlay() {
   const overlay = document.getElementById('editorHighlight');
-  if (!query) { overlay.innerHTML = ''; return; }
-  const editor = els.editor;
-  const text = editor.value;
-  const q = query.toLowerCase();
-
-  let html = '';
-  let lastIdx = 0;
-  let lower = text.toLowerCase();
-  let firstMatchIdx = -1;
-  let pos = lower.indexOf(q);
-  while (pos !== -1) {
-    if (firstMatchIdx === -1) firstMatchIdx = pos;
-    html += escapeHtml(text.substring(lastIdx, pos));
-    html += '<mark>' + escapeHtml(text.substring(pos, pos + query.length)) + '</mark>';
-    lastIdx = pos + query.length;
-    pos = lower.indexOf(q, lastIdx);
+  const text = els.editor.value;
+  if (!text && !currentSearchQuery) {
+    overlay.innerHTML = '<div class="highlightInner"></div>';
+    return;
   }
-  html += escapeHtml(text.substring(lastIdx));
+
+  const lineBreaks = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\n') lineBreaks.push(i);
+  }
+  function lineOfPos(pos) {
+    let lo = 0, hi = lineBreaks.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (lineBreaks[mid] < pos) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+  }
+  function lineRange(lineIdx) {
+    const start = lineIdx === 0 ? 0 : lineBreaks[lineIdx - 1] + 1;
+    const end = lineIdx < lineBreaks.length ? lineBreaks[lineIdx] : text.length;
+    return [start, end];
+  }
+
+  const events = [];
+  for (const span of currentFormatSpans) {
+    const t = span.type;
+    const isLine = t === 'ol' || t === 'ul';
+    if (isLine) {
+      const line = lineOfPos(Math.min(span.start, text.length));
+      const [ls, le] = lineRange(line);
+      events.push({ pos: ls, kind: 'open', type: t, isLine: true });
+      events.push({ pos: le, kind: 'close', type: t, isLine: true });
+    } else if (t.startsWith('h') && span.start === span.end) {
+      // Legacy heading spans from removed feature: ignore
+      continue;
+    } else {
+      const s = Math.min(span.start, text.length);
+      const e = Math.min(span.end, text.length);
+      if (s >= e) continue;
+      events.push({ pos: s, kind: 'open', type: t, isLine: false });
+      events.push({ pos: e, kind: 'close', type: t, isLine: false });
+    }
+  }
+
+  if (currentSearchQuery) {
+    const q = currentSearchQuery.toLowerCase();
+    const lower = text.toLowerCase();
+    let pos = lower.indexOf(q);
+    while (pos !== -1) {
+      events.push({ pos: pos, kind: 'open', type: 'search', isLine: false });
+      events.push({ pos: pos + currentSearchQuery.length, kind: 'close', type: 'search', isLine: false });
+      pos = lower.indexOf(q, pos + currentSearchQuery.length);
+    }
+  }
+
+  events.sort((a, b) => a.pos - b.pos || (a.kind === 'open' ? -1 : 1));
+
+  const active = new Map();
+  let html = '';
+  let cursor = 0;
+
+  function classesForActive() {
+    const cls = [];
+    for (const [type, count] of active) {
+      if (count <= 0) continue;
+      if (type === 'search') continue;
+      if (type === 'bold') cls.push('fmt-bold');
+      else if (type === 'italic') cls.push('fmt-italic');
+      else if (type === 'underline') cls.push('fmt-underline');
+      else if (type === 'strikethrough') cls.push('fmt-strikethrough');
+      else if (type === 'ol' || type === 'ul') cls.push('fmt-list');
+    }
+    return cls;
+  }
+
+  function flushSegment(end) {
+    if (end <= cursor) return;
+    const segment = text.substring(cursor, end);
+    const cls = classesForActive();
+    const inSearch = (active.get('search') || 0) > 0;
+    if (cls.length === 0 && !inSearch) {
+      html += escapeHtml(segment);
+    } else {
+      const tag = inSearch ? 'mark' : 'span';
+      const classAttr = cls.length > 0 ? ' class="' + cls.join(' ') + '"' : '';
+      html += '<' + tag + classAttr + '>' + escapeHtml(segment) + '</' + tag + '>';
+    }
+    cursor = end;
+  }
+
+  for (const ev of events) {
+    flushSegment(ev.pos);
+    const prev = active.get(ev.type) || 0;
+    active.set(ev.type, ev.kind === 'open' ? prev + 1 : Math.max(0, prev - 1));
+  }
+  flushSegment(text.length);
+
   overlay.innerHTML = '<div class="highlightInner">' + html + '</div>';
-
   syncHighlightScroll();
+}
 
-  if (firstMatchIdx !== -1) {
-    editor.focus();
-    editor.selectionStart = firstMatchIdx;
-    editor.selectionEnd = firstMatchIdx + query.length;
-    const textBefore = text.substring(0, firstMatchIdx);
-    const linesBefore = textBefore.split('\n').length;
-    const lineHeight = parseInt(getComputedStyle(editor).lineHeight) || 20;
-    const scrollTarget = Math.max(0, (linesBefore - 3) * lineHeight);
-    editor.scrollTop = scrollTarget;
-    syncHighlightScroll();
+function highlightSearchTerm(query) {
+  currentSearchQuery = query || '';
+  renderEditorOverlay();
+
+  if (currentSearchQuery) {
+    const editor = els.editor;
+    const text = editor.value;
+    const q = currentSearchQuery.toLowerCase();
+    const lower = text.toLowerCase();
+    const firstMatchIdx = lower.indexOf(q);
+    if (firstMatchIdx !== -1) {
+      editor.focus();
+      editor.selectionStart = firstMatchIdx;
+      editor.selectionEnd = firstMatchIdx + currentSearchQuery.length;
+      const textBefore = text.substring(0, firstMatchIdx);
+      const linesBefore = textBefore.split('\n').length;
+      const lineHeight = parseInt(getComputedStyle(editor).lineHeight) || 20;
+      const scrollTarget = Math.max(0, (linesBefore - 3) * lineHeight);
+      editor.scrollTop = scrollTarget;
+      syncHighlightScroll();
+    }
   }
 }
 
@@ -5411,6 +5541,160 @@ function syncHighlightScroll() {
 
 function escapeHtml(str) {
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Adjust format span offsets after any text mutation (typing, paste, tab-indent,
+// undo/redo, auto-fix). Diffs the previous text snapshot against the current
+// value using common prefix/suffix, so it works regardless of the edit source.
+function syncFormatSpansToText() {
+  const newText = els.editor.value;
+  const oldText = prevEditorText;
+  if (newText === oldText) { renderEditorOverlay(); return; }
+
+  if (currentFormatSpans.length > 0) {
+    let p = 0;
+    const maxP = Math.min(oldText.length, newText.length);
+    while (p < maxP && oldText[p] === newText[p]) p++;
+    let s = 0;
+    const maxS = maxP - p;
+    while (s < maxS && oldText[oldText.length - 1 - s] === newText[newText.length - 1 - s]) s++;
+
+    const editStart = p;
+    const editEnd = oldText.length - s;      // end of removed region in old text
+    const insertedLen = newText.length - p - s;
+    const delta = insertedLen - (editEnd - editStart);
+
+    currentFormatSpans = currentFormatSpans.filter(span => {
+      if (span.start === span.end) {
+        // Line-marker span (heading/list): keep aligned with its line
+        if (span.start <= editStart) return true;
+        if (span.start >= editEnd) { span.start += delta; span.end = span.start; return true; }
+        span.start = editStart; span.end = editStart;
+        return true;
+      }
+      if (span.end <= editStart) return true;
+      if (span.start >= editEnd) {
+        span.start += delta;
+        span.end += delta;
+        return true;
+      }
+      if (span.start >= editStart && span.end <= editEnd) return false;
+      if (span.start < editStart && span.end <= editEnd) {
+        span.end = editStart;
+        return span.end > span.start;
+      }
+      if (span.start >= editStart && span.end > editEnd) {
+        span.start = editStart + insertedLen;
+        span.end += delta;
+        return span.end > span.start;
+      }
+      // Span fully covers the edit
+      span.end += delta;
+      return span.end > span.start;
+    });
+    formatDirty = true;
+  }
+
+  prevEditorText = newText;
+  renderEditorOverlay();
+}
+
+function toggleInlineFormat(type) {
+  const editor = els.editor;
+  const s = editor.selectionStart;
+  const e = editor.selectionEnd;
+  if (s === e) return;
+
+  const covering = currentFormatSpans.filter(
+    sp => sp.type === type && sp.start <= s && sp.end >= e
+  );
+  if (covering.length > 0) {
+    for (const sp of covering) {
+      currentFormatSpans = currentFormatSpans.filter(x => x !== sp);
+      if (sp.start < s) currentFormatSpans.push({ start: sp.start, end: s, type: type });
+      if (sp.end > e) currentFormatSpans.push({ start: e, end: sp.end, type: type });
+    }
+  } else {
+    currentFormatSpans = currentFormatSpans.filter(
+      sp => !(sp.type === type && sp.start >= s && sp.end <= e)
+    );
+    currentFormatSpans.push({ start: s, end: e, type: type });
+  }
+  formatDirty = true;
+  renderEditorOverlay();
+  scheduleSave();
+}
+
+function toggleLineFormat(type) {
+  const editor = els.editor;
+  const text = editor.value;
+  const pos = editor.selectionStart;
+
+  const lineStart = text.lastIndexOf('\n', pos - 1) + 1;
+
+  const existing = currentFormatSpans.find(sp => {
+    if (sp.type !== 'ol' && sp.type !== 'ul') return false;
+    const spLine = text.lastIndexOf('\n', Math.min(sp.start, text.length) - 1) + 1;
+    return spLine === lineStart;
+  });
+
+  if (existing) {
+    if (existing.type === type) {
+      currentFormatSpans = currentFormatSpans.filter(x => x !== existing);
+    } else {
+      existing.type = type;
+    }
+  } else {
+    currentFormatSpans.push({ start: lineStart, end: lineStart, type: type });
+  }
+  formatDirty = true;
+  renderEditorOverlay();
+  scheduleSave();
+}
+
+function getFormatPath(base) {
+  if (!folderPath) return null;
+  return api.joinPath(folderPath, '.noatformat', base + '.format.json');
+}
+
+async function loadFormatSpans() {
+  currentFormatSpans = [];
+  formatDirty = false;
+  if (currentIndex == null || !notes[currentIndex]) return;
+  const n = notes[currentIndex];
+  const base = noteTitleFromName(n.name);
+  const fmtPath = getFormatPath(base);
+  if (!fmtPath) return;
+  try {
+    const result = await api.readCanvasJson(fmtPath);
+    if (result && result.success && result.data) {
+      const parsed = JSON.parse(result.data);
+      if (parsed && Array.isArray(parsed.spans)) {
+        // Drop heading spans from the removed heading feature
+        currentFormatSpans = parsed.spans.filter(sp => !/^h[1-6]$/.test(sp.type));
+      }
+    }
+  } catch (e) {}
+}
+
+async function saveFormatSpans() {
+  if (!formatDirty || currentIndex == null || !notes[currentIndex]) return;
+  const n = notes[currentIndex];
+  const base = noteTitleFromName(n.name);
+  const fmtPath = getFormatPath(base);
+  if (!fmtPath) return;
+  try {
+    if (currentFormatSpans.length === 0) {
+      const exists = await api.fileExists(fmtPath);
+      if (exists) await api.deleteFile(fmtPath);
+    } else {
+      const dir = api.joinPath(folderPath, '.noatformat');
+      const dirExists = await api.fileExists(dir);
+      if (!dirExists) await api.createFolder(dir);
+      await api.writeCanvasJson(fmtPath, JSON.stringify({ spans: currentFormatSpans }));
+    }
+    formatDirty = false;
+  } catch (e) {}
 }
 
 async function openNoteByIndex(idx, opts = {}) {
@@ -5476,6 +5760,8 @@ async function openNoteByIndex(idx, opts = {}) {
   }
   
   currentIndex = idx;
+  currentFormatSpans = [];
+  formatDirty = false;
   renderCurrent();
   renderList();
   await renderImage();
@@ -5486,33 +5772,39 @@ async function openNoteByIndex(idx, opts = {}) {
   if (focusEditor) els.editor.focus();
   if (focusMode) setFocusMode(true);
   if (keepListNav) setListNav(true);
+  await loadFormatSpans();
   highlightSearchTerm(searchQuery || '');
 }
 
 async function saveCurrentNow() {
   if (currentIndex == null || !notes[currentIndex]) return;
-  if (!dirty) return;
+  if (!dirty && !formatDirty) return;
 
   const n = notes[currentIndex];
   isSaving = true;
   els.saveState.textContent = 'saving…';
 
   try {
-    const result = await api.writeFile(n.path, n.content ?? '');
-    if (!result.success) {
-      els.saveState.textContent = 'save failed';
-      showBanner(`Save failed. ${result.error}`);
-      return;
+    if (dirty) {
+      const result = await api.writeFile(n.path, n.content ?? '');
+      if (!result.success) {
+        els.saveState.textContent = 'save failed';
+        showBanner(`Save failed. ${result.error}`);
+        return;
+      }
+      n.size = result.size;
+      n.lastModified = result.lastModified;
+      dirty = false;
     }
-    n.size = result.size;
-    n.lastModified = result.lastModified;
-    dirty = false;
+    if (formatDirty) {
+      await saveFormatSpans();
+    }
     // Clear max interval timer since we just saved
     if (maxSaveTimer) {
       clearTimeout(maxSaveTimer);
       maxSaveTimer = null;
     }
-    els.saveState.textContent = `saved ${fmtDate(n.lastModified)}`;
+    els.saveState.textContent = `saved ${fmtDate(n.lastModified || Date.now())}`;
     renderList();
   } catch (err) {
     els.saveState.textContent = 'save failed';
@@ -5625,7 +5917,13 @@ async function deleteCurrent() {
     const base = noteTitleFromName(n.name);
     const basePath = api.joinPath(folderPath, base);
     await api.deleteCanvasFiles(basePath);
-    
+
+    // Delete format file
+    const fmtPath = getFormatPath(base);
+    if (fmtPath) {
+      try { await api.deleteFile(fmtPath); } catch (e) {}
+    }
+
     await api.deleteFile(n.path);
 
     notes.splice(currentIndex, 1);
@@ -5934,6 +6232,8 @@ els.editor.addEventListener('input', () => {
   scheduleSave();
   scheduleUndoCapture();
 
+  syncFormatSpansToText();
+
   // Track dirty region for incremental auto-fix
   updateDirtyRegion(els.editor.selectionStart);
 
@@ -5968,12 +6268,13 @@ els.editor.addEventListener('drop', (e) => {
       
       editor.value = value.substring(0, start) + linkText + value.substring(end);
       editor.selectionStart = editor.selectionEnd = start + linkText.length;
-      
+
       // Update note and trigger save
       notes[currentIndex].content = editor.value;
       dirty = true;
       els.saveState.textContent = 'modified';
       scheduleSave();
+      syncFormatSpansToText();
       editor.focus();
       return;
     } catch (_e) {}
@@ -6004,12 +6305,13 @@ els.editor.addEventListener('drop', (e) => {
   
   editor.value = value.substring(0, start) + pathString + value.substring(end);
   editor.selectionStart = editor.selectionEnd = start + pathString.length;
-  
+
   // Update note and trigger save
   notes[currentIndex].content = editor.value;
   dirty = true;
   els.saveState.textContent = 'modified';
   scheduleSave();
+  syncFormatSpansToText();
   editor.focus();
 });
 
@@ -6118,6 +6420,16 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     editorRedo();
     return;
+  }
+
+  // Text formatting shortcuts (Ctrl on Windows/Linux, Cmd on macOS via metaKey)
+  if ((e.ctrlKey || e.metaKey) && document.activeElement === els.editor) {
+    if (e.key === 'b' && !e.shiftKey) { e.preventDefault(); toggleInlineFormat('bold'); return; }
+    if (e.key === 'i' && !e.shiftKey) { e.preventDefault(); toggleInlineFormat('italic'); return; }
+    if (e.key === 'u' && !e.shiftKey) { e.preventDefault(); toggleInlineFormat('underline'); return; }
+    if ((e.key === 'X' || e.key === 'x') && e.shiftKey) { e.preventDefault(); toggleInlineFormat('strikethrough'); return; }
+    if (e.key === '&' || (e.key === '7' && e.shiftKey)) { e.preventDefault(); toggleLineFormat('ol'); return; }
+    if (e.key === '*' || (e.key === '8' && e.shiftKey)) { e.preventDefault(); toggleLineFormat('ul'); return; }
   }
 
    // Tab key in editor - indent with spaces (and indent selection by lines)
@@ -6250,10 +6562,12 @@ window.addEventListener('keydown', (e) => {
 });
 
 window.addEventListener('beforeunload', (e) => {
-  if (dirty || canvasDirty) {
-    // Try to save canvas before closing
+  if (dirty || canvasDirty || formatDirty) {
     if (canvasDirty && fabricCanvas) {
       saveCanvasState();
+    }
+    if (formatDirty) {
+      saveFormatSpans();
     }
     e.preventDefault();
     e.returnValue = '';
@@ -6262,7 +6576,7 @@ window.addEventListener('beforeunload', (e) => {
 
 // Save immediately when user switches away from window or app goes to background
 window.addEventListener('blur', () => {
-  if (dirty && !isSaving) {
+  if ((dirty || formatDirty) && !isSaving) {
     if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     if (maxSaveTimer) { clearTimeout(maxSaveTimer); maxSaveTimer = null; }
     saveCurrentNow();

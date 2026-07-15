@@ -26,6 +26,19 @@
 - Green progress bar below the button shows what percentage of notes have been illustrated (e.g. "12 / 30 notes illustrated (40%)")
 - Shows "All notes already have drawings!" when every note is illustrated
 
+## Rich Text Formatting (Jul 15 2026)
+- Format note text with keyboard shortcuts — no toolbar, no clutter
+- The .txt files stay pure plain text; formatting is stored separately in a hidden `.noatformat` folder (delete that folder to remove all formatting data)
+- Shortcuts (Ctrl on Windows/Linux, Cmd on Mac):
+  - Ctrl/Cmd+B — Bold
+  - Ctrl/Cmd+I — Italic
+  - Ctrl/Cmd+U — Underline
+  - Ctrl/Cmd+Shift+X — Strikethrough
+  - Ctrl/Cmd+Shift+7 — Numbered list (current line)
+  - Ctrl/Cmd+Shift+8 — Bulleted list (current line)
+- Press the same shortcut again to remove the formatting (toggle)
+- Formatting follows the text as you edit, persists across sessions, and moves with notes when dragged into folders
+
 ## Drawing Colors & Pen Sizes (Jul 8 2026)
 - Adjustable pen/brush size with + and - buttons and a live size preview dot
 - 9 pen sizes ranging from fine (0.5) to thick (20)

@@ -500,6 +500,23 @@ ipcMain.handle('move-note', async (event, srcFolder, baseName, destFolder) => {
       }
     }
 
+    // Move format file from .noatformat/ if it exists
+    const srcFmtPath = path.join(srcFolder, '.noatformat', baseName + '.format.json');
+    if (fs.existsSync(srcFmtPath)) {
+      const destFmtDir = path.join(destFolder, '.noatformat');
+      if (!fs.existsSync(destFmtDir)) fs.mkdirSync(destFmtDir, { recursive: true });
+      const destFmtPath = path.join(destFmtDir, baseName + '.format.json');
+      try {
+        fs.renameSync(srcFmtPath, destFmtPath);
+      } catch (renameErr) {
+        if (renameErr.code === 'EXDEV') {
+          fs.copyFileSync(srcFmtPath, destFmtPath);
+          fs.unlinkSync(srcFmtPath);
+        }
+      }
+      toMove.push('.noatformat/' + baseName + '.format.json');
+    }
+
     return { success: true, movedFiles: toMove };
   } catch (e) {
     return { success: false, error: e.message };
