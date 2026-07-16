@@ -1,3 +1,8 @@
+// Async fs reads against a cloud-synced (e.g. Dropbox) notes folder can stall on
+// hydration; a bigger libuv pool keeps a few stuck reads from starving all fs work.
+// Must be set before the threadpool is first used.
+process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';
+
 const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -6,6 +11,43 @@ const os = require('os'); // Added for temp file handling
 const { spawn } = require('child_process');
 const { pathToFileURL } = require('url');
 const crypto = require('crypto');
+
+const fsp = fs.promises;
+
+// Timeouts for file operations against the notes folder. Cloud-synced files
+// (Dropbox online-only placeholders) can stall indefinitely on read when offline.
+const FILE_OP_TIMEOUT_MS = 5000;    // per-file ops during a folder scan
+const LAZY_READ_TIMEOUT_MS = 15000; // single-file reads (image/audio/canvas)
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label || 'File operation'} timed out after ${ms}ms (file may be online-only)`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+// macOS File Provider (Dropbox/iCloud) online-only placeholders are "dataless":
+// stat succeeds instantly from local metadata but zero blocks are allocated.
+// Caveat: a legitimately sparse file also reports blocks === 0 and would be
+// flagged unavailable — essentially never true for notes, so acceptable.
+function isDatalessPlaceholder(stats) {
+  return process.platform === 'darwin' && stats.size > 0 && stats.blocks === 0;
+}
+
+// Run fn over items with at most `limit` in flight at once.
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 let ffmpegPath = null;
 try {
@@ -90,7 +132,7 @@ async function transcodeToMp3DataUrl(inputPath, bitrateKbps = 128) {
 }
 
 
-// Note: MP3 encoding is done in the renderer process using lamejs from CDN
+// Note: MP3 encoding is done in the renderer process using vendored lamejs (lame.min.js)
 
 // Config file path for storing preferences (like last folder)
 const configPath = path.join(app.getPath('userData'), 'config.json');
@@ -348,70 +390,136 @@ ipcMain.handle('open-folder-dialog', async () => {
   return result.filePaths[0];
 });
 
-// Read all files from a folder (now includes subdirectories)
+// Read all files from a folder (now includes subdirectories).
+// Fully async with per-file timeouts and error isolation so a Dropbox
+// online-only placeholder can never hang the app or abort the whole scan.
 ipcMain.handle('read-folder', async (event, folderPath) => {
   try {
-    const entries = fs.readdirSync(folderPath, { withFileTypes: true });
+    const entries = await withTimeout(
+      fsp.readdir(folderPath, { withFileTypes: true }), 10000, 'Listing folder');
     const files = [];
     const folders = [];
-    
-    for (const entry of entries) {
+    let skippedCount = 0;
+
+    const results = await mapLimit(entries, 8, async (entry) => {
       const fullPath = path.join(folderPath, entry.name);
-      
-      // Handle directories
-      if (entry.isDirectory()) {
-        // Skip hidden folders (starting with .)
-        if (entry.name.startsWith('.')) continue;
-        
-        const stats = fs.statSync(fullPath);
-        folders.push({
-          name: entry.name,
-          type: 'folder',
-          path: fullPath,
-          lastModified: stats.mtimeMs
-        });
-        continue;
+      try {
+        // Handle directories
+        if (entry.isDirectory()) {
+          // Skip hidden folders (starting with .)
+          if (entry.name.startsWith('.')) return null;
+
+          const stats = await withTimeout(fsp.stat(fullPath), FILE_OP_TIMEOUT_MS, entry.name);
+          return {
+            kind: 'folder',
+            item: {
+              name: entry.name,
+              type: 'folder',
+              path: fullPath,
+              lastModified: stats.mtimeMs
+            }
+          };
+        }
+
+        if (!entry.isFile()) return null;
+
+        const stats = await withTimeout(fsp.stat(fullPath), FILE_OP_TIMEOUT_MS, entry.name);
+        const lower = entry.name.toLowerCase();
+        const unavailable = isDatalessPlaceholder(stats) || undefined;
+
+        if (lower.endsWith('.txt')) {
+          if (unavailable) {
+            return {
+              kind: 'file',
+              item: {
+                name: entry.name,
+                type: 'text',
+                content: '',
+                size: stats.size,
+                lastModified: stats.mtimeMs,
+                unavailable: true
+              }
+            };
+          }
+          const content = await withTimeout(fsp.readFile(fullPath, 'utf8'), FILE_OP_TIMEOUT_MS, entry.name);
+          return {
+            kind: 'file',
+            item: {
+              name: entry.name,
+              type: 'text',
+              content: content,
+              size: stats.size,
+              lastModified: stats.mtimeMs
+            }
+          };
+        } else if (/\.(png|jpg|jpeg|gif|webp)$/i.test(entry.name) && !lower.endsWith('.canvas.png')) {
+          return {
+            kind: 'file',
+            item: {
+              name: entry.name,
+              type: 'image',
+              size: stats.size,
+              lastModified: stats.mtimeMs,
+              unavailable: unavailable
+            }
+          };
+        } else if (/\.(mp3|wav|aiff|aif|ogg|m4a|flac|wma)$/i.test(entry.name)) {
+          return {
+            kind: 'file',
+            item: {
+              name: entry.name,
+              type: 'audio',
+              size: stats.size,
+              lastModified: stats.mtimeMs,
+              unavailable: unavailable
+            }
+          };
+        } else if (lower.endsWith('.canvas.json')) {
+          return {
+            kind: 'file',
+            item: {
+              name: entry.name,
+              type: 'canvas',
+              size: stats.size,
+              lastModified: stats.mtimeMs,
+              unavailable: unavailable
+            }
+          };
+        }
+        return null;
+      } catch (_e) {
+        // Per-file failure (timeout, permissions, stalled hydration):
+        // isolate it so the rest of the folder still loads.
+        if (entry.isFile() && entry.name.toLowerCase().endsWith('.txt')) {
+          return {
+            kind: 'file',
+            item: {
+              name: entry.name,
+              type: 'text',
+              content: '',
+              size: 0,
+              lastModified: 0,
+              unavailable: true
+            }
+          };
+        }
+        return { kind: 'skipped' };
       }
-      
-      if (!entry.isFile()) continue;
-      
-      const stats = fs.statSync(fullPath);
-      const lower = entry.name.toLowerCase();
-      
-      if (lower.endsWith('.txt')) {
-        const content = fs.readFileSync(fullPath, 'utf8');
-        files.push({
-          name: entry.name,
-          type: 'text',
-          content: content,
-          size: stats.size,
-          lastModified: stats.mtimeMs
-        });
-      } else if (/\.(png|jpg|jpeg|gif|webp)$/i.test(entry.name) && !lower.endsWith('.canvas.png')) {
-        files.push({
-          name: entry.name,
-          type: 'image',
-          size: stats.size,
-          lastModified: stats.mtimeMs
-        });
-      } else if (/\.(mp3|wav|aiff|aif|ogg|m4a|flac|wma)$/i.test(entry.name)) {
-        files.push({
-          name: entry.name,
-          type: 'audio',
-          size: stats.size,
-          lastModified: stats.mtimeMs
-        });
-      } else if (lower.endsWith('.canvas.json')) {
-        files.push({
-          name: entry.name,
-          type: 'canvas',
-          size: stats.size,
-          lastModified: stats.mtimeMs
-        });
+    });
+
+    for (const r of results) {
+      if (!r) continue;
+      if (r.kind === 'folder') {
+        folders.push(r.item);
+      } else if (r.kind === 'file') {
+        files.push(r.item);
+        if (r.item.unavailable) skippedCount++;
+      } else {
+        skippedCount++;
       }
     }
-    
-    return { success: true, files: files, folders: folders };
+
+    return { success: true, files: files, folders: folders, skippedCount: skippedCount };
   } catch (e) {
     return { success: false, error: e.message };
   }
@@ -420,7 +528,11 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
 // Read a single file
 ipcMain.handle('read-file', async (event, filePath) => {
   try {
-    const content = fs.readFileSync(filePath, 'utf8');
+    const stats = await fsp.stat(filePath);
+    if (isDatalessPlaceholder(stats)) {
+      return { success: false, unavailable: true, error: 'File is online-only and not available offline' };
+    }
+    const content = await withTimeout(fsp.readFile(filePath, 'utf8'), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
     return { success: true, content: content };
   } catch (e) {
     return { success: false, error: e.message };
@@ -530,8 +642,8 @@ ipcMain.handle('file-exists', async (event, filePath) => {
 
 ipcMain.handle('file-size', async (event, filePath) => {
   try {
-    const stats = fs.statSync(filePath);
-    return { success: true, size: stats.size };
+    const stats = await fsp.stat(filePath);
+    return { success: true, size: stats.size, unavailable: isDatalessPlaceholder(stats) || undefined };
   } catch (e) {
     return { success: false, size: 0 };
   }
@@ -569,7 +681,11 @@ ipcMain.handle('open-path', async (event, filePath) => {
 // Read image as base64 data URL
 ipcMain.handle('read-image-base64', async (event, filePath) => {
   try {
-    const buffer = fs.readFileSync(filePath);
+    const stats = await fsp.stat(filePath);
+    if (isDatalessPlaceholder(stats)) {
+      return { success: false, unavailable: true, error: 'File is online-only and not available offline' };
+    }
+    const buffer = await withTimeout(fsp.readFile(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
     const ext = path.extname(filePath).toLowerCase().slice(1);
     let mimeType = 'image/png';
     if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
@@ -956,7 +1072,11 @@ ipcMain.handle('run-local-llm', async (event, modelPath, text) => {
 // Read audio as base64 data URL
 ipcMain.handle('read-audio-base64', async (event, filePath) => {
   try {
-    const buffer = fs.readFileSync(filePath);
+    const stats = await fsp.stat(filePath);
+    if (isDatalessPlaceholder(stats)) {
+      return { success: false, unavailable: true, error: 'File is online-only and not available offline' };
+    }
+    const buffer = await withTimeout(fsp.readFile(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
     const ext = path.extname(filePath).toLowerCase().slice(1);
     let mimeType = 'audio/mpeg';
     if (ext === 'wav') mimeType = 'audio/wav';
@@ -993,6 +1113,11 @@ ipcMain.handle('get-audio-playback-url', async (event, filePath, options = {}) =
   try {
     if (!filePath || !fs.existsSync(filePath)) {
       return { success: false, error: 'Audio file not found' };
+    }
+
+    const stats = await fsp.stat(filePath);
+    if (isDatalessPlaceholder(stats)) {
+      return { success: false, unavailable: true, error: 'Audio is online-only and not available offline' };
     }
 
     const ext = path.extname(filePath).toLowerCase().slice(1);
@@ -1034,16 +1159,22 @@ ipcMain.handle('transcode-audio-to-mp3-dataurl', async (event, filePath, bitrate
   }
 });
 
-// Note: Audio MP3 compression is handled in the renderer process using lamejs from CDN
+// Note: Audio MP3 compression is handled in the renderer process using vendored lamejs (lame.min.js)
 // See compressAudioToMp3() function in index.html
 
 // Read canvas JSON
 ipcMain.handle('read-canvas-json', async (event, filePath) => {
   try {
-    if (!fs.existsSync(filePath)) {
+    let stats;
+    try {
+      stats = await fsp.stat(filePath);
+    } catch (_e) {
       return { success: true, data: null };
     }
-    const content = fs.readFileSync(filePath, 'utf8');
+    if (isDatalessPlaceholder(stats)) {
+      return { success: false, unavailable: true, error: 'Canvas is online-only and not available offline' };
+    }
+    const content = await withTimeout(fsp.readFile(filePath, 'utf8'), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
     return { success: true, data: content };
   } catch (e) {
     return { success: false, error: e.message };

@@ -6,7 +6,7 @@
   <title>Noat Boat</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%9B%B3%3C/text%3E%3C/svg%3E">
   <script src="./fabric.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/lamejs/1.2.1/lame.min.js"></script>
+  <script src="./lame.min.js"></script>
   <script src="./signature/signature-mark.js"></script>
   <script src="./signature/signature-mark/variables.js"></script>
   <script src="./signature/signature-mark/helpers.js"></script>
@@ -217,6 +217,9 @@
     .noteItem.active{
       background:var(--note-active-bg);
       border-color:var(--note-active-border);
+    }
+    .noteItem.unavailable{
+      opacity:0.55;
     }
     .noteItem.folder{
       background:var(--bg);
@@ -3940,14 +3943,14 @@ async function convertImageToJpeg(dataUrl) {
   });
 }
 
-// Helper function to compress audio to MP3 at 128kbps (browser-based using lamejs from CDN)
+// Helper function to compress audio to MP3 at 128kbps (browser-based using vendored lamejs)
 // Only compresses uncompressed formats: wav, aif, aiff
 // Returns original for already compressed formats: mp3, aac, m4a, opus, ogg, flac, wma
 async function compressAudioToMp3(dataUrl, originalExt) {
   const ext = (originalExt || '').toLowerCase().replace('.', '');
   console.log(`[AudioCompress] Called with ext: "${ext}"`);
   
-  // Check if lamejs is available (loaded from CDN)
+  // Check if lamejs is available (vendored lame.min.js)
   if (typeof lamejs === 'undefined' || !lamejs.Mp3Encoder) {
     console.log('[AudioCompress] lamejs not available, returning audio as-is');
     return { success: true, dataUrl, ext, wasCompressed: false };
@@ -4833,6 +4836,7 @@ function renderList() {
   for (const {n, idx} of filteredNotes) {
     const item = document.createElement('div');
     item.className = 'noteItem' + (idx === currentIndex ? ' active' : '');
+    if (n.unavailable) item.classList.add('unavailable');
     item.draggable = true;
 
     const title = document.createElement('div');
@@ -4842,10 +4846,11 @@ function renderList() {
     const meta = document.createElement('div');
     meta.className = 'noteMeta';
     const firstLine = (n.content || '').split(/\r?\n/)[0]?.trim() || '';
-    const excerpt = firstLine ? firstLine.slice(0, 80) : '(empty)';
+    const excerpt = n.unavailable ? '(online-only)' : (firstLine ? firstLine.slice(0, 80) : '(empty)');
     const canvasMark = n.canvas ? '  ·  [canvas]' : (n.image ? '  ·  [img]' : '');
     const audioMark = n.audio ? '  ·  [audio]' : '';
-    meta.textContent = `${fmtDate(n.lastModified)}  ·  ${excerpt}${canvasMark}${audioMark}`;
+    const offlineMark = n.unavailable ? '  ·  offline' : '';
+    meta.textContent = `${fmtDate(n.lastModified)}  ·  ${excerpt}${canvasMark}${audioMark}${offlineMark}`;
 
     item.appendChild(title);
     item.appendChild(meta);
@@ -4976,6 +4981,21 @@ function renderCurrent() {
 
   const n = notes[currentIndex];
   els.currentTitle.textContent = n.name;
+  if (n.unavailable) {
+    // Online-only placeholder (e.g. Dropbox file not downloaded): show a notice
+    // and keep the editor disabled so autosave can't overwrite the real file.
+    els.editor.value = 'This note is stored online-only and isn\'t available offline.\n\nConnect to the internet and let your sync service (e.g. Dropbox) download it, then reload the folder.';
+    prevEditorText = els.editor.value;
+    els.editorWrap.style.display = 'flex';
+    els.empty.style.display = 'none';
+    setEditorEnabled(false);
+    els.saveState.textContent = 'online-only';
+    els.editorWrap.classList.remove('hasImage');
+    dirty = false;
+    resetUndoHistory();
+    renderEditorOverlay();
+    return;
+  }
   els.editor.value = n.content ?? '';
   prevEditorText = els.editor.value;
   els.editorWrap.style.display = 'flex';
@@ -5142,6 +5162,7 @@ async function reloadNotes(preserveName = null) {
           content: file.content,
           size: file.size,
           lastModified: file.lastModified,
+          unavailable: !!file.unavailable,
           image: null,
           audio: null,
           canvas: null
@@ -5155,7 +5176,8 @@ async function reloadNotes(preserveName = null) {
             name: file.name,
             path: api.joinPath(folderPath, file.name),
             lastModified: file.lastModified,
-            size: file.size
+            size: file.size,
+            unavailable: !!file.unavailable
           });
         }
       } else if (file.type === 'audio') {
@@ -5167,7 +5189,8 @@ async function reloadNotes(preserveName = null) {
             name: file.name,
             path: api.joinPath(folderPath, file.name),
             lastModified: file.lastModified,
-            size: file.size
+            size: file.size,
+            unavailable: !!file.unavailable
           });
         }
       } else if (file.type === 'canvas') {
@@ -5177,7 +5200,8 @@ async function reloadNotes(preserveName = null) {
           name: file.name,
           jsonPath: api.joinPath(folderPath, file.name),
           pngPath: api.joinPath(folderPath, file.name.replace('.canvas.json', '.canvas.png')),
-          lastModified: file.lastModified
+          lastModified: file.lastModified,
+          unavailable: !!file.unavailable
         });
       }
     }
@@ -5200,6 +5224,10 @@ async function reloadNotes(preserveName = null) {
     els.searchInput.value = q;
     renderList();
     renderCurrent();
+
+    if (result.skippedCount > 0) {
+      showBanner(`${result.skippedCount} item(s) are online-only and unavailable offline. Reopen the folder once synced.`);
+    }
 
     if (currentIndex != null && notes[currentIndex]) {
       await renderImage();
@@ -5778,6 +5806,9 @@ async function openNoteByIndex(idx, opts = {}) {
 
 async function saveCurrentNow() {
   if (currentIndex == null || !notes[currentIndex]) return;
+  // Never write an online-only note: its content isn't loaded, so saving
+  // would overwrite the real file with the placeholder text.
+  if (notes[currentIndex].unavailable) return;
   if (!dirty && !formatDirty) return;
 
   const n = notes[currentIndex];
@@ -6615,9 +6646,9 @@ document.addEventListener('visibilitychange', () => {
   try {
     const savedFolder = await api.getSavedFolder();
     if (savedFolder) {
-      // Check if folder still exists by trying to read it
-      const result = await api.readFolder(savedFolder);
-      if (result.success) {
+      // Cheap existence check (avoids scanning the folder twice at startup)
+      const exists = await api.fileExists(savedFolder);
+      if (exists) {
         await loadFolderFromPath(savedFolder);
       }
     }
