@@ -6464,7 +6464,12 @@ window.addEventListener('keydown', (e) => {
     if (prefsIsOpen) { closePrefsModal(); return; }
     if (audioIsOpen) { closeAudioModal(); return; }
     if (drawIsOpen) { closeDrawModal(); return; }
-    closeLightbox();
+    if (els.lightbox.style.display === 'flex') { closeLightbox(); return; }
+    // Same as the toolbar back button: return to the parent notes folder
+    if (rootFolderPath && folderPath && folderPath !== rootFolderPath) {
+      setFocusMode(false);
+      navigateUp();
+    }
     return;
   }
 
