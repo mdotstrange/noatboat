@@ -1989,9 +1989,9 @@ async function saveCanvasState() {
   
   const n = notes[currentIndex];
   const base = noteTitleFromName(n.name);
-  const jsonPath = api.joinPath(folderPath, `${base}.canvas.json`);
-  const pngPath = api.joinPath(folderPath, `${base}.canvas.png`);
-  
+  const jsonPath = api.joinPath(folderPath, '.noatformat', `${base}.canvas.json`);
+  const pngPath = api.joinPath(folderPath, '.noatformat', `${base}.canvas.png`);
+
   try {
     // Save JSON state
     const json = JSON.stringify(fabricCanvas.toJSON(['selectable', 'hasControls']));
@@ -2028,7 +2028,8 @@ async function loadCanvasState() {
 
   const n = notes[currentIndex];
   const base = noteTitleFromName(n.name);
-  const jsonPath = api.joinPath(folderPath, `${base}.canvas.json`);
+  // Prefer the scan-resolved path (handles un-migrated legacy locations)
+  const jsonPath = (n.canvas && n.canvas.jsonPath) || api.joinPath(folderPath, '.noatformat', `${base}.canvas.json`);
 
   try {
     const result = await api.readCanvasJson(jsonPath);
@@ -2511,13 +2512,21 @@ async function loadAudioFile() {
     const ext = fileData.ext || 'mp3';
     const base = noteTitleFromName(n.name);
     const destName = `${base}.${ext}`;
-    const destPath = api.joinPath(folderPath, destName);
+    const destPath = api.joinPath(folderPath, '.noatformat', destName);
 
-    // Remove prior audio attachments for this note
+    // Remove prior audio attachments for this note (both the .noatformat
+    // home and the legacy next-to-note location)
+    if (n.audio?.path && n.audio.path !== destPath) {
+      await api.deleteFile(n.audio.path);
+    }
     for (const oldExt of ['mp3','wav','aiff','aif','ogg','m4a','flac','wma']) {
-      const oldPath = api.joinPath(folderPath, `${base}.${oldExt}`);
-      if (oldPath !== destPath) {
-        await api.deleteFile(oldPath);
+      for (const oldPath of [
+        api.joinPath(folderPath, `${base}.${oldExt}`),
+        api.joinPath(folderPath, '.noatformat', `${base}.${oldExt}`)
+      ]) {
+        if (oldPath !== destPath) {
+          await api.deleteFile(oldPath);
+        }
       }
     }
 
@@ -2551,8 +2560,12 @@ async function deleteAudioFile() {
   stopAudio();
 
   try {
+    if (n.audio?.path) {
+      await api.deleteFile(n.audio.path);
+    }
     for (const ext of ['mp3','wav','aiff','aif','ogg','m4a','flac','wma']) {
       await api.deleteFile(api.joinPath(folderPath, `${base}.${ext}`));
+      await api.deleteFile(api.joinPath(folderPath, '.noatformat', `${base}.${ext}`));
     }
   } catch (_e) {}
 
@@ -4875,12 +4888,22 @@ async function renderSplashScreen() {
   grid.innerHTML = '';
   drawBtn.style.display = 'none';
 
+  // A note counts as illustrated if it has an image attachment or a canvas
+  // whose PNG is big enough to not be blank. Canvas PNG sizes come from the
+  // folder scan (pngSize), so none of this needs per-note IPC round-trips.
+  const noteHasDrawing = (n) => {
+    if (n.image && n.image.size > 0) return true;
+    if (n.canvas?.pngPath) return n.canvas.pngSize != null && n.canvas.pngSize >= 102400;
+    return false;
+  };
+
   const candidates = [];
   for (let i = 0; i < notes.length; i++) {
     const n = notes[i];
-    if (n.image?.path && n.image.size > 0) {
+    if (n.image?.path && n.image.size > 0 && !n.image.unavailable) {
       candidates.push({ idx: i, path: n.image.path, title: n.title });
-    } else if (n.canvas?.pngPath) {
+    } else if (n.canvas?.pngPath && !n.canvas.unavailable) {
+      if (n.canvas.pngSize == null || n.canvas.pngSize < 102400) continue; // blank/missing canvas
       candidates.push({ idx: i, path: n.canvas.pngPath, title: n.title });
     }
   }
@@ -4899,66 +4922,54 @@ async function renderSplashScreen() {
     [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
   }
 
-  const valid = [];
-  for (const c of candidates) {
-    if (valid.length >= 6) break;
-    const r = await api.readImageBase64(c.path);
-    if (!r || !r.success) continue;
-    const isCanvasPng = c.path.toLowerCase().endsWith('.canvas.png');
-    if (isCanvasPng && r.fileSize < 102400) continue;
-    valid.push({ ...c, dataUrl: r.dataUrl });
-  }
+  // Fetch downscaled thumbnails in parallel (a couple of spares in case some
+  // fail) and append each tile as soon as it arrives.
+  const renderToken = Symbol();
+  grid._renderToken = renderToken;
+  const picks = candidates.slice(0, 8);
+  await Promise.all(picks.map(async (c) => {
+    try {
+      if (grid._renderToken !== renderToken || grid.children.length >= 6) return;
+      const r = await api.readImageThumbnail(c.path, 512);
+      if (!r?.success) return;
+      if (grid._renderToken !== renderToken || grid.children.length >= 6) return;
+      const img = document.createElement('img');
+      img.src = r.dataUrl;
+      img.alt = c.title;
+      img.title = c.title;
+      const noteIdx = c.idx;
+      img.addEventListener('click', () => {
+        openNoteByIndex(noteIdx, { focusEditor: false, focusMode: false });
+      });
+      grid.appendChild(img);
+    } catch (_e) {}
+  }));
 
-  if (valid.length === 0) {
+  if (grid._renderToken === renderToken && grid.children.length === 0) {
     splash.style.display = 'none';
     emptyText.style.display = 'block';
     return;
   }
 
-  for (const v of valid) {
-    const img = document.createElement('img');
-    img.src = v.dataUrl;
-    img.alt = v.title;
-    img.title = v.title;
-    const noteIdx = v.idx;
-    img.addEventListener('click', () => {
-      openNoteByIndex(noteIdx, { focusEditor: false, focusMode: false });
-    });
-    grid.appendChild(img);
-  }
-
   if (notes.length > 0) {
     drawBtn.style.display = '';
-    drawBtn.onclick = async () => {
-      const candidates = [];
+    drawBtn.onclick = () => {
+      const undrawn = [];
       for (let i = 0; i < notes.length; i++) {
-        const n = notes[i];
-        if (n.image && n.image.size > 0) continue;
-        if (n.canvas?.pngPath) {
-          const info = await api.fileSize(n.canvas.pngPath);
-          if (info.success && info.size >= 102400) continue;
-        }
-        candidates.push(i);
+        if (!noteHasDrawing(notes[i])) undrawn.push(i);
       }
-      if (candidates.length === 0) {
+      if (undrawn.length === 0) {
         showBanner('All notes already have drawings!');
         return;
       }
-      const idx = candidates[Math.floor(Math.random() * candidates.length)];
+      const idx = undrawn[Math.floor(Math.random() * undrawn.length)];
       openNoteByIndex(idx, { focusEditor: false, focusMode: false });
     };
 
     const progressEl = document.getElementById('splashProgress');
     const fillEl = document.getElementById('splashProgressFill');
     const labelEl = document.getElementById('splashProgressLabel');
-    let withDrawing = 0;
-    for (const n of notes) {
-      if (n.image && n.image.size > 0) { withDrawing++; continue; }
-      if (n.canvas?.pngPath) {
-        const info = await api.fileSize(n.canvas.pngPath);
-        if (info.success && info.size >= 102400) { withDrawing++; }
-      }
-    }
+    const withDrawing = notes.reduce((acc, n) => acc + (noteHasDrawing(n) ? 1 : 0), 0);
     const pct = Math.round((withDrawing / notes.length) * 100);
     fillEl.style.width = pct + '%';
     labelEl.textContent = `${withDrawing} / ${notes.length} notes illustrated (${pct}%)`;
@@ -5154,11 +5165,14 @@ async function reloadNotes(preserveName = null) {
     const canvasAttachments = new Map();
 
     for (const file of result.files) {
+      // Sidecar files may live in .noatformat or (legacy) next to the notes;
+      // the scan reports each file's real absolute path.
+      const filePath = file.path || api.joinPath(folderPath, file.name);
       if (file.type === 'text') {
         notes.push({
           name: file.name,
           title: noteTitleFromName(file.name),
-          path: api.joinPath(folderPath, file.name),
+          path: filePath,
           content: file.content,
           size: file.size,
           lastModified: file.lastModified,
@@ -5174,7 +5188,7 @@ async function reloadNotes(preserveName = null) {
         if (!prev || file.lastModified > prev.lastModified) {
           attachments.set(baseKey, {
             name: file.name,
-            path: api.joinPath(folderPath, file.name),
+            path: filePath,
             lastModified: file.lastModified,
             size: file.size,
             unavailable: !!file.unavailable
@@ -5187,7 +5201,7 @@ async function reloadNotes(preserveName = null) {
         if (!prev || file.lastModified > prev.lastModified) {
           audioAttachments.set(baseKey, {
             name: file.name,
-            path: api.joinPath(folderPath, file.name),
+            path: filePath,
             lastModified: file.lastModified,
             size: file.size,
             unavailable: !!file.unavailable
@@ -5196,13 +5210,17 @@ async function reloadNotes(preserveName = null) {
       } else if (file.type === 'canvas') {
         // Canvas JSON files are named like "NoteName.canvas.json"
         const baseKey = file.name.toLowerCase().replace('.canvas.json', '');
-        canvasAttachments.set(baseKey, {
-          name: file.name,
-          jsonPath: api.joinPath(folderPath, file.name),
-          pngPath: api.joinPath(folderPath, file.name.replace('.canvas.json', '.canvas.png')),
-          lastModified: file.lastModified,
-          unavailable: !!file.unavailable
-        });
+        const prev = canvasAttachments.get(baseKey);
+        if (!prev || file.lastModified > prev.lastModified) {
+          canvasAttachments.set(baseKey, {
+            name: file.name,
+            jsonPath: filePath,
+            pngPath: file.pngPath || filePath.replace(/\.canvas\.json$/i, '.canvas.png'),
+            pngSize: file.pngSize ?? null,
+            lastModified: file.lastModified,
+            unavailable: !!file.unavailable
+          });
+        }
       }
     }
 
@@ -6002,13 +6020,21 @@ async function attachImage() {
     const ext = fileData.ext || 'png';
     const base = noteTitleFromName(n.name);
     const destName = `${base}.${ext}`;
-    const destPath = api.joinPath(folderPath, destName);
+    const destPath = api.joinPath(folderPath, '.noatformat', destName);
 
-    // Remove prior attachments for this note
+    // Remove prior attachments for this note (both the .noatformat home and
+    // the legacy next-to-note location; n.image.path covers legacy .nvimg names)
+    if (n.image?.path && n.image.path !== destPath) {
+      await api.deleteFile(n.image.path);
+    }
     for (const oldExt of ['png','jpg','jpeg','gif','webp']) {
-      const oldPath = api.joinPath(folderPath, `${base}.${oldExt}`);
-      if (oldPath !== destPath) {
-        await api.deleteFile(oldPath);
+      for (const oldPath of [
+        api.joinPath(folderPath, `${base}.${oldExt}`),
+        api.joinPath(folderPath, '.noatformat', `${base}.${oldExt}`)
+      ]) {
+        if (oldPath !== destPath) {
+          await api.deleteFile(oldPath);
+        }
       }
     }
 

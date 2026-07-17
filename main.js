@@ -3,7 +3,7 @@
 // Must be set before the threadpool is first used.
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';
 
-const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, shell, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os'); // Added for temp file handling
@@ -35,6 +35,16 @@ function isDatalessPlaceholder(stats) {
   return process.platform === 'darwin' && stats.size > 0 && stats.blocks === 0;
 }
 
+// A dataless file is only truly unavailable when there is no internet: with
+// connectivity, reading it just triggers an on-demand download (hydration).
+function isNetworkOffline() {
+  try {
+    return !net.isOnline();
+  } catch (_e) {
+    return false; // if in doubt, assume online and attempt the read
+  }
+}
+
 // Run fn over items with at most `limit` in flight at once.
 async function mapLimit(items, limit, fn) {
   const results = new Array(items.length);
@@ -47,6 +57,32 @@ async function mapLimit(items, limit, fn) {
   });
   await Promise.all(workers);
   return results;
+}
+
+// All app-generated sidecar files (canvas, image/audio attachments, format
+// spans) live in a hidden subfolder so the notes folder holds only .txt files.
+const NOATFORMAT_DIR = '.noatformat';
+const IMG_RE = /\.(png|jpg|jpeg|gif|webp)$/i;
+const AUDIO_RE = /\.(mp3|wav|aiff|aif|ogg|m4a|flac|wma)$/i;
+
+// Classify a sidecar filename -> { baseKey, kind } or null for non-sidecars.
+// Canvas suffixes must be checked before generic image extensions so
+// "x.canvas.png" yields base "x", not "x.canvas". baseKey is lowercased to
+// match the renderer's attachment matching (and APFS case-insensitivity).
+function sidecarInfo(name) {
+  const lower = name.toLowerCase();
+  if (lower.endsWith('.canvas.json')) return { baseKey: lower.slice(0, -'.canvas.json'.length), kind: 'canvas' };
+  if (lower.endsWith('.canvas.png')) return { baseKey: lower.slice(0, -'.canvas.png'.length), kind: 'canvasPng' };
+  const imgMatch = lower.match(IMG_RE);
+  if (imgMatch) {
+    // Legacy ".nvimg." marker names attach to the note before the marker.
+    const nvimg = lower.lastIndexOf('.nvimg.');
+    if (nvimg >= 0) return { baseKey: lower.slice(0, nvimg), kind: 'image' };
+    return { baseKey: lower.slice(0, -imgMatch[0].length), kind: 'image' };
+  }
+  const audMatch = lower.match(AUDIO_RE);
+  if (audMatch) return { baseKey: lower.slice(0, -audMatch[0].length), kind: 'audio' };
+  return null;
 }
 
 let ffmpegPath = null;
@@ -400,8 +436,50 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
     const files = [];
     const folders = [];
     let skippedCount = 0;
+    const sidecarDir = path.join(folderPath, NOATFORMAT_DIR);
+    // .canvas.png stats, keyed by lowercased base name; attached to the
+    // matching canvas entries below so the renderer never has to stat them.
+    const canvasPngs = new Map();
 
+    // --- Phase 1: migrate legacy sidecars sitting next to notes into
+    // .noatformat. Only files whose base matches an existing .txt note are
+    // touched; unrelated user files stay put. Per-file failures (offline,
+    // read-only, collision) leave the file in the root, which keeps working.
+    const migrated = new Set();
+    const txtBases = new Set(entries
+      .filter(e => e.isFile() && e.name.toLowerCase().endsWith('.txt'))
+      .map(e => e.name.slice(0, -4).toLowerCase()));
+    const toMigrate = entries.filter(e => {
+      if (!e.isFile()) return false;
+      const info = sidecarInfo(e.name);
+      return info && txtBases.has(info.baseKey);
+    });
+    if (toMigrate.length > 0) {
+      try {
+        await withTimeout(fsp.mkdir(sidecarDir, { recursive: true }), FILE_OP_TIMEOUT_MS, NOATFORMAT_DIR);
+        await mapLimit(toMigrate, 4, async (entry) => {
+          const destPath = path.join(sidecarDir, entry.name);
+          try {
+            let destExists = true;
+            try { await withTimeout(fsp.access(destPath), FILE_OP_TIMEOUT_MS, entry.name); }
+            catch (_e) { destExists = false; }
+            // Collision: never overwrite; the renderer picks the newest copy
+            // and later saves/deletes converge on .noatformat.
+            if (destExists) return;
+            await withTimeout(fsp.rename(path.join(folderPath, entry.name), destPath), FILE_OP_TIMEOUT_MS, entry.name);
+            migrated.add(entry.name);
+          } catch (_e) { /* leave legacy file in the root */ }
+        });
+      } catch (_e) { /* mkdir failed (offline/read-only): keep legacy layout */ }
+    }
+
+    // Dataless (online-only) files are only skipped when there is no
+    // connectivity; when online, reading them hydrates on demand.
+    const offline = isNetworkOffline();
+
+    // --- Phase 2: scan the notes folder itself ---
     const results = await mapLimit(entries, 8, async (entry) => {
+      if (migrated.has(entry.name)) return null; // now lives in .noatformat
       const fullPath = path.join(folderPath, entry.name);
       try {
         // Handle directories
@@ -425,7 +503,8 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
 
         const stats = await withTimeout(fsp.stat(fullPath), FILE_OP_TIMEOUT_MS, entry.name);
         const lower = entry.name.toLowerCase();
-        const unavailable = isDatalessPlaceholder(stats) || undefined;
+        const dataless = isDatalessPlaceholder(stats);
+        const unavailable = (dataless && offline) || undefined;
 
         if (lower.endsWith('.txt')) {
           if (unavailable) {
@@ -434,6 +513,7 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
               item: {
                 name: entry.name,
                 type: 'text',
+                path: fullPath,
                 content: '',
                 size: stats.size,
                 lastModified: stats.mtimeMs,
@@ -441,34 +521,38 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
               }
             };
           }
-          const content = await withTimeout(fsp.readFile(fullPath, 'utf8'), FILE_OP_TIMEOUT_MS, entry.name);
+          // A dataless read triggers a download, so give it the longer timeout.
+          const content = await withTimeout(fsp.readFile(fullPath, 'utf8'), dataless ? LAZY_READ_TIMEOUT_MS : FILE_OP_TIMEOUT_MS, entry.name);
           return {
             kind: 'file',
             item: {
               name: entry.name,
               type: 'text',
+              path: fullPath,
               content: content,
               size: stats.size,
               lastModified: stats.mtimeMs
             }
           };
-        } else if (/\.(png|jpg|jpeg|gif|webp)$/i.test(entry.name) && !lower.endsWith('.canvas.png')) {
+        } else if (IMG_RE.test(entry.name) && !lower.endsWith('.canvas.png')) {
           return {
             kind: 'file',
             item: {
               name: entry.name,
               type: 'image',
+              path: fullPath,
               size: stats.size,
               lastModified: stats.mtimeMs,
               unavailable: unavailable
             }
           };
-        } else if (/\.(mp3|wav|aiff|aif|ogg|m4a|flac|wma)$/i.test(entry.name)) {
+        } else if (AUDIO_RE.test(entry.name)) {
           return {
             kind: 'file',
             item: {
               name: entry.name,
               type: 'audio',
+              path: fullPath,
               size: stats.size,
               lastModified: stats.mtimeMs,
               unavailable: unavailable
@@ -480,10 +564,16 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
             item: {
               name: entry.name,
               type: 'canvas',
+              path: fullPath,
               size: stats.size,
               lastModified: stats.mtimeMs,
               unavailable: unavailable
             }
+          };
+        } else if (lower.endsWith('.canvas.png')) {
+          return {
+            kind: 'canvasPng',
+            item: { name: entry.name, path: fullPath, size: stats.size, unavailable: unavailable }
           };
         }
         return null;
@@ -496,6 +586,7 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
             item: {
               name: entry.name,
               type: 'text',
+              path: fullPath,
               content: '',
               size: 0,
               lastModified: 0,
@@ -514,9 +605,68 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
       } else if (r.kind === 'file') {
         files.push(r.item);
         if (r.item.unavailable) skippedCount++;
+      } else if (r.kind === 'canvasPng') {
+        const base = r.item.name.toLowerCase().slice(0, -'.canvas.png'.length);
+        if (!canvasPngs.has(base)) canvasPngs.set(base, []);
+        canvasPngs.get(base).push(r.item);
       } else {
         skippedCount++;
       }
+    }
+
+    // --- Phase 3: scan .noatformat for sidecars (images, audio, canvas).
+    // Format-span files are read by explicit path elsewhere and not listed.
+    try {
+      const scEntries = await withTimeout(
+        fsp.readdir(sidecarDir, { withFileTypes: true }), 10000, NOATFORMAT_DIR);
+      const scResults = await mapLimit(scEntries, 8, async (entry) => {
+        if (!entry.isFile()) return null;
+        const lower = entry.name.toLowerCase();
+        if (lower.endsWith('.format.json')) return null;
+        const fullPath = path.join(sidecarDir, entry.name);
+        try {
+          const stats = await withTimeout(fsp.stat(fullPath), FILE_OP_TIMEOUT_MS, entry.name);
+          const unavailable = (isDatalessPlaceholder(stats) && offline) || undefined;
+          const common = {
+            name: entry.name,
+            path: fullPath,
+            size: stats.size,
+            lastModified: stats.mtimeMs,
+            unavailable: unavailable
+          };
+          if (lower.endsWith('.canvas.png')) return { ...common, type: 'canvasPng' };
+          if (IMG_RE.test(entry.name)) return { ...common, type: 'image' };
+          if (AUDIO_RE.test(entry.name)) return { ...common, type: 'audio' };
+          if (lower.endsWith('.canvas.json')) return { ...common, type: 'canvas' };
+          return null;
+        } catch (_e) {
+          return 'skipped';
+        }
+      });
+      for (const r of scResults) {
+        if (r === 'skipped') skippedCount++;
+        else if (r && r.type === 'canvasPng') {
+          const base = r.name.toLowerCase().slice(0, -'.canvas.png'.length);
+          if (!canvasPngs.has(base)) canvasPngs.set(base, []);
+          canvasPngs.get(base).push(r);
+        } else if (r) {
+          files.push(r);
+          if (r.unavailable) skippedCount++;
+        }
+      }
+    } catch (_e) { /* no .noatformat dir (or unreadable/offline): fine */ }
+
+    // Attach the real .canvas.png path/size to each canvas entry so the
+    // renderer can gate on size without any extra IPC round-trips.
+    for (const f of files) {
+      if (f.type !== 'canvas') continue;
+      const base = f.name.toLowerCase().slice(0, -'.canvas.json'.length);
+      const pngs = canvasPngs.get(base);
+      if (!pngs || pngs.length === 0) continue;
+      const dir = path.dirname(f.path);
+      const match = pngs.find(p => path.dirname(p.path) === dir) || pngs[0];
+      f.pngPath = match.path;
+      f.pngSize = match.size;
     }
 
     return { success: true, files: files, folders: folders, skippedCount: skippedCount };
@@ -529,7 +679,7 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
 ipcMain.handle('read-file', async (event, filePath) => {
   try {
     const stats = await fsp.stat(filePath);
-    if (isDatalessPlaceholder(stats)) {
+    if (isDatalessPlaceholder(stats) && isNetworkOffline()) {
       return { success: false, unavailable: true, error: 'File is online-only and not available offline' };
     }
     const content = await withTimeout(fsp.readFile(filePath, 'utf8'), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
@@ -565,71 +715,90 @@ ipcMain.handle('delete-file', async (event, filePath) => {
 // Move a note and all its attachments to a different folder
 ipcMain.handle('move-note', async (event, srcFolder, baseName, destFolder) => {
   try {
-    const imgExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
-    const audioExts = ['.mp3', '.wav', '.aiff', '.aif', '.ogg', '.m4a', '.flac', '.wma'];
-    const canvasSuffixes = ['.canvas.json', '.canvas.png'];
+    const baseLower = baseName.toLowerCase();
+    const destSidecarDir = path.join(destFolder, NOATFORMAT_DIR);
 
-    const entries = fs.readdirSync(srcFolder);
-    const toMove = [];
+    // Plan the moves: the .txt goes to the destination root; every sidecar
+    // (canvas/image/audio/format), whether it still sits next to the note
+    // (legacy) or already lives in src/.noatformat, lands in dest/.noatformat.
+    const moves = []; // { srcPath, destPath, label }
+    let foundTxt = false;
 
-    for (const entry of entries) {
+    const rootEntries = fs.readdirSync(srcFolder);
+    for (const entry of rootEntries) {
       const lower = entry.toLowerCase();
-      const baseLower = baseName.toLowerCase();
       if (lower === baseLower + '.txt') {
-        toMove.push(entry);
-      } else if (imgExts.some(ext => lower === baseLower + ext)) {
-        toMove.push(entry);
-      } else if (audioExts.some(ext => lower === baseLower + ext)) {
-        toMove.push(entry);
-      } else if (canvasSuffixes.some(suf => lower === baseLower + suf)) {
-        toMove.push(entry);
+        foundTxt = true;
+        moves.push({
+          srcPath: path.join(srcFolder, entry),
+          destPath: path.join(destFolder, entry),
+          label: entry
+        });
+        continue;
+      }
+      const info = sidecarInfo(entry);
+      if (info && info.baseKey === baseLower) {
+        moves.push({
+          srcPath: path.join(srcFolder, entry),
+          destPath: path.join(destSidecarDir, entry),
+          label: NOATFORMAT_DIR + '/' + entry
+        });
       }
     }
 
-    if (toMove.length === 0) {
+    if (!foundTxt) {
       return { success: false, error: `No files found for "${baseName}".` };
     }
 
-    for (const name of toMove) {
-      const destPath = path.join(destFolder, name);
-      if (fs.existsSync(destPath)) {
-        return { success: false, error: `A file named "${name}" already exists in the destination folder.` };
+    const srcSidecarDir = path.join(srcFolder, NOATFORMAT_DIR);
+    let sidecarEntries = [];
+    try {
+      sidecarEntries = fs.readdirSync(srcSidecarDir);
+    } catch (_e) { /* no .noatformat in source */ }
+    for (const entry of sidecarEntries) {
+      const lower = entry.toLowerCase();
+      const info = sidecarInfo(entry);
+      const isFormat = lower === baseLower + '.format.json';
+      if (isFormat || (info && info.baseKey === baseLower)) {
+        moves.push({
+          srcPath: path.join(srcSidecarDir, entry),
+          destPath: path.join(destSidecarDir, entry),
+          label: NOATFORMAT_DIR + '/' + entry
+        });
       }
     }
 
-    for (const name of toMove) {
-      const srcPath = path.join(srcFolder, name);
-      const destPath = path.join(destFolder, name);
+    // Collision pre-check. For sidecars also check the destination root, in
+    // case the destination folder still holds un-migrated legacy files.
+    for (const m of moves) {
+      if (fs.existsSync(m.destPath)) {
+        return { success: false, error: `A file named "${path.basename(m.destPath)}" already exists in the destination folder.` };
+      }
+      if (m.destPath.startsWith(destSidecarDir) && fs.existsSync(path.join(destFolder, path.basename(m.destPath)))) {
+        return { success: false, error: `A file named "${path.basename(m.destPath)}" already exists in the destination folder.` };
+      }
+    }
+
+    if (moves.some(m => m.destPath.startsWith(destSidecarDir))) {
+      fs.mkdirSync(destSidecarDir, { recursive: true });
+    }
+
+    const movedFiles = [];
+    for (const m of moves) {
       try {
-        fs.renameSync(srcPath, destPath);
+        fs.renameSync(m.srcPath, m.destPath);
       } catch (renameErr) {
         if (renameErr.code === 'EXDEV') {
-          fs.copyFileSync(srcPath, destPath);
-          fs.unlinkSync(srcPath);
+          fs.copyFileSync(m.srcPath, m.destPath);
+          fs.unlinkSync(m.srcPath);
         } else {
           throw renameErr;
         }
       }
+      movedFiles.push(m.label);
     }
 
-    // Move format file from .noatformat/ if it exists
-    const srcFmtPath = path.join(srcFolder, '.noatformat', baseName + '.format.json');
-    if (fs.existsSync(srcFmtPath)) {
-      const destFmtDir = path.join(destFolder, '.noatformat');
-      if (!fs.existsSync(destFmtDir)) fs.mkdirSync(destFmtDir, { recursive: true });
-      const destFmtPath = path.join(destFmtDir, baseName + '.format.json');
-      try {
-        fs.renameSync(srcFmtPath, destFmtPath);
-      } catch (renameErr) {
-        if (renameErr.code === 'EXDEV') {
-          fs.copyFileSync(srcFmtPath, destFmtPath);
-          fs.unlinkSync(srcFmtPath);
-        }
-      }
-      toMove.push('.noatformat/' + baseName + '.format.json');
-    }
-
-    return { success: true, movedFiles: toMove };
+    return { success: true, movedFiles: movedFiles };
   } catch (e) {
     return { success: false, error: e.message };
   }
@@ -643,7 +812,7 @@ ipcMain.handle('file-exists', async (event, filePath) => {
 ipcMain.handle('file-size', async (event, filePath) => {
   try {
     const stats = await fsp.stat(filePath);
-    return { success: true, size: stats.size, unavailable: isDatalessPlaceholder(stats) || undefined };
+    return { success: true, size: stats.size, unavailable: (isDatalessPlaceholder(stats) && isNetworkOffline()) || undefined };
   } catch (e) {
     return { success: false, size: 0 };
   }
@@ -682,7 +851,7 @@ ipcMain.handle('open-path', async (event, filePath) => {
 ipcMain.handle('read-image-base64', async (event, filePath) => {
   try {
     const stats = await fsp.stat(filePath);
-    if (isDatalessPlaceholder(stats)) {
+    if (isDatalessPlaceholder(stats) && isNetworkOffline()) {
       return { success: false, unavailable: true, error: 'File is online-only and not available offline' };
     }
     const buffer = await withTimeout(fsp.readFile(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
@@ -699,6 +868,34 @@ ipcMain.handle('read-image-base64', async (event, filePath) => {
   }
 });
 
+// Read an image as a downscaled thumbnail data URL. Decoding + resizing
+// happens natively in the main process so the renderer receives tens of KB
+// instead of a full-resolution base64 payload (used by the splash grid).
+ipcMain.handle('read-image-thumbnail', async (event, filePath, maxWidth = 512) => {
+  try {
+    const stats = await fsp.stat(filePath);
+    if (isDatalessPlaceholder(stats) && isNetworkOffline()) {
+      return { success: false, unavailable: true, error: 'File is online-only and not available offline' };
+    }
+    const buffer = await withTimeout(fsp.readFile(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
+    const img = nativeImage.createFromBuffer(buffer);
+    if (!img.isEmpty()) {
+      const size = img.getSize();
+      const resized = size.width > maxWidth ? img.resize({ width: maxWidth }) : img;
+      return { success: true, dataUrl: resized.toDataURL(), fileSize: stats.size };
+    }
+    // Format nativeImage can't decode (e.g. gif/webp): fall back to the full image.
+    const ext = path.extname(filePath).toLowerCase().slice(1);
+    let mimeType = 'image/png';
+    if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
+    else if (ext === 'gif') mimeType = 'image/gif';
+    else if (ext === 'webp') mimeType = 'image/webp';
+    return { success: true, dataUrl: `data:${mimeType};base64,${buffer.toString('base64')}`, fileSize: stats.size };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
 // Write image from buffer (for drawings)
 ipcMain.handle('write-image-buffer', async (event, filePath, base64Data) => {
   try {
@@ -710,6 +907,7 @@ ipcMain.handle('write-image-buffer', async (event, filePath, base64Data) => {
       base64 = base64Data.split(',')[1] || base64Data;
     }
     const buffer = Buffer.from(base64, 'base64');
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, buffer);
     const stats = fs.statSync(filePath);
     return { success: true, lastModified: stats.mtimeMs, size: stats.size };
@@ -1073,7 +1271,7 @@ ipcMain.handle('run-local-llm', async (event, modelPath, text) => {
 ipcMain.handle('read-audio-base64', async (event, filePath) => {
   try {
     const stats = await fsp.stat(filePath);
-    if (isDatalessPlaceholder(stats)) {
+    if (isDatalessPlaceholder(stats) && isNetworkOffline()) {
       return { success: false, unavailable: true, error: 'File is online-only and not available offline' };
     }
     const buffer = await withTimeout(fsp.readFile(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
@@ -1098,6 +1296,7 @@ ipcMain.handle('write-audio-buffer', async (event, filePath, base64Data) => {
   try {
     const base64 = base64Data.replace(/^data:audio\/[^;]+;base64,/, '');
     const buffer = Buffer.from(base64, 'base64');
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, buffer);
     const stats = fs.statSync(filePath);
     return { success: true, lastModified: stats.mtimeMs, size: stats.size };
@@ -1116,7 +1315,7 @@ ipcMain.handle('get-audio-playback-url', async (event, filePath, options = {}) =
     }
 
     const stats = await fsp.stat(filePath);
-    if (isDatalessPlaceholder(stats)) {
+    if (isDatalessPlaceholder(stats) && isNetworkOffline()) {
       return { success: false, unavailable: true, error: 'Audio is online-only and not available offline' };
     }
 
@@ -1171,7 +1370,7 @@ ipcMain.handle('read-canvas-json', async (event, filePath) => {
     } catch (_e) {
       return { success: true, data: null };
     }
-    if (isDatalessPlaceholder(stats)) {
+    if (isDatalessPlaceholder(stats) && isNetworkOffline()) {
       return { success: false, unavailable: true, error: 'Canvas is online-only and not available offline' };
     }
     const content = await withTimeout(fsp.readFile(filePath, 'utf8'), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
@@ -1184,6 +1383,7 @@ ipcMain.handle('read-canvas-json', async (event, filePath) => {
 // Write canvas JSON
 ipcMain.handle('write-canvas-json', async (event, filePath, jsonData) => {
   try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, jsonData, 'utf8');
     const stats = fs.statSync(filePath);
     return { success: true, lastModified: stats.mtimeMs };
@@ -1192,13 +1392,22 @@ ipcMain.handle('write-canvas-json', async (event, filePath, jsonData) => {
   }
 });
 
-// Delete canvas files
+// Delete canvas files. Sweeps both the .noatformat home and the legacy
+// next-to-note location so un-migrated files are cleaned up too.
 ipcMain.handle('delete-canvas-files', async (event, basePath) => {
   try {
-    const jsonPath = basePath + '.canvas.json';
-    const pngPath = basePath + '.canvas.png';
-    if (fs.existsSync(jsonPath)) fs.unlinkSync(jsonPath);
-    if (fs.existsSync(pngPath)) fs.unlinkSync(pngPath);
+    const dir = path.dirname(basePath);
+    const base = path.basename(basePath);
+    const candidates = [];
+    for (const suffix of ['.canvas.json', '.canvas.png']) {
+      candidates.push(path.join(dir, base + suffix));
+      candidates.push(path.join(dir, NOATFORMAT_DIR, base + suffix));
+    }
+    for (const p of candidates) {
+      try {
+        if (fs.existsSync(p)) fs.unlinkSync(p);
+      } catch (_e) { /* keep sweeping the rest */ }
+    }
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };

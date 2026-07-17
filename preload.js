@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // Image operations
   readImageBase64: (filePath) => ipcRenderer.invoke('read-image-base64', filePath),
+  readImageThumbnail: (filePath, maxWidth) => ipcRenderer.invoke('read-image-thumbnail', filePath, maxWidth || 512),
   writeImageBuffer: (filePath, base64Data) => ipcRenderer.invoke('write-image-buffer', filePath, base64Data),
   copyImage: (srcPath, destPath) => ipcRenderer.invoke('copy-image', srcPath, destPath),
   openImageDialog: () => ipcRenderer.invoke('open-image-dialog'),
