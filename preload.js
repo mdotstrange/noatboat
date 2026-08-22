@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveFolderPath: (folderPath) => ipcRenderer.invoke('save-folder-path', folderPath),
   openFolderDialog: () => ipcRenderer.invoke('open-folder-dialog'),
   readFolder: (folderPath) => ipcRenderer.invoke('read-folder', folderPath),
+  calendarScan: (rootPath) => ipcRenderer.invoke('calendar-scan', rootPath),
   
   // File operations
   readFile: (filePath) => ipcRenderer.invoke('read-file', filePath),

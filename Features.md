@@ -1,5 +1,14 @@
 # Noat Boat - Features Added Since Feb 5 2026
 
+## Calendar & Due Dates (Aug 22 2026)
+- Calendar button in the top toolbar opens a full month-view calendar
+- Each day shows the notes created or modified that day (with thumbnails for illustrated notes), across all folders
+- Set a "due date" on any note via the calendar button in the note's drawing toolbar — a mini calendar popup lets you pick or clear the date
+- Notes with due dates appear on the calendar in red on their due day
+- Clicking any note on the calendar opens it, even if it lives in a subfolder
+- Days with many notes show "+N more" which expands to the full list
+- Due dates are stored in the hidden `.noatformat` sidecar files — the .txt notes stay untouched
+
 ## Wacom Tablet Support (Feb 5 2026)
 - Switched drawing input from mouse events to pointer events, enabling full Wacom tablet and stylus support
 - Works in both the canvas workspace and the focused drawing modal

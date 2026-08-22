@@ -429,8 +429,12 @@ ipcMain.handle('open-folder-dialog', async () => {
 // Read all files from a folder (now includes subdirectories).
 // Fully async with per-file timeouts and error isolation so a Dropbox
 // online-only placeholder can never hang the app or abort the whole scan.
-ipcMain.handle('read-folder', async (event, folderPath) => {
-  try {
+// Scan one folder (migration, sidecar matching, canvas-png attachment).
+// Extracted from the read-folder handler so calendar-scan can reuse it;
+// readContent:false skips reading .txt contents for lightweight scans.
+async function scanFolder(folderPath, opts = {}) {
+  const readContent = opts.readContent !== false;
+  {
     const entries = await withTimeout(
       fsp.readdir(folderPath, { withFileTypes: true }), 10000, 'Listing folder');
     const files = [];
@@ -516,13 +520,16 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
                 path: fullPath,
                 content: '',
                 size: stats.size,
+                created: stats.birthtimeMs,
                 lastModified: stats.mtimeMs,
                 unavailable: true
               }
             };
           }
           // A dataless read triggers a download, so give it the longer timeout.
-          const content = await withTimeout(fsp.readFile(fullPath, 'utf8'), dataless ? LAZY_READ_TIMEOUT_MS : FILE_OP_TIMEOUT_MS, entry.name);
+          const content = readContent
+            ? await withTimeout(fsp.readFile(fullPath, 'utf8'), dataless ? LAZY_READ_TIMEOUT_MS : FILE_OP_TIMEOUT_MS, entry.name)
+            : '';
           return {
             kind: 'file',
             item: {
@@ -531,6 +538,7 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
               path: fullPath,
               content: content,
               size: stats.size,
+              created: stats.birthtimeMs,
               lastModified: stats.mtimeMs
             }
           };
@@ -542,6 +550,7 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
               type: 'image',
               path: fullPath,
               size: stats.size,
+              created: stats.birthtimeMs,
               lastModified: stats.mtimeMs,
               unavailable: unavailable
             }
@@ -554,6 +563,7 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
               type: 'audio',
               path: fullPath,
               size: stats.size,
+              created: stats.birthtimeMs,
               lastModified: stats.mtimeMs,
               unavailable: unavailable
             }
@@ -566,6 +576,7 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
               type: 'canvas',
               path: fullPath,
               size: stats.size,
+              created: stats.birthtimeMs,
               lastModified: stats.mtimeMs,
               unavailable: unavailable
             }
@@ -589,6 +600,7 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
               path: fullPath,
               content: '',
               size: 0,
+              created: 0,
               lastModified: 0,
               unavailable: true
             }
@@ -631,6 +643,7 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
             name: entry.name,
             path: fullPath,
             size: stats.size,
+            created: stats.birthtimeMs,
             lastModified: stats.mtimeMs,
             unavailable: unavailable
           };
@@ -669,7 +682,87 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
       f.pngSize = match.size;
     }
 
-    return { success: true, files: files, folders: folders, skippedCount: skippedCount };
+    return { files: files, folders: folders, skippedCount: skippedCount };
+  }
+}
+
+ipcMain.handle('read-folder', async (event, folderPath) => {
+  try {
+    const r = await scanFolder(folderPath);
+    return { success: true, files: r.files, folders: r.folders, skippedCount: r.skippedCount };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+// Recursive lightweight scan for the calendar view: every note in the tree
+// with its timestamps, due date, and best thumbnail path. No text content.
+ipcMain.handle('calendar-scan', async (event, rootPath) => {
+  try {
+    const notesOut = [];
+    async function walk(folder, depth) {
+      if (depth > 12) return;
+      let scan;
+      try { scan = await scanFolder(folder, { readContent: false }); } catch (_e) { return; }
+
+      const images = new Map();   // baseKey -> newest non-empty image item
+      const canvases = new Map(); // baseKey -> canvas item (pngPath/pngSize)
+      for (const f of scan.files) {
+        if (f.type === 'image') {
+          if (!(f.size > 0)) continue;
+          const info = sidecarInfo(f.name);
+          if (!info) continue;
+          const prev = images.get(info.baseKey);
+          if (!prev || f.lastModified > prev.lastModified) images.set(info.baseKey, f);
+        } else if (f.type === 'canvas') {
+          const base = f.name.toLowerCase().slice(0, -'.canvas.json'.length);
+          canvases.set(base, f);
+        }
+      }
+
+      await mapLimit(scan.files.filter(f => f.type === 'text'), 8, async (f) => {
+        const title = f.name.replace(/\.txt$/i, '');
+        const baseKey = title.toLowerCase();
+
+        let dueDate = null;
+        try {
+          const raw = await withTimeout(
+            fsp.readFile(path.join(folder, NOATFORMAT_DIR, title + '.format.json'), 'utf8'),
+            FILE_OP_TIMEOUT_MS, f.name);
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed.dueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed.dueDate)) {
+            dueDate = parsed.dueDate;
+          }
+        } catch (_e) { /* no format file or unreadable: no due date */ }
+
+        let thumbPath = null;
+        const img = images.get(baseKey);
+        if (img) {
+          thumbPath = img.path;
+        } else {
+          const cv = canvases.get(baseKey);
+          if (cv && cv.pngPath && cv.pngSize >= 102400) thumbPath = cv.pngPath;
+        }
+
+        notesOut.push({
+          name: f.name,
+          title: title,
+          folder: folder,
+          path: f.path,
+          created: f.created || 0,
+          modified: f.lastModified,
+          dueDate: dueDate,
+          thumbPath: thumbPath,
+          unavailable: !!f.unavailable
+        });
+      });
+
+      for (const sub of scan.folders) {
+        await walk(sub.path, depth + 1);
+      }
+    }
+    await walk(rootPath, 0);
+    return { success: true, notes: notesOut };
   } catch (e) {
     return { success: false, error: e.message };
   }

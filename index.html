@@ -942,6 +942,174 @@
       .status{ display:none; }
     }
     .status{ display:none !important; }
+
+    /* --- Calendar --- */
+    .calendarView{
+      display:flex;
+      flex-direction:column;
+      flex:1;
+      min-height:0;
+      padding:16px;
+      overflow:hidden;
+      font-family:var(--sans);
+      position:relative;
+    }
+    .calHeader{ display:flex; align-items:center; justify-content:center; gap:12px; margin-bottom:10px; }
+    .calTitle{ font-weight:700; font-size:20px; min-width:200px; text-align:center; color:var(--text); }
+    .calDayNames{
+      display:grid;
+      grid-template-columns:repeat(7,1fr);
+      font-size:12px;
+      font-weight:700;
+      color:var(--muted);
+      text-align:center;
+      padding-bottom:4px;
+    }
+    .calGrid{
+      display:grid;
+      grid-template-columns:repeat(7,1fr);
+      grid-auto-rows:1fr;
+      flex:1;
+      border:1px solid var(--border);
+      border-radius:8px;
+      overflow:hidden;
+      background:var(--panel);
+      min-height:0;
+    }
+    .calendarView{ --cal-outline:#fff; }
+    body.dark-mode .calendarView{ --cal-outline:#000; }
+    .calCell{
+      border-right:1px solid var(--border);
+      border-bottom:1px solid var(--border);
+      padding:4px;
+      overflow:hidden;
+      display:flex;
+      flex-direction:column;
+      gap:2px;
+      min-height:0;
+      min-width:0;
+      position:relative;
+    }
+    .calCell.otherMonth{ opacity:.35; }
+    .calCell.today .calDayNum{
+      background:var(--note-active-bg);
+      border:1px solid var(--note-active-border);
+      border-radius:6px;
+    }
+    .calCellBg{
+      position:absolute;
+      inset:0;
+      width:100%;
+      height:100%;
+      object-fit:cover;
+      z-index:0;
+      pointer-events:none;
+    }
+    .calDayNum{
+      font-size:11px;
+      color:var(--muted);
+      align-self:flex-end;
+      padding:1px 5px;
+      flex:none;
+      position:relative;
+      z-index:1;
+      font-weight:700;
+      text-shadow:-1px -1px 0 var(--cal-outline), 1px -1px 0 var(--cal-outline), -1px 1px 0 var(--cal-outline), 1px 1px 0 var(--cal-outline);
+    }
+    .calEntry{
+      display:flex;
+      align-items:center;
+      gap:4px;
+      font-family:var(--mono);
+      font-size:11px;
+      font-weight:700;
+      padding:2px 4px;
+      border-radius:6px;
+      background:transparent;
+      border:1px solid transparent;
+      cursor:pointer;
+      overflow:hidden;
+      white-space:nowrap;
+      flex:none;
+      color:var(--text);
+      position:relative;
+      z-index:1;
+      text-shadow:-1px -1px 0 var(--cal-outline), 1px -1px 0 var(--cal-outline), -1px 1px 0 var(--cal-outline), 1px 1px 0 var(--cal-outline);
+    }
+    .calEntry span{ overflow:hidden; text-overflow:ellipsis; }
+    .calKind{ flex:none; font-size:10px; opacity:.85; overflow:visible; }
+    .calEntry:hover{ background:var(--btn-hover); }
+    .calEntry.due{ color:var(--danger); border-color:var(--danger); background:transparent; }
+    .calMore{
+      font-size:10px;
+      color:var(--muted);
+      cursor:pointer;
+      flex:none;
+      padding:0 4px;
+      position:relative;
+      z-index:1;
+      font-weight:700;
+      text-shadow:-1px -1px 0 var(--cal-outline), 1px -1px 0 var(--cal-outline), -1px 1px 0 var(--cal-outline), 1px 1px 0 var(--cal-outline);
+    }
+    .calMore:hover{ color:var(--text); }
+    .calOverflowPopover{
+      position:absolute;
+      z-index:60;
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:8px;
+      box-shadow:0 16px 50px rgba(0,0,0,.25);
+      padding:6px;
+      width:240px;
+      max-height:50vh;
+      overflow:auto;
+      display:flex;
+      flex-direction:column;
+      gap:2px;
+    }
+
+    /* --- Mini calendar (due date picker) --- */
+    .miniCalPopup{
+      position:absolute;
+      top:52px;
+      right:8px;
+      z-index:50;
+      width:252px;
+      background:var(--panel);
+      border:1px solid var(--border);
+      border-radius:8px;
+      box-shadow:0 16px 50px rgba(0,0,0,.25);
+      padding:10px;
+      font-family:var(--sans);
+    }
+    .miniCalHeader{ display:flex; align-items:center; gap:4px; margin-bottom:6px; }
+    #miniCalTitle{ flex:1; text-align:center; font-weight:700; font-size:13px; color:var(--text); }
+    .miniCalDayNames{
+      display:grid;
+      grid-template-columns:repeat(7,1fr);
+      font-size:10px;
+      font-weight:700;
+      color:var(--muted);
+      text-align:center;
+      margin-bottom:2px;
+    }
+    .miniCalGrid{ display:grid; grid-template-columns:repeat(7,1fr); gap:2px; }
+    .miniCalDay{
+      border:0;
+      background:transparent;
+      border-radius:6px;
+      font-size:12px;
+      padding:4px 0;
+      cursor:pointer;
+      color:var(--text);
+      text-align:center;
+    }
+    .miniCalDay:hover{ background:var(--btn-hover); }
+    .miniCalDay.otherMonth{ opacity:.35; }
+    .miniCalDay.due{ background:var(--danger); color:#fff; }
+    .miniCalDay.today{ outline:1px solid var(--note-active-border); }
+    #dueDateBtn.hasDue{ color:var(--danger); border-color:var(--danger); }
+    #miniCalClearBtn{ width:100%; margin-top:6px; }
   </style>
 </head>
 <body>
@@ -961,6 +1129,8 @@
     <button id="attachBtn" class="btn" disabled aria-label="Attach image"><span class="ico" aria-hidden="true">🖼️</span></button>
     <button id="audioBtn" class="btn" disabled aria-label="Audio"><span class="ico" aria-hidden="true">🔊</span></button>
     <div class="spacer"></div>
+    <button id="calendarBtn" class="btn" disabled aria-label="Calendar" title="Calendar"><span class="ico" aria-hidden="true">📅</span></button>
+    <div class="gapBtn"></div>
     <div id="status" class="status" style="display:none"></div>
     <button id="exportBtn" class="btn" disabled aria-label="Export"><span class="ico" aria-hidden="true">📤</span></button>
     <div class="gapBtn"></div>
@@ -1027,6 +1197,21 @@
             <div class="separator"></div>
             <button id="canvasDeleteObjBtn" class="btn" title="Delete Selected">🗑️</button>
             <button id="canvasClearBtn" class="btn danger" title="Clear All">Clear</button>
+            <div class="separator"></div>
+            <button id="dueDateBtn" class="btn" title="Due date">📅</button>
+          </div>
+          <div id="miniCalPopup" class="miniCalPopup" style="display:none;">
+            <div class="miniCalHeader">
+              <button id="miniCalPrev" class="btn" aria-label="Previous month">‹</button>
+              <div id="miniCalTitle"></div>
+              <button id="miniCalNext" class="btn" aria-label="Next month">›</button>
+              <button id="miniCalClose" class="btn" aria-label="Close">✕</button>
+            </div>
+            <div class="miniCalDayNames">
+              <div>Su</div><div>Mo</div><div>Tu</div><div>We</div><div>Th</div><div>Fr</div><div>Sa</div>
+            </div>
+            <div id="miniCalGrid" class="miniCalGrid"></div>
+            <button id="miniCalClearBtn" class="btn" style="display:none;">Clear due date</button>
           </div>
           <div id="canvasContainer" class="canvasContainer">
             <canvas id="fabricCanvas"></canvas>
@@ -1043,6 +1228,18 @@
           </div>
         </div>
         <div id="thumb" class="thumb" style="display:none !important;"><img id="thumbImg" alt="attachment" /></div>
+      </div>
+      <div id="calendarView" class="calendarView" style="display:none;">
+        <div class="calHeader">
+          <button id="calPrevBtn" class="btn" aria-label="Previous month">‹</button>
+          <div id="calTitle" class="calTitle"></div>
+          <button id="calNextBtn" class="btn" aria-label="Next month">›</button>
+        </div>
+        <div class="calDayNames">
+          <div>Sunday</div><div>Monday</div><div>Tuesday</div><div>Wednesday</div><div>Thursday</div><div>Friday</div><div>Saturday</div>
+        </div>
+        <div id="calGrid" class="calGrid"></div>
+        <div id="calOverflowPopover" class="calOverflowPopover" style="display:none;"></div>
       </div>
     </div>
   </div>
@@ -1347,6 +1544,22 @@ const els = {
   canvasAddImageBtn: document.getElementById('canvasAddImageBtn'),
   canvasDeleteObjBtn: document.getElementById('canvasDeleteObjBtn'),
   canvasClearBtn: document.getElementById('canvasClearBtn'),
+  // Calendar elements
+  calendarBtn: document.getElementById('calendarBtn'),
+  calendarView: document.getElementById('calendarView'),
+  calTitle: document.getElementById('calTitle'),
+  calGrid: document.getElementById('calGrid'),
+  calPrevBtn: document.getElementById('calPrevBtn'),
+  calNextBtn: document.getElementById('calNextBtn'),
+  calOverflowPopover: document.getElementById('calOverflowPopover'),
+  dueDateBtn: document.getElementById('dueDateBtn'),
+  miniCalPopup: document.getElementById('miniCalPopup'),
+  miniCalTitle: document.getElementById('miniCalTitle'),
+  miniCalGrid: document.getElementById('miniCalGrid'),
+  miniCalPrev: document.getElementById('miniCalPrev'),
+  miniCalNext: document.getElementById('miniCalNext'),
+  miniCalClose: document.getElementById('miniCalClose'),
+  miniCalClearBtn: document.getElementById('miniCalClearBtn'),
   // Export elements
   exportBtn: document.getElementById('exportBtn'),
   exportModal: document.getElementById('exportModal'),
@@ -1397,6 +1610,16 @@ let currentFormatSpans = [];
 let formatDirty = false;
 let currentSearchQuery = '';
 let prevEditorText = '';
+
+// Calendar
+let currentDueDate = null;       // 'YYYY-MM-DD' | null for the open note
+let calendarIsOpen = false;
+let calendarMonth = null;        // {year, month 0-11}
+let calendarNotes = [];          // records from api.calendarScan, refreshed per open
+let calRenderGen = 0;            // stale-async guard for thumbnails
+const calThumbCache = new Map(); // path -> dataUrl
+let miniCalIsOpen = false;
+let miniCalMonth = null;
 
 let currentImageURL = null;
 let listNavActive = false;
@@ -1463,6 +1686,7 @@ function setEnabled(enabled) {
   els.newFolderBtn.disabled = !enabled;
   els.refreshBtn.disabled = !enabled;
   els.exportBtn.disabled = !enabled;
+  els.calendarBtn.disabled = !enabled;
 }
 
 function setEditorEnabled(enabled) {
@@ -1482,6 +1706,32 @@ function fmtDate(ts) {
   if (!ts) return '';
   const d = new Date(ts);
   return d.toLocaleString(undefined, {year:'2-digit', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'});
+}
+
+// Calendar date helpers. Never parse 'YYYY-MM-DD' with new Date(string) —
+// that reads as UTC midnight and shifts a day in negative-offset timezones.
+function ymdFromTs(ts) {
+  const d = new Date(ts);
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function ymdToParts(s) {
+  const [y, m, d] = s.split('-').map(Number);
+  return { y, m: m - 1, d };
+}
+function todayYmd() { return ymdFromTs(Date.now()); }
+function monthLabel(year, month) {
+  return new Date(year, month, 1).toLocaleString('default', { month: 'long' }) + ' ' + year;
+}
+// 42 cells (6 weeks) starting from the Sunday on/before the 1st.
+function monthGridDays(year, month) {
+  const first = new Date(year, month, 1);
+  const start = new Date(year, month, 1 - first.getDay());
+  const cells = [];
+  for (let i = 0; i < 42; i++) {
+    const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+    cells.push({ ymd: ymdFromTs(d.getTime()), day: d.getDate(), inMonth: d.getMonth() === month });
+  }
+  return cells;
 }
 
 function sanitizeTitleToFilename(title) {
@@ -2235,6 +2485,7 @@ async function loadCurrentImageIntoCanvasIfAny() {
 async function openDrawModal() {
   if (!folderPath) return;
   if (currentIndex == null || !notes[currentIndex]) return;
+  closeMiniCal();
   setFocusMode(true);
   setDrawModalOpen(true);
   resizeDrawCanvas(false);
@@ -2302,6 +2553,7 @@ function setAudioModalOpen(on) {
 function openAudioModal() {
   if (!folderPath) return;
   if (currentIndex == null || !notes[currentIndex]) return;
+  closeMiniCal();
   setAudioModalOpen(true);
 }
 
@@ -2604,6 +2856,7 @@ function setPrefsModalOpen(on) {
 }
 
 function openPrefsModal() {
+  closeMiniCal();
   setPrefsModalOpen(true);
   updatePrefsUI();
 }
@@ -2629,6 +2882,7 @@ function openExportModal() {
     api.showAlert('No notes to export. Please open a folder with notes first.');
     return;
   }
+  closeMiniCal();
   setExportModalOpen(true);
 }
 
@@ -4978,7 +5232,16 @@ async function renderSplashScreen() {
 }
 
 function renderCurrent() {
+  // Any re-render of the main area dismisses the calendar view (note opened,
+  // folder changed, refresh). Inline rather than closeCalendar() to avoid
+  // recursion — closeCalendar() itself calls renderCurrent().
+  if (calendarIsOpen) {
+    calendarIsOpen = false;
+    els.calendarView.style.display = 'none';
+    hideCalOverflow();
+  }
   if (currentIndex == null || !notes[currentIndex]) {
+    closeMiniCal();
     els.currentTitle.textContent = 'No note selected';
     els.saveState.textContent = '';
     els.editorWrap.style.display = 'none';
@@ -5705,12 +5968,13 @@ function getFormatPath(base) {
 
 async function loadFormatSpans() {
   currentFormatSpans = [];
+  currentDueDate = null;
   formatDirty = false;
-  if (currentIndex == null || !notes[currentIndex]) return;
+  if (currentIndex == null || !notes[currentIndex]) { updateDueDateBtn(); return; }
   const n = notes[currentIndex];
   const base = noteTitleFromName(n.name);
   const fmtPath = getFormatPath(base);
-  if (!fmtPath) return;
+  if (!fmtPath) { updateDueDateBtn(); return; }
   try {
     const result = await api.readCanvasJson(fmtPath);
     if (result && result.success && result.data) {
@@ -5719,8 +5983,12 @@ async function loadFormatSpans() {
         // Drop heading spans from the removed heading feature
         currentFormatSpans = parsed.spans.filter(sp => !/^h[1-6]$/.test(sp.type));
       }
+      if (parsed && typeof parsed.dueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed.dueDate)) {
+        currentDueDate = parsed.dueDate;
+      }
     }
   } catch (e) {}
+  updateDueDateBtn();
 }
 
 async function saveFormatSpans() {
@@ -5730,23 +5998,243 @@ async function saveFormatSpans() {
   const fmtPath = getFormatPath(base);
   if (!fmtPath) return;
   try {
-    if (currentFormatSpans.length === 0) {
+    if (currentFormatSpans.length === 0 && !currentDueDate) {
       const exists = await api.fileExists(fmtPath);
       if (exists) await api.deleteFile(fmtPath);
     } else {
       const dir = api.joinPath(folderPath, '.noatformat');
       const dirExists = await api.fileExists(dir);
       if (!dirExists) await api.createFolder(dir);
-      await api.writeCanvasJson(fmtPath, JSON.stringify({ spans: currentFormatSpans }));
+      const payload = { spans: currentFormatSpans };
+      if (currentDueDate) payload.dueDate = currentDueDate;
+      await api.writeCanvasJson(fmtPath, JSON.stringify(payload));
     }
     formatDirty = false;
   } catch (e) {}
+}
+
+// ===== Big calendar =====
+
+async function openCalendar() {
+  if (!rootFolderPath) return;
+  closeMiniCal();
+  await flushSaveIfNeeded();   // just-set due dates hit disk before the scan
+  calendarIsOpen = true;
+  if (!calendarMonth) {
+    const d = new Date();
+    calendarMonth = { year: d.getFullYear(), month: d.getMonth() };
+  }
+  els.editorWrap.style.display = 'none';
+  els.empty.style.display = 'none';
+  els.calendarView.style.display = 'flex';
+  els.currentTitle.textContent = 'Calendar';
+  const res = await api.calendarScan(rootFolderPath);
+  if (!calendarIsOpen) return;  // closed while scanning
+  calendarNotes = (res && res.success) ? res.notes : [];
+  renderCalendar();
+}
+
+function closeCalendar() {
+  if (!calendarIsOpen) return;
+  calendarIsOpen = false;
+  els.calendarView.style.display = 'none';
+  hideCalOverflow();
+  renderCurrent();
+}
+
+function hideCalOverflow() {
+  els.calOverflowPopover.style.display = 'none';
+  els.calOverflowPopover.innerHTML = '';
+}
+
+function buildCalendarByDay() {
+  const byDay = new Map();
+  const push = (ymd, entry) => {
+    if (!byDay.has(ymd)) byDay.set(ymd, []);
+    byDay.get(ymd).push(entry);
+  };
+  for (const r of calendarNotes) {
+    if (r.unavailable) continue;
+    const createdTs = (r.created && r.created > 0 && r.created <= r.modified) ? r.created : r.modified;
+    const cDay = ymdFromTs(createdTs);
+    const mDay = ymdFromTs(r.modified);
+    push(cDay, { r, kind: 'created' });
+    if (mDay !== cDay) push(mDay, { r, kind: 'modified' });
+    if (r.dueDate) push(r.dueDate, { r, kind: 'due' });
+  }
+  return byDay;
+}
+
+function makeCalEntry(entry, gen) {
+  const el = document.createElement('div');
+  el.className = 'calEntry' + (entry.kind === 'due' ? ' due' : '');
+  el.title = entry.r.title + ' — ' + entry.kind;
+  if (entry.kind === 'created' || entry.kind === 'modified') {
+    const kindEl = document.createElement('span');
+    kindEl.className = 'calKind';
+    kindEl.textContent = entry.kind === 'created' ? '✦' : '✎';
+    el.appendChild(kindEl);
+  }
+  const label = document.createElement('span');
+  label.textContent = entry.r.title;
+  el.appendChild(label);
+  el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openCalendarEntry(entry.r);
+  });
+  return el;
+}
+
+// Fill a day cell's background with the newest-modified illustrated note's image.
+function applyCellBackground(cellEl, entries, gen) {
+  let best = null;
+  for (const e of entries) {
+    if (e.r.thumbPath && (!best || e.r.modified > best.modified)) best = e.r;
+  }
+  if (!best) return;
+  const img = document.createElement('img');
+  img.className = 'calCellBg';
+  img.alt = '';
+  cellEl.insertBefore(img, cellEl.firstChild);
+  const cached = calThumbCache.get(best.thumbPath);
+  if (cached) {
+    img.src = cached;
+  } else {
+    api.readImageThumbnail(best.thumbPath, 256).then(res => {
+      if (res && res.success && res.dataUrl) {
+        calThumbCache.set(best.thumbPath, res.dataUrl);
+        if (gen === calRenderGen) img.src = res.dataUrl;
+      }
+    }).catch(() => {});
+  }
+}
+
+function renderCalendar() {
+  const gen = ++calRenderGen;
+  hideCalOverflow();
+  const { year, month } = calendarMonth;
+  els.calTitle.textContent = monthLabel(year, month);
+  const byDay = buildCalendarByDay();
+  const today = todayYmd();
+  const MAX_VISIBLE = 3;
+
+  els.calGrid.innerHTML = '';
+  for (const cell of monthGridDays(year, month)) {
+    const cellEl = document.createElement('div');
+    cellEl.className = 'calCell' + (cell.inMonth ? '' : ' otherMonth') + (cell.ymd === today ? ' today' : '');
+
+    const num = document.createElement('div');
+    num.className = 'calDayNum';
+    num.textContent = cell.day;
+    cellEl.appendChild(num);
+
+    const entries = byDay.get(cell.ymd) || [];
+    // Due entries first, then the rest sorted by title
+    entries.sort((a, b) => (a.kind === 'due' ? -1 : 0) - (b.kind === 'due' ? -1 : 0) || a.r.title.localeCompare(b.r.title));
+
+    for (const entry of entries.slice(0, MAX_VISIBLE)) {
+      cellEl.appendChild(makeCalEntry(entry, gen));
+    }
+    if (entries.length > MAX_VISIBLE) {
+      const more = document.createElement('div');
+      more.className = 'calMore';
+      more.textContent = '+' + (entries.length - MAX_VISIBLE) + ' more';
+      more.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showCalOverflow(cellEl, entries, gen);
+      });
+      cellEl.appendChild(more);
+    }
+    applyCellBackground(cellEl, entries, gen);
+    els.calGrid.appendChild(cellEl);
+  }
+}
+
+function showCalOverflow(cellEl, entries, gen) {
+  const pop = els.calOverflowPopover;
+  pop.innerHTML = '';
+  for (const entry of entries) {
+    pop.appendChild(makeCalEntry(entry, gen));
+  }
+  pop.style.display = 'flex';
+  const viewRect = els.calendarView.getBoundingClientRect();
+  const cellRect = cellEl.getBoundingClientRect();
+  let left = cellRect.left - viewRect.left;
+  let top = cellRect.bottom - viewRect.top + 4;
+  // Keep inside the view
+  left = Math.min(left, viewRect.width - 250);
+  if (top + 200 > viewRect.height) top = Math.max(0, cellRect.top - viewRect.top - 204);
+  pop.style.left = Math.max(0, left) + 'px';
+  pop.style.top = top + 'px';
+}
+
+async function openCalendarEntry(r) {
+  if (r.folder !== folderPath) {
+    await flushSaveIfNeeded();
+    folderPath = r.folder;
+    updateFolderUI();
+    await reloadNotes(r.name);
+  }
+  const idx = notes.findIndex(n => n.name.toLowerCase() === r.name.toLowerCase());
+  if (idx >= 0) await openNoteByIndex(idx, { focusEditor: false, focusMode: false });
+}
+
+// ===== Mini calendar (due date picker) =====
+
+function openMiniCal() {
+  if (currentIndex == null || !notes[currentIndex]) return;
+  const p = currentDueDate ? ymdToParts(currentDueDate) : null;
+  const d = new Date();
+  miniCalMonth = p ? { year: p.y, month: p.m } : { year: d.getFullYear(), month: d.getMonth() };
+  miniCalIsOpen = true;
+  els.miniCalPopup.style.display = 'block';
+  renderMiniCal();
+}
+
+function closeMiniCal() {
+  if (!miniCalIsOpen) return;
+  miniCalIsOpen = false;
+  els.miniCalPopup.style.display = 'none';
+}
+
+function setDueDate(ymdOrNull) {
+  currentDueDate = ymdOrNull;
+  formatDirty = true;
+  scheduleSave();
+  updateDueDateBtn();
+  renderMiniCal();
+}
+
+function updateDueDateBtn() {
+  if (!els.dueDateBtn) return;
+  els.dueDateBtn.classList.toggle('hasDue', !!currentDueDate);
+  els.dueDateBtn.title = currentDueDate ? ('Due ' + currentDueDate) : 'Due date';
+}
+
+function renderMiniCal() {
+  if (!miniCalIsOpen) return;
+  const { year, month } = miniCalMonth;
+  els.miniCalTitle.textContent = monthLabel(year, month);
+  const today = todayYmd();
+  els.miniCalGrid.innerHTML = '';
+  for (const cell of monthGridDays(year, month)) {
+    const btn = document.createElement('button');
+    btn.className = 'miniCalDay'
+      + (cell.inMonth ? '' : ' otherMonth')
+      + (cell.ymd === currentDueDate ? ' due' : '')
+      + (cell.ymd === today ? ' today' : '');
+    btn.textContent = cell.day;
+    btn.addEventListener('click', () => setDueDate(cell.ymd));
+    els.miniCalGrid.appendChild(btn);
+  }
+  els.miniCalClearBtn.style.display = currentDueDate ? '' : 'none';
 }
 
 async function openNoteByIndex(idx, opts = {}) {
   const { focusEditor = true, focusMode = true, keepListNav = false, searchQuery = '' } = (opts || {});
   if (idx == null || !notes[idx]) return;
   closeLightbox();
+  closeMiniCal();
   stopAudio();
   
   // Reset auto-fix dirty region tracking when switching notes
@@ -6104,6 +6592,45 @@ els.drawCloseBtn.addEventListener('click', closeDrawModal);
 els.drawNewBtn.addEventListener('click', () => { clearCanvasWhite(); initSignatureMark(); });
 els.drawDeleteBtn.addEventListener('click', deleteDrawingAttachment);
 
+// Calendar
+els.calendarBtn.addEventListener('click', () => {
+  if (calendarIsOpen) closeCalendar();
+  else openCalendar();
+});
+els.calPrevBtn.addEventListener('click', () => {
+  calendarMonth.month--;
+  if (calendarMonth.month < 0) { calendarMonth.month = 11; calendarMonth.year--; }
+  renderCalendar();
+});
+els.calNextBtn.addEventListener('click', () => {
+  calendarMonth.month++;
+  if (calendarMonth.month > 11) { calendarMonth.month = 0; calendarMonth.year++; }
+  renderCalendar();
+});
+els.calendarView.addEventListener('mousedown', (e) => {
+  if (els.calOverflowPopover.style.display !== 'none' && !els.calOverflowPopover.contains(e.target)) {
+    hideCalOverflow();
+  }
+});
+
+// Mini calendar (due date picker)
+els.dueDateBtn.addEventListener('click', () => {
+  if (miniCalIsOpen) closeMiniCal();
+  else openMiniCal();
+});
+els.miniCalClose.addEventListener('click', closeMiniCal);
+els.miniCalPrev.addEventListener('click', () => {
+  miniCalMonth.month--;
+  if (miniCalMonth.month < 0) { miniCalMonth.month = 11; miniCalMonth.year--; }
+  renderMiniCal();
+});
+els.miniCalNext.addEventListener('click', () => {
+  miniCalMonth.month++;
+  if (miniCalMonth.month > 11) { miniCalMonth.month = 0; miniCalMonth.year++; }
+  renderMiniCal();
+});
+els.miniCalClearBtn.addEventListener('click', () => setDueDate(null));
+
 els.audioBtn.addEventListener('click', openAudioModal);
 els.audioCloseBtn.addEventListener('click', closeAudioModal);
 els.audioLoadBtn.addEventListener('click', loadAudioFile);
@@ -6460,11 +6987,13 @@ window.addEventListener('resize', () => {
 
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (miniCalIsOpen) { closeMiniCal(); return; }
     if (exportIsOpen && !isExporting) { closeExportModal(); return; }
     if (prefsIsOpen) { closePrefsModal(); return; }
     if (audioIsOpen) { closeAudioModal(); return; }
     if (drawIsOpen) { closeDrawModal(); return; }
     if (els.lightbox.style.display === 'flex') { closeLightbox(); return; }
+    if (calendarIsOpen) { closeCalendar(); return; }
     // Same as the toolbar back button: return to the parent notes folder
     if (rootFolderPath && folderPath && folderPath !== rootFolderPath) {
       setFocusMode(false);
