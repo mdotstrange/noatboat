@@ -1052,6 +1052,21 @@
       text-shadow:-1px -1px 0 var(--cal-outline), 1px -1px 0 var(--cal-outline), -1px 1px 0 var(--cal-outline), 1px 1px 0 var(--cal-outline);
     }
     .calMore:hover{ color:var(--text); }
+    .calBoat{
+      position:absolute;
+      left:0; right:0; bottom:2px;
+      margin:0; padding:0;
+      text-align:center;
+      font-family:var(--mono);
+      font-size:7.5px;
+      line-height:1.05;
+      white-space:pre;
+      font-weight:700;
+      pointer-events:none;
+      z-index:1;
+      overflow:hidden;
+      text-shadow:-1px -1px 0 var(--cal-outline), 1px -1px 0 var(--cal-outline), -1px 1px 0 var(--cal-outline), 1px 1px 0 var(--cal-outline);
+    }
     .calOverflowPopover{
       position:absolute;
       z-index:60;
@@ -1620,6 +1635,7 @@ let calRenderGen = 0;            // stale-async guard for thumbnails
 const calThumbCache = new Map(); // path -> dataUrl
 let miniCalIsOpen = false;
 let miniCalMonth = null;
+let latestBoatLines = null;      // current ASCII boat frame, shared with the calendar
 
 let currentImageURL = null;
 let listNavActive = false;
@@ -6085,6 +6101,18 @@ function makeCalEntry(entry, gen) {
   return el;
 }
 
+// Colorful copy of the animated ASCII boat, shown on today's calendar cell.
+// One palette color per line; frame data comes from the corner boat animator.
+function renderCalBoat() {
+  const el = document.getElementById('calBoat');
+  if (!el) return;
+  const lines = latestBoatLines || document.getElementById('asciiBoat').textContent.split('\n');
+  const palette = PEN_COLORS.slice(1); // skip black
+  el.innerHTML = lines.map((ln, i) =>
+    '<span style="color:' + palette[i % palette.length].hex + '">' + escapeHtml(ln) + '</span>'
+  ).join('\n');
+}
+
 // Fill a day cell's background with the newest-modified illustrated note's image.
 function applyCellBackground(cellEl, entries, gen) {
   let best = null;
@@ -6146,8 +6174,15 @@ function renderCalendar() {
       cellEl.appendChild(more);
     }
     applyCellBackground(cellEl, entries, gen);
+    if (cell.ymd === today) {
+      const boat = document.createElement('pre');
+      boat.id = 'calBoat';
+      boat.className = 'calBoat';
+      cellEl.appendChild(boat);
+    }
     els.calGrid.appendChild(cellEl);
   }
+  renderCalBoat();
 }
 
 function showCalOverflow(cellEl, entries, gen) {
@@ -7367,6 +7402,8 @@ document.addEventListener('visibilitychange', () => {
     }
 
     boatEl.textContent = out.join('\n');
+    latestBoatLines = out;
+    renderCalBoat();
   }, intervalMs);
 })();
 </script>
