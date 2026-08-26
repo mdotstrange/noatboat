@@ -507,13 +507,13 @@
       border:2px solid var(--border); flex-shrink:0;
     }
     .colorPalette{ display:flex; gap:4px; align-items:center; }
-    .colorBtn, .drawColorBtn{
+    .colorBtn, .drawColorBtn, .calColorBtn{
       width:22px; height:22px; border-radius:50%; border:2px solid var(--border);
       cursor:pointer; padding:0; flex-shrink:0;
       transition:transform 0.1s;
     }
-    .colorBtn:hover, .drawColorBtn:hover{ transform:scale(1.15); }
-    .colorBtn.active, .drawColorBtn.active{ border-color:var(--fg); box-shadow:0 0 0 2px var(--bg), 0 0 0 4px var(--fg); }
+    .colorBtn:hover, .drawColorBtn:hover, .calColorBtn:hover{ transform:scale(1.15); }
+    .colorBtn.active, .drawColorBtn.active, .calColorBtn.active{ border-color:var(--fg); box-shadow:0 0 0 2px var(--bg), 0 0 0 4px var(--fg); }
     .canvasContainer{
       flex:1;
       position:relative;
@@ -1052,6 +1052,32 @@
       text-shadow:-1px -1px 0 var(--cal-outline), 1px -1px 0 var(--cal-outline), -1px 1px 0 var(--cal-outline), 1px 1px 0 var(--cal-outline);
     }
     .calMore:hover{ color:var(--text); }
+    .calToolbar{
+      border:1px solid var(--border);
+      border-radius:8px;
+      margin-bottom:10px;
+      flex:none;
+    }
+    .calDrawHint{ font-size:11px; color:var(--muted); font-family:var(--mono); white-space:nowrap; }
+    .calGridWrap{ position:relative; flex:1; min-height:0; display:flex; }
+    .calGridWrap .calGrid{ flex:1; }
+    .calDrawOverlay{
+      position:absolute;
+      inset:0;
+      z-index:5;
+      display:none;
+      cursor:crosshair;
+      touch-action:none;
+    }
+    .calDrawOverlay.active{ display:block; }
+    .calDayDrawing{
+      position:absolute;
+      inset:0;
+      width:100%;
+      height:100%;
+      z-index:2;
+      pointer-events:none;
+    }
     .calBoat{
       position:absolute;
       left:0; right:0; bottom:2px;
@@ -1245,6 +1271,28 @@
         <div id="thumb" class="thumb" style="display:none !important;"><img id="thumbImg" alt="attachment" /></div>
       </div>
       <div id="calendarView" class="calendarView" style="display:none;">
+        <div class="calToolbar canvasToolbar">
+          <button id="calDrawToggleBtn" class="btn" title="Draw on days">✏️ Draw</button>
+          <div class="separator"></div>
+          <button id="calPenSizeUp" class="btn penSizeBtn" title="Increase pen size">+</button>
+          <div id="calPenSizePreview" class="penSizePreview"><span id="calPenSizeDot" class="penSizeDot"></span></div>
+          <button id="calPenSizeDown" class="btn penSizeBtn" title="Decrease pen size">−</button>
+          <div class="separator"></div>
+          <div id="calCurrentColorSwatch" class="colorSwatch" style="background:#000000;" title="Current color"></div>
+          <div id="calColorPalette" class="colorPalette">
+            <button class="calColorBtn" data-color="#000000" style="background:#000000;" title="Black"></button>
+            <button class="calColorBtn" data-color="#00FF2F" style="background:#00FF2F;" title="Green"></button>
+            <button class="calColorBtn" data-color="#FF00D0" style="background:#FF00D0;" title="Pink"></button>
+            <button class="calColorBtn" data-color="#00EAFF" style="background:#00EAFF;" title="Cyan"></button>
+            <button class="calColorBtn" data-color="#FF1500" style="background:#FF1500;" title="Red"></button>
+            <button class="calColorBtn" data-color="#FC4C00" style="background:#FC4C00;" title="Orange"></button>
+            <button class="calColorBtn" data-color="#0032FC" style="background:#0032FC;" title="Blue"></button>
+            <button class="calColorBtn" data-color="#FCEF00" style="background:#FCEF00;" title="Yellow"></button>
+            <button class="calColorBtn" data-color="#A400FC" style="background:#A400FC;" title="Purple"></button>
+          </div>
+          <div class="spacer"></div>
+          <span class="calDrawHint">Draw mode: strokes save to the day you start on · right-click a drawing to delete</span>
+        </div>
         <div class="calHeader">
           <button id="calPrevBtn" class="btn" aria-label="Previous month">‹</button>
           <div id="calTitle" class="calTitle"></div>
@@ -1253,7 +1301,10 @@
         <div class="calDayNames">
           <div>Sunday</div><div>Monday</div><div>Tuesday</div><div>Wednesday</div><div>Thursday</div><div>Friday</div><div>Saturday</div>
         </div>
-        <div id="calGrid" class="calGrid"></div>
+        <div class="calGridWrap">
+          <div id="calGrid" class="calGrid"></div>
+          <canvas id="calDrawOverlay" class="calDrawOverlay"></canvas>
+        </div>
         <div id="calOverflowPopover" class="calOverflowPopover" style="display:none;"></div>
       </div>
     </div>
@@ -1567,6 +1618,8 @@ const els = {
   calPrevBtn: document.getElementById('calPrevBtn'),
   calNextBtn: document.getElementById('calNextBtn'),
   calOverflowPopover: document.getElementById('calOverflowPopover'),
+  calDrawToggleBtn: document.getElementById('calDrawToggleBtn'),
+  calDrawOverlay: document.getElementById('calDrawOverlay'),
   dueDateBtn: document.getElementById('dueDateBtn'),
   miniCalPopup: document.getElementById('miniCalPopup'),
   miniCalTitle: document.getElementById('miniCalTitle'),
@@ -1636,6 +1689,13 @@ const calThumbCache = new Map(); // path -> dataUrl
 let miniCalIsOpen = false;
 let miniCalMonth = null;
 let latestBoatLines = null;      // current ASCII boat frame, shared with the calendar
+// Calendar day drawings
+let calDrawMode = false;
+let calSignatureMark = null;       // single instance, created lazily, never re-created
+let calDrawings = {};              // ymd -> file path (from calendar-scan)
+const calDrawingCache = new Map(); // ymd -> dataUrl
+let calStrokeCell = null;          // .calCell element the current stroke started in
+let calStrokeYmd = null;
 
 let currentImageURL = null;
 let listNavActive = false;
@@ -5253,6 +5313,7 @@ function renderCurrent() {
   // recursion — closeCalendar() itself calls renderCurrent().
   if (calendarIsOpen) {
     calendarIsOpen = false;
+    setCalDrawMode(false);
     els.calendarView.style.display = 'none';
     hideCalOverflow();
   }
@@ -6047,15 +6108,147 @@ async function openCalendar() {
   const res = await api.calendarScan(rootFolderPath);
   if (!calendarIsOpen) return;  // closed while scanning
   calendarNotes = (res && res.success) ? res.notes : [];
+  calDrawings = (res && res.success && res.drawings) ? res.drawings : {};
   renderCalendar();
 }
 
 function closeCalendar() {
   if (!calendarIsOpen) return;
   calendarIsOpen = false;
+  setCalDrawMode(false);
   els.calendarView.style.display = 'none';
   hideCalOverflow();
   renderCurrent();
+}
+
+// ===== Calendar day drawings (standalone PNG per date) =====
+
+function getCalDrawingPath(ymd) {
+  return api.joinPath(rootFolderPath, '.noatformat', 'calendar', ymd + '.png');
+}
+
+function resizeCalDrawOverlay() {
+  // Backing store = grid CSS size (also blanks the canvas)
+  els.calDrawOverlay.width = els.calGrid.clientWidth;
+  els.calDrawOverlay.height = els.calGrid.clientHeight;
+}
+
+function clearCalDrawOverlay() {
+  const ctx = els.calDrawOverlay.getContext('2d');
+  ctx.clearRect(0, 0, els.calDrawOverlay.width, els.calDrawOverlay.height);
+}
+
+function setCalDrawMode(on) {
+  calDrawMode = !!on;
+  els.calDrawOverlay.classList.toggle('active', calDrawMode);
+  els.calDrawToggleBtn.classList.toggle('active', calDrawMode);
+  calStrokeCell = null;
+  calStrokeYmd = null;
+  if (calDrawMode) {
+    resizeCalDrawOverlay();
+    if (!calSignatureMark && typeof SignatureMark !== 'undefined') {
+      calSignatureMark = new SignatureMark(els.calDrawOverlay);
+    }
+    applyPenSettings();
+  }
+}
+
+function calCellAtPoint(x, y) {
+  return document.elementsFromPoint(x, y).find(el => el.classList && el.classList.contains('calCell')) || null;
+}
+
+function loadImageFromDataUrl(dataUrl) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
+}
+
+function showCellDrawing(cellEl, ymd, gen) {
+  let img = cellEl.querySelector('.calDayDrawing');
+  if (!img) {
+    img = document.createElement('img');
+    img.className = 'calDayDrawing';
+    img.alt = '';
+    cellEl.appendChild(img);
+  }
+  const cached = calDrawingCache.get(ymd);
+  if (cached) {
+    img.src = cached;
+    return;
+  }
+  const p = calDrawings[ymd];
+  if (!p) return;
+  api.readImageBase64(p).then(res => {
+    if (res && res.success && res.dataUrl) {
+      calDrawingCache.set(ymd, res.dataUrl);
+      if (gen == null || gen === calRenderGen) img.src = res.dataUrl;
+    }
+  }).catch(() => {});
+}
+
+async function captureCalStroke() {
+  const overlay = els.calDrawOverlay;
+  const cellEl = calStrokeCell;
+  const ymd = calStrokeYmd;
+  calStrokeCell = null;
+  calStrokeYmd = null;
+  if (!cellEl || !ymd || !overlay.width || !overlay.height) { clearCalDrawOverlay(); return; }
+
+  const oRect = overlay.getBoundingClientRect();
+  const cRect = cellEl.getBoundingClientRect();
+  const x = Math.max(0, Math.round(cRect.left - oRect.left));
+  const y = Math.max(0, Math.round(cRect.top - oRect.top));
+  const w = Math.min(overlay.width - x, Math.round(cRect.width));
+  const h = Math.min(overlay.height - y, Math.round(cRect.height));
+  if (w <= 0 || h <= 0) { clearCalDrawOverlay(); return; }
+
+  const octx = overlay.getContext('2d');
+  const data = octx.getImageData(x, y, w, h).data;
+  let hasContent = false;
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] > 0) { hasContent = true; break; }
+  }
+  if (!hasContent) { clearCalDrawOverlay(); return; }
+
+  const off = document.createElement('canvas');
+  off.width = w;
+  off.height = h;
+  const ctx = off.getContext('2d');
+  const existing = calDrawingCache.get(ymd);
+  if (existing) {
+    const prev = await loadImageFromDataUrl(existing);
+    if (prev) ctx.drawImage(prev, 0, 0, w, h);
+  }
+  ctx.drawImage(overlay, x, y, w, h, 0, 0, w, h);
+  clearCalDrawOverlay();
+
+  const dataUrl = off.toDataURL('image/png');
+  const p = getCalDrawingPath(ymd);
+  const res = await api.writeImageBuffer(p, dataUrl);
+  if (!res || !res.success) {
+    showBanner('Could not save calendar drawing. ' + (res && res.error ? res.error : ''));
+    return;
+  }
+  calDrawings[ymd] = p;
+  calDrawingCache.set(ymd, dataUrl);
+  if (cellEl.isConnected) showCellDrawing(cellEl, ymd, null);
+}
+
+async function deleteCalDrawingAt(clientX, clientY) {
+  const cellEl = calCellAtPoint(clientX, clientY);
+  if (!cellEl) return;
+  const ymd = cellEl.dataset.ymd;
+  if (!ymd || !calDrawings[ymd]) return;
+  const yes = await api.showConfirm('Delete the drawing on ' + ymd + '?');
+  if (!yes) return;
+  try { await api.deleteFile(calDrawings[ymd]); } catch (e) {}
+  delete calDrawings[ymd];
+  calDrawingCache.delete(ymd);
+  const img = cellEl.querySelector('.calDayDrawing');
+  if (img) img.remove();
 }
 
 function hideCalOverflow() {
@@ -6150,6 +6343,7 @@ function renderCalendar() {
   for (const cell of monthGridDays(year, month)) {
     const cellEl = document.createElement('div');
     cellEl.className = 'calCell' + (cell.inMonth ? '' : ' otherMonth') + (cell.ymd === today ? ' today' : '');
+    cellEl.dataset.ymd = cell.ymd;
 
     const num = document.createElement('div');
     num.className = 'calDayNum';
@@ -6174,6 +6368,7 @@ function renderCalendar() {
       cellEl.appendChild(more);
     }
     applyCellBackground(cellEl, entries, gen);
+    if (calDrawings[cell.ymd]) showCellDrawing(cellEl, cell.ymd, gen);
     if (cell.ymd === today) {
       const boat = document.createElement('pre');
       boat.id = 'calBoat';
@@ -6648,6 +6843,30 @@ els.calendarView.addEventListener('mousedown', (e) => {
   }
 });
 
+// Calendar day drawings
+els.calDrawToggleBtn.addEventListener('click', () => setCalDrawMode(!calDrawMode));
+els.calDrawOverlay.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  calStrokeCell = calCellAtPoint(e.clientX, e.clientY);
+  calStrokeYmd = calStrokeCell ? calStrokeCell.dataset.ymd : null;
+});
+els.calDrawOverlay.addEventListener('pointerup', () => { setTimeout(captureCalStroke, 20); });
+els.calDrawOverlay.addEventListener('pointercancel', () => { setTimeout(captureCalStroke, 20); });
+els.calDrawOverlay.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  deleteCalDrawingAt(e.clientX, e.clientY);
+});
+els.calGrid.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  deleteCalDrawingAt(e.clientX, e.clientY);
+});
+document.querySelectorAll('.calColorBtn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const idx = PEN_COLORS.findIndex(c => c.hex === btn.dataset.color);
+    if (idx >= 0) { canvasPenColorIdx = idx; applyPenSettings(); }
+  });
+});
+
 // Mini calendar (due date picker)
 els.dueDateBtn.addEventListener('click', () => {
   if (miniCalIsOpen) closeMiniCal();
@@ -6681,11 +6900,11 @@ els.canvasDrawBtn.addEventListener('click', () => setCanvasDrawingMode(true));
 function updatePenSizePreview() {
   const hex = PEN_COLORS[canvasPenColorIdx].hex;
   const px = Math.max(4, Math.min(24, canvasPenSize * 4));
-  for (const id of ['penSizeDot', 'drawPenSizeDot']) {
+  for (const id of ['penSizeDot', 'drawPenSizeDot', 'calPenSizeDot']) {
     const dot = document.getElementById(id);
     if (dot) { dot.style.width = px + 'px'; dot.style.height = px + 'px'; dot.style.background = hex; }
   }
-  for (const id of ['currentColorSwatch', 'drawCurrentColorSwatch']) {
+  for (const id of ['currentColorSwatch', 'drawCurrentColorSwatch', 'calCurrentColorSwatch']) {
     const el = document.getElementById(id);
     if (el) el.style.background = hex;
   }
@@ -6693,7 +6912,7 @@ function updatePenSizePreview() {
 
 function applyPenSettings() {
   const rgb = PEN_COLORS[canvasPenColorIdx].rgb;
-  for (const sm of [canvasSignatureMark, signatureMark]) {
+  for (const sm of [canvasSignatureMark, signatureMark, calSignatureMark]) {
     if (sm && sm.context) {
       sm.context.lineWidth = canvasPenSize;
       sm.color = rgb;
@@ -6701,25 +6920,32 @@ function applyPenSettings() {
     }
   }
   updatePenSizePreview();
-  document.querySelectorAll('.colorBtn, .drawColorBtn').forEach(b => {
+  document.querySelectorAll('.colorBtn, .drawColorBtn, .calColorBtn').forEach(b => {
     b.classList.toggle('active', b.dataset.color === PEN_COLORS[canvasPenColorIdx].hex);
   });
   api.savePreferences({ penSize: canvasPenSize, penColorIdx: canvasPenColorIdx });
 }
 
-document.getElementById('penSizeUp').addEventListener('click', () => {
+// Shared pen-size stepping for all three toolbars (note canvas, draw modal, calendar)
+function stepPenSize(dir) {
   const i = PEN_SIZES.indexOf(canvasPenSize);
-  if (i < PEN_SIZES.length - 1) canvasPenSize = PEN_SIZES[i + 1];
-  else if (i === -1) canvasPenSize = PEN_SIZES.find(s => s > canvasPenSize) || PEN_SIZES[PEN_SIZES.length - 1];
+  if (dir > 0) {
+    if (i < PEN_SIZES.length - 1 && i !== -1) canvasPenSize = PEN_SIZES[i + 1];
+    else if (i === -1) canvasPenSize = PEN_SIZES.find(s => s > canvasPenSize) || PEN_SIZES[PEN_SIZES.length - 1];
+  } else {
+    if (i > 0) canvasPenSize = PEN_SIZES[i - 1];
+    else if (i === -1) canvasPenSize = [...PEN_SIZES].reverse().find(s => s < canvasPenSize) || PEN_SIZES[0];
+  }
   applyPenSettings();
-});
-
-document.getElementById('penSizeDown').addEventListener('click', () => {
-  const i = PEN_SIZES.indexOf(canvasPenSize);
-  if (i > 0) canvasPenSize = PEN_SIZES[i - 1];
-  else if (i === -1) canvasPenSize = [...PEN_SIZES].reverse().find(s => s < canvasPenSize) || PEN_SIZES[0];
-  applyPenSettings();
-});
+}
+for (const id of ['penSizeUp', 'drawPenSizeUp', 'calPenSizeUp']) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('click', () => stepPenSize(+1));
+}
+for (const id of ['penSizeDown', 'drawPenSizeDown', 'calPenSizeDown']) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('click', () => stepPenSize(-1));
+}
 
 document.querySelectorAll('.colorBtn').forEach((btn, idx) => {
   btn.addEventListener('click', () => {
@@ -6729,19 +6955,6 @@ document.querySelectorAll('.colorBtn').forEach((btn, idx) => {
 });
 
 // Draw modal pen size and color controls
-document.getElementById('drawPenSizeUp').addEventListener('click', () => {
-  const i = PEN_SIZES.indexOf(canvasPenSize);
-  if (i < PEN_SIZES.length - 1) canvasPenSize = PEN_SIZES[i + 1];
-  else if (i === -1) canvasPenSize = PEN_SIZES.find(s => s > canvasPenSize) || PEN_SIZES[PEN_SIZES.length - 1];
-  applyPenSettings();
-});
-
-document.getElementById('drawPenSizeDown').addEventListener('click', () => {
-  const i = PEN_SIZES.indexOf(canvasPenSize);
-  if (i > 0) canvasPenSize = PEN_SIZES[i - 1];
-  else if (i === -1) canvasPenSize = [...PEN_SIZES].reverse().find(s => s < canvasPenSize) || PEN_SIZES[0];
-  applyPenSettings();
-});
 
 document.querySelectorAll('.drawColorBtn').forEach((btn, idx) => {
   btn.addEventListener('click', () => {
@@ -7018,6 +7231,7 @@ els.thumb.addEventListener('click', openLightbox);
 els.lightbox.addEventListener('click', closeLightbox);
 window.addEventListener('resize', () => {
   if (drawIsOpen) resizeDrawCanvas(true);
+  if (calendarIsOpen && calDrawMode) resizeCalDrawOverlay();
 });
 
 window.addEventListener('keydown', (e) => {
@@ -7028,6 +7242,7 @@ window.addEventListener('keydown', (e) => {
     if (audioIsOpen) { closeAudioModal(); return; }
     if (drawIsOpen) { closeDrawModal(); return; }
     if (els.lightbox.style.display === 'flex') { closeLightbox(); return; }
+    if (calendarIsOpen && calDrawMode) { setCalDrawMode(false); return; }
     if (calendarIsOpen) { closeCalendar(); return; }
     // Same as the toolbar back button: return to the parent notes folder
     if (rootFolderPath && folderPath && folderPath !== rootFolderPath) {

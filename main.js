@@ -762,7 +762,20 @@ ipcMain.handle('calendar-scan', async (event, rootPath) => {
       }
     }
     await walk(rootPath, 0);
-    return { success: true, notes: notesOut };
+
+    // Standalone per-day drawings: .noatformat/calendar/YYYY-MM-DD.png
+    const drawings = {};
+    try {
+      const calDir = path.join(rootPath, NOATFORMAT_DIR, 'calendar');
+      const calEntries = await fsp.readdir(calDir, { withFileTypes: true });
+      for (const entry of calEntries) {
+        if (!entry.isFile()) continue;
+        if (!/^\d{4}-\d{2}-\d{2}\.png$/i.test(entry.name)) continue;
+        drawings[entry.name.slice(0, 10)] = path.join(calDir, entry.name);
+      }
+    } catch (_e) { /* no calendar drawings dir: fine */ }
+
+    return { success: true, notes: notesOut, drawings: drawings };
   } catch (e) {
     return { success: false, error: e.message };
   }
