@@ -696,7 +696,7 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
 });
 
 // Recursive lightweight scan for the calendar view: every note in the tree
-// with its timestamps, due date, and best thumbnail path. No text content.
+// with its timestamps and due date. No text content.
 ipcMain.handle('calendar-scan', async (event, rootPath) => {
   try {
     const notesOut = [];
@@ -705,24 +705,8 @@ ipcMain.handle('calendar-scan', async (event, rootPath) => {
       let scan;
       try { scan = await scanFolder(folder, { readContent: false }); } catch (_e) { return; }
 
-      const images = new Map();   // baseKey -> newest non-empty image item
-      const canvases = new Map(); // baseKey -> canvas item (pngPath/pngSize)
-      for (const f of scan.files) {
-        if (f.type === 'image') {
-          if (!(f.size > 0)) continue;
-          const info = sidecarInfo(f.name);
-          if (!info) continue;
-          const prev = images.get(info.baseKey);
-          if (!prev || f.lastModified > prev.lastModified) images.set(info.baseKey, f);
-        } else if (f.type === 'canvas') {
-          const base = f.name.toLowerCase().slice(0, -'.canvas.json'.length);
-          canvases.set(base, f);
-        }
-      }
-
       await mapLimit(scan.files.filter(f => f.type === 'text'), 8, async (f) => {
         const title = f.name.replace(/\.txt$/i, '');
-        const baseKey = title.toLowerCase();
 
         let dueDate = null;
         try {
@@ -735,15 +719,6 @@ ipcMain.handle('calendar-scan', async (event, rootPath) => {
           }
         } catch (_e) { /* no format file or unreadable: no due date */ }
 
-        let thumbPath = null;
-        const img = images.get(baseKey);
-        if (img) {
-          thumbPath = img.path;
-        } else {
-          const cv = canvases.get(baseKey);
-          if (cv && cv.pngPath && cv.pngSize >= 102400) thumbPath = cv.pngPath;
-        }
-
         notesOut.push({
           name: f.name,
           title: title,
@@ -752,7 +727,6 @@ ipcMain.handle('calendar-scan', async (event, rootPath) => {
           created: f.created || 0,
           modified: f.lastModified,
           dueDate: dueDate,
-          thumbPath: thumbPath,
           unavailable: !!f.unavailable
         });
       });

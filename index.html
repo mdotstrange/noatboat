@@ -996,15 +996,6 @@
       border:1px solid var(--note-active-border);
       border-radius:6px;
     }
-    .calCellBg{
-      position:absolute;
-      inset:0;
-      width:100%;
-      height:100%;
-      object-fit:cover;
-      z-index:0;
-      pointer-events:none;
-    }
     .calDayNum{
       font-size:11px;
       color:var(--muted);
@@ -1684,8 +1675,7 @@ let currentDueDate = null;       // 'YYYY-MM-DD' | null for the open note
 let calendarIsOpen = false;
 let calendarMonth = null;        // {year, month 0-11}
 let calendarNotes = [];          // records from api.calendarScan, refreshed per open
-let calRenderGen = 0;            // stale-async guard for thumbnails
-const calThumbCache = new Map(); // path -> dataUrl
+let calRenderGen = 0;            // stale-async guard for async cell loads
 let miniCalIsOpen = false;
 let miniCalMonth = null;
 let latestBoatLines = null;      // current ASCII boat frame, shared with the calendar
@@ -6306,30 +6296,6 @@ function renderCalBoat() {
   ).join('\n');
 }
 
-// Fill a day cell's background with the newest-modified illustrated note's image.
-function applyCellBackground(cellEl, entries, gen) {
-  let best = null;
-  for (const e of entries) {
-    if (e.r.thumbPath && (!best || e.r.modified > best.modified)) best = e.r;
-  }
-  if (!best) return;
-  const img = document.createElement('img');
-  img.className = 'calCellBg';
-  img.alt = '';
-  cellEl.insertBefore(img, cellEl.firstChild);
-  const cached = calThumbCache.get(best.thumbPath);
-  if (cached) {
-    img.src = cached;
-  } else {
-    api.readImageThumbnail(best.thumbPath, 256).then(res => {
-      if (res && res.success && res.dataUrl) {
-        calThumbCache.set(best.thumbPath, res.dataUrl);
-        if (gen === calRenderGen) img.src = res.dataUrl;
-      }
-    }).catch(() => {});
-  }
-}
-
 function renderCalendar() {
   const gen = ++calRenderGen;
   hideCalOverflow();
@@ -6367,7 +6333,6 @@ function renderCalendar() {
       });
       cellEl.appendChild(more);
     }
-    applyCellBackground(cellEl, entries, gen);
     if (calDrawings[cell.ymd]) showCellDrawing(cellEl, cell.ymd, gen);
     if (cell.ymd === today) {
       const boat = document.createElement('pre');
