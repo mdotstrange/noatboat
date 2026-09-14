@@ -59,6 +59,21 @@ async function mapLimit(items, limit, fn) {
   return results;
 }
 
+// Simple counting semaphore: `const release = await acquire(); try {...} finally { release(); }`
+function makeSemaphore(max) {
+  let active = 0;
+  const waiters = [];
+  const release = () => {
+    const next = waiters.shift();
+    if (next) next(); else active--;
+  };
+  return async () => {
+    if (active < max) { active++; return release; }
+    await new Promise((resolve) => waiters.push(resolve));
+    return release;
+  };
+}
+
 // All app-generated sidecar files (canvas, image/audio attachments, format
 // spans) live in a hidden subfolder so the notes folder holds only .txt files.
 const NOATFORMAT_DIR = '.noatformat';
@@ -167,6 +182,71 @@ async function transcodeToMp3DataUrl(inputPath, bitrateKbps = 128) {
   return { path: outPath, dataUrl: `data:audio/mpeg;base64,${b64}` };
 }
 
+// ---------------------------------------------------------------------------
+// DeepSeek (OpenAI-compatible chat completions). Single shared helper used by
+// both the auto-fix feature and the IC recorder import so the API key is only
+// ever used from the main process.
+const DEEPSEEK_MODEL = 'deepseek-flash';
+const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/v1/chat/completions';
+
+async function callDeepSeek({ apiKey, system, user, temperature = 0.2, maxTokens = 4096, timeoutMs = 180000, thinking = false }) {
+  if (!apiKey) throw new Error('DeepSeek API key is not set');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res;
+  try {
+    res = await fetch(DEEPSEEK_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: DEEPSEEK_MODEL,
+        messages: [
+          { role: 'system', content: system || '' },
+          { role: 'user', content: user || '' }
+        ],
+        temperature,
+        max_tokens: maxTokens,
+        // Thinking mode is on by default and its reasoning tokens count against
+        // max_tokens, which left long transcripts with an empty reply. These
+        // editing tasks do not need it.
+        thinking: { type: thinking ? 'enabled' : 'disabled' }
+      }),
+      signal: controller.signal
+    });
+  } catch (e) {
+    if (e && e.name === 'AbortError') throw new Error(`DeepSeek request timed out after ${Math.round(timeoutMs / 1000)}s`);
+    throw new Error(`DeepSeek request failed: ${e.message || e}`);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  const bodyText = await res.text();
+  let data = null;
+  try { data = JSON.parse(bodyText); } catch (_e) {}
+
+  if (!res.ok) {
+    const msg = (data && data.error && data.error.message) || bodyText.slice(0, 200) || res.statusText;
+    throw new Error(`DeepSeek ${res.status}: ${msg}`);
+  }
+  const choice = data && data.choices && data.choices[0];
+  const content = choice && choice.message && choice.message.content;
+  const reason = (choice && choice.finish_reason) || 'unknown';
+  if (typeof content !== 'string' || !content.trim()) {
+    throw new Error(`DeepSeek returned no text (finish_reason: ${reason})`);
+  }
+  if (reason === 'length') {
+    // The reply hit max_tokens and is cut off. Callers may retry with a
+    // bigger budget; never silently accept a truncated edit.
+    const err = new Error(`DeepSeek reply was cut off at ${maxTokens} tokens (finish_reason: length)`);
+    err.code = 'DEEPSEEK_TRUNCATED';
+    err.partialContent = content;
+    throw err;
+  }
+  return content;
+}
 
 // Note: MP3 encoding is done in the renderer process using vendored lamejs (lame.min.js)
 
@@ -377,14 +457,23 @@ ipcMain.handle('save-folder-path', async (event, folderPath) => {
 // Get preferences
 ipcMain.handle('get-preferences', async () => {
   const config = loadConfig();
+  // One-time migration: OpenAI was replaced by DeepSeek as the cloud provider.
+  if (config.autoFixProvider === 'openai' || config.openAIKey !== undefined) {
+    if (config.autoFixProvider === 'openai') config.autoFixProvider = 'deepseek';
+    delete config.openAIKey;
+    saveConfig(config);
+  }
   return {
     theme: config.theme || 'light',
     focusStrength: config.focusStrength !== undefined ? config.focusStrength : 70,
     autoFixMode: config.autoFixMode || 'off',
     autoFixEnabled: config.autoFixEnabled || false, // Legacy support
-    autoFixProvider: config.autoFixProvider || 'openai',
-    openAIKey: config.openAIKey || '',
+    autoFixProvider: config.autoFixProvider || 'deepseek',
+    deepseekKey: config.deepseekKey || '',
     localModelPath: config.localModelPath || '',
+    whisperCliPath: config.whisperCliPath || '',
+    whisperModelPath: config.whisperModelPath || '',
+    icNotesFolder: config.icNotesFolder || '',
     githubToken: config.githubToken || '',
     githubRepo: config.githubRepo || '',
     publishingName: config.publishingName || '',
@@ -401,8 +490,11 @@ ipcMain.handle('save-preferences', async (event, prefs) => {
   if (prefs.focusStrength !== undefined) config.focusStrength = prefs.focusStrength;
   if (prefs.autoFixMode !== undefined) config.autoFixMode = prefs.autoFixMode;
   if (prefs.autoFixProvider !== undefined) config.autoFixProvider = prefs.autoFixProvider;
-  if (prefs.openAIKey !== undefined) config.openAIKey = prefs.openAIKey;
+  if (prefs.deepseekKey !== undefined) config.deepseekKey = prefs.deepseekKey;
   if (prefs.localModelPath !== undefined) config.localModelPath = prefs.localModelPath;
+  if (prefs.whisperCliPath !== undefined) config.whisperCliPath = prefs.whisperCliPath;
+  if (prefs.whisperModelPath !== undefined) config.whisperModelPath = prefs.whisperModelPath;
+  if (prefs.icNotesFolder !== undefined) config.icNotesFolder = prefs.icNotesFolder;
   if (prefs.githubToken !== undefined) config.githubToken = prefs.githubToken;
   if (prefs.githubRepo !== undefined) config.githubRepo = prefs.githubRepo;
   if (prefs.publishingName !== undefined) config.publishingName = prefs.publishingName;
@@ -1080,6 +1172,51 @@ ipcMain.handle('open-model-dialog', async () => {
   return result.filePaths[0];
 });
 
+// Open file picker for the whisper.cpp CLI executable
+ipcMain.handle('open-whisper-cli-dialog', async () => {
+  const filters = process.platform === 'win32'
+    ? [{ name: 'Executables', extensions: ['exe'] }, { name: 'All Files', extensions: ['*'] }]
+    : [{ name: 'All Files', extensions: ['*'] }];
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return result.filePaths[0];
+});
+
+// Open file picker for a whisper.cpp ggml model file
+ipcMain.handle('open-whisper-model-dialog', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters: [
+      { name: 'ggml models', extensions: ['bin'] },
+      { name: 'All Files', extensions: ['*'] }
+    ]
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return result.filePaths[0];
+});
+
+// DeepSeek chat completion (used by auto-fix in the renderer)
+ipcMain.handle('deepseek-chat', async (event, opts) => {
+  try {
+    const o = opts || {};
+    if (!o.apiKey) return { success: false, error: 'DeepSeek API key is not set' };
+    const text = await callDeepSeek({
+      apiKey: o.apiKey,
+      system: o.system,
+      user: o.user,
+      temperature: typeof o.temperature === 'number' ? o.temperature : 0.2,
+      maxTokens: typeof o.maxTokens === 'number' ? o.maxTokens : 4096
+    });
+    return { success: true, text };
+  } catch (e) {
+    console.error('deepseek-chat error:', e);
+    return { success: false, error: String(e.message || e) };
+  }
+});
+
 // Run local LLM inference
 ipcMain.handle('run-local-llm', async (event, modelPath, text) => {
   try {
@@ -1344,6 +1481,881 @@ ipcMain.handle('run-local-llm', async (event, modelPath, text) => {
     console.error('run-local-llm error:', e);
     console.error('Error stack:', e.stack);
     return { success: false, error: String(e.message || e) };
+  }
+});
+
+// ===========================================================================
+// Import from IC (Sony IC recorder -> whisper.cpp -> DeepSeek -> notes)
+// ===========================================================================
+
+const IC_REC_DIR = 'REC_FILE';
+const IC_LEDGER_NAME = 'ic-imports.json';
+const IC_WHISPER_TIMEOUT_MS = 30 * 60 * 1000;
+// Keep each DeepSeek call's output comfortably inside its token budget:
+// ~24k chars of transcript is roughly 6k output tokens.
+const IC_DEEPSEEK_CHUNK_CHARS = 24000;
+const IC_DEEPSEEK_SINGLE_CALL_MAX_CHARS = 30000;
+const IC_DEEPSEEK_MAX_TOKENS = 16384;
+const IC_DEEPSEEK_MAX_TOKENS_CAP = 65536;
+// An edit only cleans up wording, so it should never come back much shorter
+// than the transcript it was given. Shorter than this means it was cut off.
+const IC_EDIT_MIN_LENGTH_RATIO = 0.6;
+// Whisper must have produced text up to (nearly) the end of the speech.
+const IC_WHISPER_MAX_END_GAP_SEC = 30;
+const IC_WHISPER_MIN_COVERAGE = 0.9;
+let icImportRunning = false;
+
+// Readability rules enforced on every edit (prompt + verification + fallback).
+const NOTE_PARA_MAX_WORDS = 120;     // hard limit per paragraph
+const NOTE_PARA_TARGET_WORDS = 90;   // where the deterministic splitter aims
+const NOTE_WORDS_PER_HEADING = 300;  // at least one bold heading per this many words
+const NOTE_MIN_WORDS_FOR_HEADING = 80;
+
+const IC_EDIT_SYSTEM_PROMPT =
+  'You are an editor cleaning up a raw voice-memo transcript (or rough note text). Follow these instructions exactly:\n' +
+  '1) Format the text into readable paragraphs - fixing grammar, spelling and punctuation and managing the flow of the paragraphs to make it more readable - with bold text for the titles of each subsection. Do not edit the text changing words etc; you are just cleaning up what exists and making it more presentable. Keep everything; do not summarise or drop content.\n' +
+  '2) Decide what the title should be based on the contents of the text.\n' +
+  'STRUCTURE RULES (mandatory):\n' +
+  `- Short paragraphs: aim for 40-${NOTE_PARA_TARGET_WORDS} words each and NEVER more than ${NOTE_PARA_MAX_WORDS} words. Split long stretches at natural sentence boundaries. Separate paragraphs with one blank line.\n` +
+  `- Subsection headings: put a short bold heading (2-6 words) before every group of 2-4 paragraphs, whenever the topic shifts. The very first line of the edited text must be a heading. For long texts that means at least one heading per ${NOTE_WORDS_PER_HEADING} words.\n` +
+  '- Mark every heading by wrapping it in double asterisks on its own line, e.g. **Subsection Title**. Use no other markdown (no #, no bullets, no code fences, no --- lines).\n' +
+  'Respond in plain text using exactly this layout and nothing else:\n' +
+  'Title: <short title, max 80 characters, one line>\n' +
+  '\n' +
+  '<the edited text>';
+
+// Second pass when the first result is under-structured: same text back,
+// only allowed to insert headings and paragraph breaks.
+const IC_RESTRUCTURE_SYSTEM_PROMPT =
+  'You are restructuring an already-edited note for readability. Do NOT change, reorder, add or remove any words or sentences. You may only:\n' +
+  `- insert blank lines to split paragraphs so that every paragraph is between 40 and ${NOTE_PARA_TARGET_WORDS} words (hard maximum ${NOTE_PARA_MAX_WORDS}), splitting only between sentences;\n` +
+  `- insert short bold subsection headings (2-6 words, on their own line, wrapped in double asterisks like **Heading**) before every group of 2-4 paragraphs, with at least one heading per ${NOTE_WORDS_PER_HEADING} words, and one as the very first line.\n` +
+  'Keep existing **headings**. Use no other markdown. Respond with ONLY the restructured text, no title line, no commentary.';
+
+function getIcImportCacheDir() {
+  const dir = path.join(app.getPath('userData'), 'ic-import-cache');
+  try {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  } catch (_e) {}
+  return dir;
+}
+
+function isDirSync(p) {
+  try { return fs.statSync(p).isDirectory(); } catch (_e) { return false; }
+}
+
+function isFileSync(p) {
+  try { return fs.statSync(p).isFile(); } catch (_e) { return false; }
+}
+
+// Find every mounted IC recorder's REC_FILE directory. First hit wins.
+function findIcRecorderRoots() {
+  const roots = [];
+  const envDir = process.env.NOATBOAT_IC_REC_FILE;
+  if (envDir && isDirSync(envDir)) return [envDir];
+
+  const tryAdd = (p) => { if (isDirSync(p)) roots.push(p); };
+
+  if (process.platform === 'win32') {
+    const letters = 'CDEFGHIJKLMNOPQRSTUVWXYZAB'.split('');
+    for (const L of letters) tryAdd(`${L}:\\${IC_REC_DIR}`);
+  } else if (process.platform === 'darwin') {
+    tryAdd(path.join('/Volumes', 'IC RECORDER', IC_REC_DIR));
+    try {
+      for (const v of fs.readdirSync('/Volumes')) {
+        const p = path.join('/Volumes', v, IC_REC_DIR);
+        if (!roots.includes(p)) tryAdd(p);
+      }
+    } catch (_e) {}
+  } else {
+    let user = '';
+    try { user = os.userInfo().username; } catch (_e) {}
+    for (const base of [`/media/${user}`, `/run/media/${user}`, '/media', '/mnt']) {
+      try {
+        for (const v of fs.readdirSync(base)) tryAdd(path.join(base, v, IC_REC_DIR));
+      } catch (_e) {}
+    }
+  }
+  return roots;
+}
+
+// List every .mp3 under REC_FILE/FOLDER* sorted oldest first.
+function listIcRecordings(recFileDir) {
+  const out = [];
+  let entries = [];
+  try { entries = fs.readdirSync(recFileDir, { withFileTypes: true }); } catch (_e) { return out; }
+  for (const ent of entries) {
+    if (!ent.isDirectory() || !/^FOLDER\d*$/i.test(ent.name)) continue;
+    const dir = path.join(recFileDir, ent.name);
+    let files = [];
+    try { files = fs.readdirSync(dir, { withFileTypes: true }); } catch (_e) { continue; }
+    for (const f of files) {
+      if (!f.isFile() || !/\.mp3$/i.test(f.name)) continue;
+      const p = path.join(dir, f.name);
+      try {
+        const st = fs.statSync(p);
+        out.push({ name: f.name, path: p, size: st.size, mtimeMs: st.mtimeMs, folder: ent.name });
+      } catch (_e) {}
+    }
+  }
+  out.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  return out;
+}
+
+function icLedgerPath(icNotesFolder) {
+  return path.join(icNotesFolder, NOATFORMAT_DIR, IC_LEDGER_NAME);
+}
+
+function loadIcLedger(ledgerPath) {
+  try {
+    if (fs.existsSync(ledgerPath)) {
+      const parsed = JSON.parse(fs.readFileSync(ledgerPath, 'utf8'));
+      if (parsed && typeof parsed === 'object' && parsed.imports && typeof parsed.imports === 'object') {
+        return { version: 1, imports: parsed.imports };
+      }
+    }
+  } catch (e) {
+    console.warn('IC import ledger unreadable, starting fresh:', e.message);
+  }
+  return { version: 1, imports: {} };
+}
+
+function saveIcLedger(ledgerPath, ledger) {
+  fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
+  const tmp = ledgerPath + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(ledger, null, 2), 'utf8');
+  fs.renameSync(tmp, ledgerPath);
+}
+
+function icImportKey(rec) {
+  return `${rec.name}|${rec.size}|${Math.round(rec.mtimeMs)}`;
+}
+
+// FAT mtimes are 2s-granular and drift with timezone handling across OSes, so a
+// name+size match is also treated as already imported.
+function isAlreadyImported(ledger, rec) {
+  if (ledger.imports[icImportKey(rec)]) return true;
+  const lowerName = rec.name.toLowerCase();
+  for (const entry of Object.values(ledger.imports)) {
+    if (!entry) continue;
+    if (String(entry.sourceName || '').toLowerCase() === lowerName && entry.sourceSize === rec.size) return true;
+  }
+  return false;
+}
+
+function transcodeForWhisper(mp3Path, wavPath) {
+  // whisper.cpp requires 16 kHz mono signed 16-bit PCM WAV.
+  return runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', mp3Path, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', '-f', 'wav', wavPath]);
+}
+
+function runWhisperCli(cliPath, modelPath, wavPath, outBase) {
+  return new Promise((resolve, reject) => {
+    if (!isFileSync(cliPath)) { reject(new Error(`whisper-cli not found: ${cliPath}`)); return; }
+    if (!isFileSync(modelPath)) { reject(new Error(`Whisper model not found: ${modelPath}`)); return; }
+    // -oj also writes <outBase>.json with per-segment offsets so we can verify
+    // the transcript reaches the end of the audio.
+    // -mc 0: do not feed the previous segment back in as context. With context
+    // on, Whisper falls into repetition loops on long memos and silently
+    // replaces minutes of speech with one phrase repeated (measured: ~40%
+    // of a 10-minute memo lost). Without it the transcript is complete.
+    const args = ['-m', modelPath, '-f', wavPath, '-nt', '-np', '-otxt', '-oj', '-of', outBase, '-l', 'auto', '-mc', '0'];
+    let p;
+    try {
+      p = spawn(cliPath, args, { windowsHide: true, cwd: path.dirname(cliPath) });
+    } catch (e) {
+      reject(new Error(`Could not start whisper-cli: ${e.message}`));
+      return;
+    }
+    let stdout = '';
+    let stderr = '';
+    p.stdout.on('data', (d) => { stdout += d.toString(); });
+    p.stderr.on('data', (d) => { stderr += d.toString(); if (stderr.length > 20000) stderr = stderr.slice(-20000); });
+    p.on('error', (err) => {
+      const hint = err && err.code === 'EACCES' ? ' (not executable - run: chmod +x on the whisper-cli binary)' : '';
+      reject(new Error(`whisper-cli failed to start: ${err.message}${hint}`));
+    });
+    p.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error((stderr || '').trim().split('\n').slice(-5).join('\n') || `whisper-cli exited with code ${code}`));
+        return;
+      }
+      const txtPath = outBase + '.txt';
+      let text = '';
+      try {
+        if (fs.existsSync(txtPath)) text = fs.readFileSync(txtPath, 'utf8');
+      } catch (_e) {}
+      if (!text.trim()) text = stdout;
+      // Segment offsets (ms) from the JSON output, when the build provides it.
+      let lastEndMs = null;
+      let segmentCount = null;
+      try {
+        const jsonPath = outBase + '.json';
+        if (fs.existsSync(jsonPath)) {
+          const j = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+          const segs = Array.isArray(j.transcription) ? j.transcription : [];
+          segmentCount = segs.length;
+          for (const s of segs) {
+            const to = s && s.offsets && Number(s.offsets.to);
+            if (Number.isFinite(to) && (lastEndMs === null || to > lastEndMs)) lastEndMs = to;
+          }
+        }
+      } catch (_e) {}
+      resolve({ text, lastEndMs, segmentCount });
+    });
+  });
+}
+
+// Whisper can fall into a loop that repeats one phrase over and over. Collapse
+// any sentence/line repeated 3+ times in a row down to a single copy.
+function collapseRepetitions(text) {
+  const units = String(text || '').split(/(?<=[.!?])\s+|\n+/).map(u => u.trim()).filter(Boolean);
+  const out = [];
+  let i = 0;
+  while (i < units.length) {
+    const norm = units[i].toLowerCase();
+    let j = i;
+    while (j < units.length && units[j].toLowerCase() === norm) j++;
+    const count = j - i;
+    if (count >= 3) out.push(units[i]);           // a loop: keep one copy
+    else for (let k = i; k < j; k++) out.push(units[k]); // 1-2 copies may be genuine
+    i = j;
+  }
+  return out.join(' ');
+}
+
+// Seconds of audio in a 16 kHz mono 16-bit WAV.
+function wavDurationSec(wavPath) {
+  try { return Math.max(0, (fs.statSync(wavPath).size - 44) / 32000); } catch (_e) { return 0; }
+}
+
+// Where speech effectively ends: the start of an unterminated trailing
+// silence (recorder left running), else the full duration.
+function detectSpeechEndSec(wavPath, durationSec) {
+  return new Promise((resolve) => {
+    if (!ffmpegPath) { resolve(durationSec); return; }
+    const p = spawn(ffmpegPath, ['-hide_banner', '-nostats', '-i', wavPath, '-af', 'silencedetect=noise=-35dB:d=3', '-f', 'null', '-'], { windowsHide: true });
+    let err = '';
+    p.stderr.on('data', (d) => { err += d.toString(); if (err.length > 200000) err = err.slice(-200000); });
+    p.on('error', () => resolve(durationSec));
+    p.on('close', () => {
+      let lastStart = null;
+      let lastEnd = null;
+      for (const m of err.matchAll(/silence_(start|end): *([\d.]+)/g)) {
+        const v = parseFloat(m[2]);
+        if (m[1] === 'start') lastStart = v; else lastEnd = v;
+      }
+      if (lastStart !== null && (lastEnd === null || lastEnd < lastStart)) resolve(Math.max(0, lastStart));
+      else resolve(durationSec);
+    });
+  });
+}
+
+function stripCodeFences(s) {
+  let t = String(s || '').trim();
+  const m = t.match(/^```[a-zA-Z]*\s*\n([\s\S]*?)\n```\s*$/);
+  if (m) t = m[1].trim();
+  return t;
+}
+
+function cleanTitle(t) {
+  return String(t || '').replace(/[*_#`"]/g, '').replace(/\s+/g, ' ').trim().slice(0, 80);
+}
+
+// Decode a JSON-ish string value that may contain raw (unescaped) newlines.
+function decodeLooseJsonString(s) {
+  return s.replace(/\\(["\\/bfnrt]|u[0-9a-fA-F]{4})/g, (_m, c) => {
+    switch (c[0]) {
+      case '"': return '"'; case '\\': return '\\'; case '/': return '/';
+      case 'b': return '\b'; case 'f': return '\f'; case 'n': return '\n';
+      case 'r': return '\r'; case 't': return '\t';
+      default: return String.fromCharCode(parseInt(c.slice(1), 16));
+    }
+  });
+}
+
+// Parse a DeepSeek editing reply into { title, body }.
+// Preferred layout is "Title: ...\n\n<body>"; legacy JSON replies (possibly
+// with raw newlines inside the strings) are also understood.
+function parseDeepSeekNote(raw, fallbackTitle) {
+  const cleaned = stripCodeFences(raw).replace(/\r\n?/g, '\n');
+  const trimmed = cleaned.trim();
+
+  // 1) Legacy / accidental JSON
+  if (trimmed.startsWith('{')) {
+    const last = trimmed.lastIndexOf('}');
+    const jsonText = last > 0 ? trimmed.slice(0, last + 1) : trimmed;
+    try {
+      const parsed = JSON.parse(jsonText);
+      if (parsed && typeof parsed.body === 'string' && parsed.body.trim()) {
+        return { title: cleanTitle(parsed.title) || fallbackTitle, body: parsed.body };
+      }
+    } catch (_e) {}
+    const tm = jsonText.match(/"title"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    const bm = jsonText.match(/"body"\s*:\s*"([\s\S]*?)"\s*}?\s*$/);
+    if (bm && bm[1].trim()) {
+      return { title: cleanTitle(tm ? decodeLooseJsonString(tm[1]) : '') || fallbackTitle, body: decodeLooseJsonString(bm[1]) };
+    }
+  }
+
+  // 2) "Title: ..." first line
+  const lines = trimmed.split('\n');
+  let i = 0;
+  while (i < lines.length && !lines[i].trim()) i++;
+  const tm = i < lines.length ? lines[i].match(/^\s*[*_#\s]*title[*_\s]*:\s*(.+?)\s*$/i) : null;
+  if (tm) {
+    const body = lines.slice(i + 1).join('\n').trim();
+    if (body) return { title: cleanTitle(tm[1]) || fallbackTitle, body };
+  }
+
+  // 3) Fallback: whole reply is the body; title from its first line
+  const firstLine = lines.map(l => cleanTitle(l)).find(l => l.length > 0) || '';
+  return { title: (firstLine.startsWith('{') ? '' : firstLine) || fallbackTitle, body: trimmed || String(raw || '') };
+}
+
+function splitTranscriptIntoChunks(transcript, maxChars) {
+  const paras = transcript.split(/\n\s*\n/);
+  const chunks = [];
+  let cur = '';
+  for (const p of paras) {
+    if (cur && (cur.length + p.length + 2) > maxChars) { chunks.push(cur); cur = ''; }
+    if (p.length > maxChars) {
+      if (cur) { chunks.push(cur); cur = ''; }
+      for (let i = 0; i < p.length; i += maxChars) chunks.push(p.slice(i, i + maxChars));
+      continue;
+    }
+    cur = cur ? cur + '\n\n' + p : p;
+  }
+  if (cur) chunks.push(cur);
+  return chunks.length ? chunks : [transcript];
+}
+
+// Length sanity check: strip formatting markers before comparing so bold
+// markup and paragraph breaks do not skew the ratio.
+function editedLengthRatio(edited, source) {
+  const norm = (s) => String(s || '').replace(/\*\*/g, '').replace(/\s+/g, ' ').trim().length;
+  const src = norm(source);
+  return src === 0 ? 1 : norm(edited) / src;
+}
+
+async function editTranscriptWithDeepSeek(apiKey, transcript, fallbackTitle) {
+  const callOne = async (text) => {
+    let maxTokens = IC_DEEPSEEK_MAX_TOKENS;
+    let lastErr = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let raw;
+      try {
+        raw = await callDeepSeek({
+          apiKey,
+          system: IC_EDIT_SYSTEM_PROMPT,
+          user: text,
+          temperature: 0.3,
+          maxTokens,
+          timeoutMs: 10 * 60 * 1000
+        });
+      } catch (e) {
+        if (e && e.code === 'DEEPSEEK_TRUNCATED' && maxTokens < IC_DEEPSEEK_MAX_TOKENS_CAP) {
+          console.warn(`DeepSeek reply truncated at ${maxTokens} tokens; retrying with a larger budget`);
+          maxTokens = Math.min(maxTokens * 2, IC_DEEPSEEK_MAX_TOKENS_CAP);
+          lastErr = e;
+          continue;
+        }
+        throw e;
+      }
+      const parsed = parseDeepSeekNote(raw, fallbackTitle);
+      const ratio = editedLengthRatio(parsed.body, text);
+      if (ratio >= IC_EDIT_MIN_LENGTH_RATIO) return parsed;
+      lastErr = new Error(`DeepSeek edit looks cut off (${Math.round(ratio * 100)}% of the transcript length)`);
+      console.warn(lastErr.message + (attempt < 2 ? '; retrying' : ''));
+    }
+    throw lastErr || new Error('DeepSeek edit failed');
+  };
+  if (transcript.length <= IC_DEEPSEEK_SINGLE_CALL_MAX_CHARS) return callOne(transcript);
+
+  const chunks = splitTranscriptIntoChunks(transcript, IC_DEEPSEEK_CHUNK_CHARS);
+  let title = '';
+  const bodies = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const r = await callOne(chunks[i]);
+    if (i === 0) title = r.title;
+    bodies.push(r.body.trim());
+  }
+  return { title: title || fallbackTitle, body: bodies.join('\n\n') };
+}
+
+// Convert **bold** markers into plain text plus Noat Boat bold spans
+// (character offsets into the returned text).
+function markdownBoldToSpans(text) {
+  let src = String(text || '').replace(/\r\n?/g, '\n').replace(/[ \t]+$/gm, '').trim();
+  // Markdown headings ("## Title") become bold lines too.
+  src = src.replace(/^#{1,6}[ \t]+(.+?)[ \t]*#*$/gm, (_m, t) => /^\*\*.*\*\*$/.test(t.trim()) ? t.trim() : `**${t.trim()}**`);
+  const re = /\*\*([^*\n][^*\n]*?)\*\*/g;
+  let out = '';
+  let last = 0;
+  const spans = [];
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    out += src.slice(last, m.index);
+    const start = out.length;
+    out += m[1];
+    spans.push({ start, end: out.length, type: 'bold' });
+    last = m.index + m[0].length;
+  }
+  out += src.slice(last);
+  // Stray markers: strip them and shift the spans that follow each removal.
+  let idx;
+  while ((idx = out.indexOf('**')) !== -1) {
+    out = out.slice(0, idx) + out.slice(idx + 2);
+    for (const sp of spans) {
+      if (sp.start > idx) sp.start -= 2;
+      if (sp.end > idx) sp.end -= 2;
+    }
+  }
+  return { text: out, spans: spans.filter(sp => sp.end > sp.start) };
+}
+
+// One whisper-cli at a time, app-wide: note jobs and IC import share this
+// queue so N requests never mean N CPU-bound whisper processes.
+let whisperChain = Promise.resolve();
+function runWhisperQueued(fn) {
+  const run = whisperChain.then(fn, fn);   // run even if the previous job failed
+  whisperChain = run.catch(() => {});      // never poison the chain
+  return run;
+}
+
+// DeepSeek calls may overlap, but not without limit.
+const acquireDeepSeek = makeSemaphore(3);
+
+// Convert one audio file to text with ffmpeg + whisper-cli, waiting for the
+// whisper queue first.
+async function transcribeAudioToText(audioPath, whisperCliPath, whisperModelPath, onPhase) {
+  if (onPhase) onPhase('queued', 'Waiting for Whisper');
+  return runWhisperQueued(() => transcribeAudioToTextNow(audioPath, whisperCliPath, whisperModelPath, onPhase));
+}
+
+// The actual ffmpeg + whisper-cli run. Temp files live in the ic-import cache
+// under unique hashed names and are always removed.
+async function transcribeAudioToTextNow(audioPath, whisperCliPath, whisperModelPath, onPhase) {
+  if (!ffmpegPath) throw new Error('ffmpeg is not available; cannot convert audio');
+  if (!isFileSync(audioPath)) throw new Error(`Audio file not found: ${audioPath}`);
+  const cacheDir = getIcImportCacheDir();
+  const sig = getFileSignature(audioPath);
+  const hash = crypto.createHash('sha1').update(`${audioPath}|${sig}|${Date.now()}`).digest('hex');
+  const wavPath = path.join(cacheDir, `${hash}.wav`);
+  const outBase = path.join(cacheDir, hash);
+  try {
+    if (onPhase) onPhase('transcode', 'Converting audio');
+    await transcodeForWhisper(audioPath, wavPath);
+    const durationSec = wavDurationSec(wavPath);
+    const speechEndSec = await detectSpeechEndSec(wavPath, durationSec);
+
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (onPhase) onPhase('transcribe', attempt === 0 ? 'Transcribing with Whisper' : 'Re-transcribing with Whisper');
+      const r = await withTimeout(runWhisperCli(whisperCliPath, whisperModelPath, wavPath, outBase), IC_WHISPER_TIMEOUT_MS, 'Whisper transcription');
+      const text = String((r && r.text) || '').trim();
+      if (!text) { lastErr = new Error('Empty transcript'); continue; }
+
+      // Completeness: the last segment must reach (nearly) the end of speech.
+      if (r.lastEndMs !== null && speechEndSec > 0) {
+        const lastEndSec = r.lastEndMs / 1000;
+        const gap = speechEndSec - lastEndSec;
+        const coverage = lastEndSec / speechEndSec;
+        if (gap > IC_WHISPER_MAX_END_GAP_SEC && coverage < IC_WHISPER_MIN_COVERAGE) {
+          lastErr = new Error(`Transcription incomplete: Whisper stopped at ${Math.round(lastEndSec)}s of ${Math.round(speechEndSec)}s of speech`);
+          console.warn(lastErr.message + (attempt === 0 ? '; retrying' : ''));
+          continue;
+        }
+      } else if (r.lastEndMs === null) {
+        console.warn('whisper-cli produced no JSON segment data; skipping completeness check');
+      }
+      return collapseRepetitions(text);
+    }
+    throw lastErr || new Error('Transcription failed');
+  } finally {
+    try { fs.unlinkSync(wavPath); } catch (_e) {}
+    try { fs.unlinkSync(outBase + '.txt'); } catch (_e) {}
+    try { fs.unlinkSync(outBase + '.json'); } catch (_e) {}
+  }
+}
+
+// --- Structure verification on the markdown body (before span conversion) ---
+const MD_HEADING_LINE_RE = /^\s*\*\*[^*\n]+\*\*\s*$/;
+
+function countWords(s) {
+  const t = String(s || '').trim();
+  return t ? t.split(/\s+/).length : 0;
+}
+
+function noteStructureStats(md) {
+  const paras = String(md || '').replace(/\r\n?/g, '\n').split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+  let headings = 0;
+  let maxParaWords = 0;
+  let words = 0;
+  for (const p of paras) {
+    const lines = p.split('\n');
+    const bodyLines = [];
+    for (const l of lines) {
+      if (MD_HEADING_LINE_RE.test(l)) headings++; else bodyLines.push(l);
+    }
+    const w = countWords(bodyLines.join(' ').replace(/\*\*/g, ''));
+    words += w;
+    if (w > maxParaWords) maxParaWords = w;
+  }
+  return { words, paras: paras.length, headings, maxParaWords };
+}
+
+function expectedHeadings(words) {
+  if (words < NOTE_MIN_WORDS_FOR_HEADING) return 0;
+  return Math.max(1, Math.floor(words / NOTE_WORDS_PER_HEADING));
+}
+
+function structureOk(stats) {
+  return stats.maxParaWords <= NOTE_PARA_MAX_WORDS && stats.headings >= expectedHeadings(stats.words);
+}
+
+// Deterministic fallback: split any paragraph over the limit at sentence
+// boundaries into chunks of about NOTE_PARA_TARGET_WORDS words.
+function splitLongParagraphsMd(md) {
+  const paras = String(md || '').replace(/\r\n?/g, '\n').split(/\n\s*\n/);
+  const out = [];
+  for (const para of paras) {
+    const p = para.trim();
+    if (!p) continue;
+    if (countWords(p) <= NOTE_PARA_MAX_WORDS || /\n/.test(p) && p.split('\n').some(l => MD_HEADING_LINE_RE.test(l)) && countWords(p) <= NOTE_PARA_MAX_WORDS + 6) { out.push(p); continue; }
+    // Keep a leading heading line attached to the first chunk.
+    const lines = p.split('\n');
+    let heading = '';
+    let text = p;
+    if (MD_HEADING_LINE_RE.test(lines[0])) { heading = lines[0].trim(); text = lines.slice(1).join(' ').trim(); }
+    else text = lines.join(' ').trim();
+    const sentences = text.split(/(?<=[.!?…]["')\]]?)\s+/).filter(Boolean);
+    const chunks = [];
+    let cur = [];
+    let curWords = 0;
+    for (const s of sentences) {
+      const w = countWords(s);
+      if (cur.length && curWords + w > NOTE_PARA_TARGET_WORDS) { chunks.push(cur.join(' ')); cur = []; curWords = 0; }
+      cur.push(s);
+      curWords += w;
+    }
+    if (cur.length) chunks.push(cur.join(' '));
+    if (heading) chunks[0] = heading + '\n' + chunks[0];
+    out.push(...chunks);
+  }
+  return out.join('\n\n');
+}
+
+// Old-tool style "--- Title ---" heading lines become bold headings.
+function normaliseDashHeadings(md) {
+  return String(md || '').replace(/^[ \t]*-{3,}[ \t]*(.+?)[ \t]*-{3,}[ \t]*$/gm, (_m, t) => `**${t.trim()}**`);
+}
+
+async function restructureWithDeepSeek(apiKey, body) {
+  const raw = await callDeepSeek({
+    apiKey,
+    system: IC_RESTRUCTURE_SYSTEM_PROMPT,
+    user: body,
+    temperature: 0.2,
+    maxTokens: IC_DEEPSEEK_MAX_TOKENS,
+    timeoutMs: 10 * 60 * 1000
+  });
+  let out = stripCodeFences(raw).replace(/\r\n?/g, '\n').trim();
+  out = out.replace(/^\s*[*_#\s]*title[*_\s]*:.*\n+/i, ''); // tolerate a stray title line
+  const ratio = editedLengthRatio(out, body);
+  if (ratio < 0.85 || ratio > 1.2) throw new Error(`Restructure pass changed the text length (${Math.round(ratio * 100)}%)`);
+  return out;
+}
+
+// Shared "edit + bold" step used by IC import, Transcribe Audio and Format Text.
+// Guarantees the structure rules: verified after the edit, one restructure pass
+// if needed, then a deterministic paragraph split as the last resort.
+async function editTextToNote(apiKey, rawText, fallbackTitle) {
+  const release = await acquireDeepSeek();
+  try {
+    const source = normaliseDashHeadings(rawText);
+    const edited = await editTranscriptWithDeepSeek(apiKey, source, fallbackTitle);
+    const title = edited.title;
+    let body = normaliseDashHeadings(edited.body);
+    let stats = noteStructureStats(body);
+    for (let pass = 0; pass < 2 && !structureOk(stats); pass++) {
+      console.warn(`Edit under-structured (max para ${stats.maxParaWords} words, ${stats.headings} headings for ${stats.words} words); restructuring (pass ${pass + 1})`);
+      try {
+        const restructured = await restructureWithDeepSeek(apiKey, body);
+        const s2 = noteStructureStats(restructured);
+        // Accept the pass if it improved either measure without breaking the other.
+        if (s2.headings >= stats.headings && s2.maxParaWords <= Math.max(stats.maxParaWords, NOTE_PARA_MAX_WORDS)) { body = restructured; stats = s2; }
+      } catch (e) {
+        console.warn('Restructure pass failed:', e.message);
+      }
+    }
+    if (stats.maxParaWords > NOTE_PARA_MAX_WORDS) {
+      body = splitLongParagraphsMd(body);
+      stats = noteStructureStats(body);
+    }
+    if (stats.headings < expectedHeadings(stats.words)) {
+      console.warn(`Note still has ${stats.headings} heading(s) for ${stats.words} words after restructuring`);
+    }
+    const { text, spans } = markdownBoldToSpans(body);
+    if (!text.trim()) throw new Error('DeepSeek returned an empty note');
+    return { title, text, spans };
+  } finally {
+    release();
+  }
+}
+
+// Mirrors sanitizeTitleToFilename in the renderer so both agree on names.
+function sanitizeTitleToFilenameMain(title) {
+  let t = (title || '').trim();
+  if (t.toLowerCase().endsWith('.txt')) t = t.slice(0, -4);
+  t = t.replace(/[\\\/:*?"<>|]/g, ' ');
+  t = t.replace(/\s+/g, ' ').trim();
+  if (t.length > 120) t = t.slice(0, 120).trim();
+  return t;
+}
+
+function uniqueNoteName(dir, title) {
+  let existing = new Set();
+  try { existing = new Set(fs.readdirSync(dir).map(n => n.toLowerCase())); } catch (_e) {}
+  let name = `${title}.txt`;
+  let i = 1;
+  while (existing.has(name.toLowerCase())) name = `${title} (${i++}).txt`;
+  return name;
+}
+
+function ymdLocal(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// Sony recorders name files YYMMDD_HHMM.mp3; prefer that over the FAT mtime.
+function recordedDateFor(rec) {
+  const m = rec.name.match(/^(\d{2})(\d{2})(\d{2})_\d{4}/);
+  if (m) {
+    const mm = parseInt(m[2], 10), dd = parseInt(m[3], 10);
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) return `20${m[1]}-${m[2]}-${m[3]}`;
+  }
+  return ymdLocal(rec.mtimeMs);
+}
+
+ipcMain.handle('ic-import-run', async (event, opts) => {
+  const o = opts || {};
+  if (icImportRunning) return { success: false, error: 'An import is already running' };
+
+  if (!o.deepseekKey) return { success: false, error: 'DeepSeek API key is not set' };
+  if (!o.whisperCliPath || !isFileSync(o.whisperCliPath)) return { success: false, error: `whisper-cli not found: ${o.whisperCliPath || '(not set)'}` };
+  if (!o.whisperModelPath || !isFileSync(o.whisperModelPath)) return { success: false, error: `Whisper model not found: ${o.whisperModelPath || '(not set)'}` };
+  if (!o.icNotesFolder) return { success: false, error: 'Transcribed notes folder is not set' };
+  if (!ffmpegPath) return { success: false, error: 'ffmpeg is not available; cannot convert recordings' };
+
+  const send = (p) => { try { event.sender.send('ic-import-progress', p); } catch (_e) {} };
+
+  const recFileDir = o.recFileDir || findIcRecorderRoots()[0];
+  if (!recFileDir || !isDirSync(recFileDir)) {
+    return { success: false, noDevice: true, error: 'No IC RECORDER found - plug it in and try again' };
+  }
+
+  icImportRunning = true;
+  const imported = [];
+  const errors = [];
+  let skipped = 0;
+  try {
+    send({ phase: 'scan', message: 'Scanning recorder...' });
+    const all = listIcRecordings(recFileDir);
+
+    const sidecarDir = path.join(o.icNotesFolder, NOATFORMAT_DIR);
+    fs.mkdirSync(sidecarDir, { recursive: true });
+    const ledgerPath = icLedgerPath(o.icNotesFolder);
+    const ledger = loadIcLedger(ledgerPath);
+
+    const todo = all.filter(rec => !isAlreadyImported(ledger, rec));
+    skipped = all.length - todo.length;
+    const total = todo.length;
+    send({ phase: 'scan', message: `Found ${all.length} recording(s), ${total} new`, total, current: 0 });
+
+    for (let i = 0; i < todo.length; i++) {
+      const rec = todo[i];
+      const current = i + 1;
+      try {
+        const transcript = await transcribeAudioToText(rec.path, o.whisperCliPath, o.whisperModelPath,
+          (phase, message) => send({ phase, current, total, file: rec.name, message }));
+
+        send({ phase: 'edit', current, total, file: rec.name, message: 'Editing with DeepSeek' });
+        const fallbackTitle = rec.name.replace(/\.mp3$/i, '');
+        const { title, text, spans } = await editTextToNote(o.deepseekKey, transcript, fallbackTitle);
+
+        send({ phase: 'write', current, total, file: rec.name, message: 'Saving note' });
+        const recordedAt = recordedDateFor(rec);
+        const base = sanitizeTitleToFilenameMain(title) || 'Recording';
+        const noteName = uniqueNoteName(o.icNotesFolder, `${base} - ${recordedAt}`);
+        const noteBase = noteName.slice(0, -4);
+
+        fs.writeFileSync(path.join(o.icNotesFolder, noteName), text, 'utf8');
+        const icSource = { name: rec.name, size: rec.size, mtime: rec.mtimeMs, recordedAt, folder: rec.folder };
+        fs.writeFileSync(path.join(sidecarDir, `${noteBase}.format.json`), JSON.stringify({ spans, icSource }), 'utf8');
+        fs.copyFileSync(rec.path, path.join(sidecarDir, `${noteBase}.mp3`));
+
+        ledger.imports[icImportKey(rec)] = {
+          note: noteName,
+          importedAt: new Date().toISOString(),
+          sourceName: rec.name,
+          sourceSize: rec.size,
+          sourceMtime: rec.mtimeMs,
+          sourceFolder: rec.folder
+        };
+        saveIcLedger(ledgerPath, ledger);
+
+        imported.push({ note: noteName, source: rec.name });
+        send({ phase: 'done-file', current, total, file: rec.name, note: noteName, message: 'Imported' });
+      } catch (e) {
+        const msg = String((e && e.message) || e);
+        console.error('IC import failed for', rec.name, msg);
+        errors.push({ file: rec.name, error: msg });
+        send({ phase: 'error', current, total, file: rec.name, message: msg });
+      }
+    }
+    return { success: true, imported, skipped, errors, recFileDir };
+  } catch (e) {
+    console.error('ic-import-run error:', e);
+    return { success: false, imported, skipped, errors, recFileDir, error: String((e && e.message) || e) };
+  } finally {
+    icImportRunning = false;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Per-note AI jobs (Transcribe Audio / Format Text). Any number of notes may
+// have a job at once (one per note). Jobs run in the background; whisper runs
+// are serialised through runWhisperQueued and DeepSeek through acquireDeepSeek.
+// Progress and completion go out on 'note-ai-progress' as
+//   { jobId, notePath, noteName, kind, phase, message, result?, error? }
+// with phase in queued | transcode | transcribe | edit | done | error.
+// The main process never writes note files on its own; the renderer decides
+// (conflict prompts live there) and calls 'note-ai-write-result'.
+const noteAiJobs = new Map(); // jobId -> job
+let noteAiSeq = 0;
+
+function noteKeyOf(p) {
+  const r = path.resolve(String(p || ''));
+  return (process.platform === 'win32' || process.platform === 'darwin') ? r.toLowerCase() : r;
+}
+
+function activeNoteAiJobFor(notePath) {
+  const k = noteKeyOf(notePath);
+  for (const j of noteAiJobs.values()) if (j.noteKey === k) return j;
+  return null;
+}
+
+function noteAiPublic(j) {
+  return { jobId: j.jobId, kind: j.kind, notePath: j.notePath, noteName: j.noteName, phase: j.phase, message: j.message, startedText: j.startedText, startedAt: j.startedAt };
+}
+
+async function runNoteAiJob(job, o) {
+  const send = (phase, message, extra) => {
+    job.phase = phase;
+    job.message = message;
+    const payload = { jobId: job.jobId, notePath: job.notePath, noteName: job.noteName, kind: job.kind, phase, message, ...(extra || {}) };
+    let wc = null;
+    try {
+      if (job.sender && !job.sender.isDestroyed()) wc = job.sender;
+      else if (mainWindow && !mainWindow.isDestroyed()) wc = mainWindow.webContents;
+    } catch (_e) {}
+    try { if (wc) wc.send('note-ai-progress', payload); } catch (_e) {}
+  };
+  try {
+    let raw;
+    let transcript = null;
+    let fallbackTitle;
+    if (job.kind === 'transcribe') {
+      transcript = await transcribeAudioToText(o.audioPath, o.whisperCliPath, o.whisperModelPath, send);
+      raw = transcript;
+      fallbackTitle = path.basename(o.audioPath).replace(/\.[^.]+$/, '');
+    } else {
+      raw = String(o.text || '').trim();
+      fallbackTitle = o.fallbackTitle || 'Note';
+    }
+    send('edit', job.kind === 'transcribe' ? 'Editing with DeepSeek' : 'Formatting with DeepSeek');
+    const { title, text, spans } = await editTextToNote(o.deepseekKey, raw, fallbackTitle);
+    send('done', 'Done', { result: { title, text, spans, transcript } });
+  } catch (e) {
+    console.error('note-ai job failed:', job.kind, job.notePath, e);
+    send('error', 'Failed', { error: String((e && e.message) || e) });
+  } finally {
+    noteAiJobs.delete(job.jobId);
+  }
+}
+
+ipcMain.handle('note-ai-start', async (event, opts) => {
+  const o = opts || {};
+  if (o.kind !== 'transcribe' && o.kind !== 'format') return { success: false, error: 'Unknown AI action' };
+  if (!o.notePath) return { success: false, error: 'No note path given' };
+  if (!o.deepseekKey) return { success: false, error: 'DeepSeek API key is not set' };
+  if (o.kind === 'transcribe') {
+    if (!o.audioPath) return { success: false, error: 'This note has no audio attached' };
+    if (!o.whisperCliPath || !isFileSync(o.whisperCliPath)) return { success: false, error: `whisper-cli not found: ${o.whisperCliPath || '(not set)'}` };
+    if (!o.whisperModelPath || !isFileSync(o.whisperModelPath)) return { success: false, error: `Whisper model not found: ${o.whisperModelPath || '(not set)'}` };
+    if (!ffmpegPath) return { success: false, error: 'ffmpeg is not available; cannot convert audio' };
+  } else if (!String(o.text || '').trim()) {
+    return { success: false, error: 'The note is empty' };
+  }
+  if (activeNoteAiJobFor(o.notePath)) return { success: false, error: 'An AI action is already running for this note' };
+
+  const job = {
+    jobId: 'nai-' + (++noteAiSeq),
+    noteKey: noteKeyOf(o.notePath),
+    kind: o.kind,
+    notePath: o.notePath,
+    noteName: o.noteName || path.basename(o.notePath),
+    startedText: o.kind === 'format' ? String(o.text || '') : (typeof o.startedText === 'string' ? o.startedText : null),
+    phase: 'queued',
+    message: 'Queued',
+    startedAt: Date.now(),
+    sender: event.sender
+  };
+  noteAiJobs.set(job.jobId, job);
+  runNoteAiJob(job, o); // not awaited: runs in the background
+  return { success: true, jobId: job.jobId };
+});
+
+ipcMain.handle('note-ai-list', async () => {
+  return { success: true, jobs: [...noteAiJobs.values()].map(noteAiPublic) };
+});
+
+// Write an AI result to disk: the .txt plus the .format.json sidecar with the
+// new bold spans merged over whatever else the sidecar holds (dueDate, icSource).
+// With expectText set, refuses (conflict) when the file on disk differs from it.
+ipcMain.handle('note-ai-write-result', async (event, opts) => {
+  const o = opts || {};
+  try {
+    if (!o.notePath) return { success: false, error: 'No note path given' };
+    let diskText = null;
+    try { diskText = fs.readFileSync(o.notePath, 'utf8'); } catch (_e) {}
+    if (!o.force && typeof o.expectText === 'string' && (diskText === null ? '' : diskText) !== o.expectText) {
+      return { success: false, conflict: true, missing: diskText === null };
+    }
+    fs.mkdirSync(path.dirname(o.notePath), { recursive: true });
+    fs.writeFileSync(o.notePath, String(o.text || ''), 'utf8');
+    const st = fs.statSync(o.notePath);
+
+    const base = path.basename(o.notePath).replace(/\.txt$/i, '');
+    const fmtPath = path.join(path.dirname(o.notePath), NOATFORMAT_DIR, base + '.format.json');
+    let existing = {};
+    try {
+      const parsed = JSON.parse(fs.readFileSync(fmtPath, 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) existing = parsed;
+    } catch (_e) {}
+    const payload = { ...existing, spans: Array.isArray(o.spans) ? o.spans : [] };
+    // Same rule as the renderer's saveFormatSpans: no spans and nothing else -> no sidecar.
+    if (payload.spans.length === 0 && !payload.dueDate && !payload.icSource) {
+      try { fs.unlinkSync(fmtPath); } catch (_e) {}
+    } else {
+      fs.mkdirSync(path.dirname(fmtPath), { recursive: true });
+      fs.writeFileSync(fmtPath, JSON.stringify(payload), 'utf8');
+    }
+    return { success: true, lastModified: st.mtimeMs, size: st.size };
+  } catch (e) {
+    console.error('note-ai-write-result error:', e);
+    return { success: false, error: String((e && e.message) || e) };
   }
 });
 

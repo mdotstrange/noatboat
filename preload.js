@@ -43,10 +43,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   savePreferences: (prefs) => ipcRenderer.invoke('save-preferences', prefs),
   onOpenPreferences: (callback) => ipcRenderer.on('open-preferences', callback),
   
-  // Local LLM
+  // Local LLM / DeepSeek
   openModelDialog: () => ipcRenderer.invoke('open-model-dialog'),
   runLocalLLM: (modelPath, text) => ipcRenderer.invoke('run-local-llm', modelPath, text),
-  
+  deepseekChat: (opts) => ipcRenderer.invoke('deepseek-chat', opts),
+
+  // IC recorder import
+  openWhisperCliDialog: () => ipcRenderer.invoke('open-whisper-cli-dialog'),
+  openWhisperModelDialog: () => ipcRenderer.invoke('open-whisper-model-dialog'),
+  icImportRun: (opts) => ipcRenderer.invoke('ic-import-run', opts),
+  onIcImportProgress: (callback) => ipcRenderer.on('ic-import-progress', (_event, payload) => callback(payload)),
+  // Per-note background AI jobs (Transcribe Audio / Format Text)
+  noteAiStart: (opts) => ipcRenderer.invoke('note-ai-start', opts),
+  noteAiList: () => ipcRenderer.invoke('note-ai-list'),
+  noteAiWriteResult: (opts) => ipcRenderer.invoke('note-ai-write-result', opts),
+  onNoteAiProgress: (callback) => ipcRenderer.on('note-ai-progress', (_event, payload) => callback(payload)),
+
   // Dialog operations
   showPrompt: (message, defaultValue) => ipcRenderer.invoke('show-prompt', message, defaultValue),
   showConfirm: (message) => ipcRenderer.invoke('show-confirm', message),
