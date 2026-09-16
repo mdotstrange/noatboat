@@ -928,6 +928,16 @@
     body.dark-mode .icLog .ok{ color:#8fd19e; }
     body.dark-mode .icLog .err{ color:#f19c93; }
     .icActions{ display:flex; justify-content:flex-end; margin-top:12px; }
+    /* Recordings imported before whose note was later deleted (opt-in re-import) */
+    .icDeleted{ border:1px solid var(--border); border-radius:8px; padding:8px; margin-top:12px; }
+    .icDeleted[hidden]{ display:none; }
+    .icDeletedTitle{ font-family:var(--mono); font-size:11px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; padding:0 4px 6px; }
+    .icDeletedList{ max-height:180px; overflow:auto; display:flex; flex-direction:column; gap:2px; }
+    .icDeletedRow{ display:grid; grid-template-columns:auto minmax(0,1fr) minmax(0,1.4fr) auto; gap:8px; align-items:center; padding:4px; font-family:var(--mono); font-size:12px; cursor:pointer; border-radius:6px; }
+    .icDeletedRow:hover{ background:var(--note-active-bg); }
+    .icDelName, .icDelWas{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .icDelWas, .icDelDate{ color:var(--muted); }
+    .icDeleted .icActions{ margin-top:8px; }
     @keyframes gridScrollUp{
       from{ background-position: 0px 0px, 0px 0px, 0px 0px, 0px 0px; }
       to{ background-position: 0px -240px, 0px -240px, 0px -1200px, 0px -1200px; }
@@ -1585,8 +1595,14 @@
       <div class="exportBody">
         <div id="icImportProgress" class="exportProgress">Idle</div>
         <div id="icImportLog" class="icLog"></div>
+        <div id="icImportDeleted" class="icDeleted" hidden>
+          <div class="icDeletedTitle">Imported before, note since deleted</div>
+          <div id="icImportDeletedList" class="icDeletedList"></div>
+          <div class="icActions"><button id="icReimportBtn" class="btn" disabled>Re-import selected</button></div>
+        </div>
         <div class="icActions">
-          <button id="icImportDoneBtn" class="btn primary" disabled>Close</button>
+          <button id="icStopBtn" class="btn danger" hidden>Stop</button>
+          <button id="icImportDoneBtn" class="btn primary">Close</button>
         </div>
       </div>
     </div>
@@ -1677,6 +1693,10 @@ const els = {
   icImportProgress: document.getElementById('icImportProgress'),
   icImportLog: document.getElementById('icImportLog'),
   icImportDoneBtn: document.getElementById('icImportDoneBtn'),
+  icStopBtn: document.getElementById('icStopBtn'),
+  icImportDeleted: document.getElementById('icImportDeleted'),
+  icImportDeletedList: document.getElementById('icImportDeletedList'),
+  icReimportBtn: document.getElementById('icReimportBtn'),
   localModelItem: document.getElementById('localModelItem'),
   localModelPath: document.getElementById('localModelPath'),
   browseModelBtn: document.getElementById('browseModelBtn'),
@@ -3078,8 +3098,9 @@ function setIcImportModalOpen(on) {
   els.icImportModal.setAttribute('aria-hidden', icImportIsOpen ? 'false' : 'true');
 }
 
+// Hiding the window never blocks: the import keeps running in the main
+// process and the 🎙️ button keeps pulsing until it finishes.
 function closeIcImportModal() {
-  if (isIcImporting) return; // Don't close while importing
   setIcImportModalOpen(false);
 }
 
@@ -3091,12 +3112,41 @@ function icLogLine(text, cls) {
   els.icImportLog.scrollTop = els.icImportLog.scrollHeight;
 }
 
-function handleIcImportProgress(p) {
+let lastIcProgress = null;
+let icRunStartedAt = 0;
+let icTickTimer = null;
+let icListRefreshTimer = null;
+
+function formatElapsed(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+}
+
+// Status line = last progress message + (current/total) file + elapsed time.
+function renderIcStatus() {
+  const p = lastIcProgress;
   if (!p) return;
   const where = (p.total ? ` (${p.current || 0}/${p.total})` : '') + (p.file ? ` ${p.file}` : '');
-  els.icImportProgress.textContent = (p.message || '') + where;
-  if (p.phase === 'done-file') icLogLine(`✔ ${p.file} → ${p.note}`, 'ok');
+  const elapsed = isIcImporting && icRunStartedAt ? ` · ${formatElapsed(Date.now() - icRunStartedAt)}` : '';
+  els.icImportProgress.textContent = (p.message || '') + where + elapsed;
+}
+
+// Imported notes show up in the sidebar as they land (debounced).
+function scheduleIcListRefresh() {
+  if (icListRefreshTimer) clearTimeout(icListRefreshTimer);
+  icListRefreshTimer = setTimeout(() => {
+    icListRefreshTimer = null;
+    if (folderPath && isPathWithin(folderPath, icNotesFolder)) refreshNotes();
+  }, 500);
+}
+
+function handleIcImportProgress(p) {
+  if (!p) return;
+  lastIcProgress = p;
+  renderIcStatus();
+  if (p.phase === 'done-file') { icLogLine(`✔ ${p.file} → ${p.note}`, 'ok'); scheduleIcListRefresh(); }
   else if (p.phase === 'error') icLogLine(`✖ ${p.file}: ${p.message}`, 'err');
+  else if (p.phase === 'cancelled') icLogLine(`■ Stopped at ${p.file}`);
 }
 
 function isPathWithin(parent, child) {
@@ -3111,8 +3161,99 @@ function isPathWithin(parent, child) {
   return a === b || b.startsWith(a + (a.includes('\\') ? '\\' : '/'));
 }
 
+let icScanRecFileDir = null; // REC_FILE folder found by the last scan (for re-imports)
+
+function setIcBusy(on) {
+  isIcImporting = !!on;
+  els.importIcBtn.classList.toggle('fixing', isIcImporting);
+  els.icStopBtn.hidden = !isIcImporting;
+  els.icStopBtn.disabled = false;
+  els.icImportDoneBtn.textContent = isIcImporting ? 'Hide' : 'Close';
+  if (icTickTimer) { clearInterval(icTickTimer); icTickTimer = null; }
+  if (isIcImporting) {
+    icRunStartedAt = Date.now();
+    icTickTimer = setInterval(renderIcStatus, 1000);
+  }
+  updateIcReimportBtn();
+}
+
+async function stopIcImport() {
+  if (!isIcImporting) return;
+  els.icStopBtn.disabled = true;
+  lastIcProgress = { ...(lastIcProgress || {}), message: 'Stopping…' };
+  renderIcStatus();
+  try { await api.icImportCancel(); } catch (_e) {}
+}
+
+function updateIcReimportBtn() {
+  const anyChecked = !!els.icImportDeletedList.querySelector('input[type="checkbox"]:checked');
+  els.icReimportBtn.disabled = isIcImporting || !anyChecked;
+}
+
+// Recordings imported before whose note has since been deleted: offered,
+// unchecked, so nothing the user removed on purpose comes back by itself.
+function renderIcDeletedList(items) {
+  els.icImportDeletedList.innerHTML = '';
+  const list = Array.isArray(items) ? items : [];
+  for (const it of list) {
+    const row = document.createElement('label');
+    row.className = 'icDeletedRow';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.dataset.name = it.name;
+    const name = document.createElement('span');
+    name.className = 'icDelName';
+    name.textContent = it.name;
+    name.title = it.name;
+    const was = document.createElement('span');
+    was.className = 'icDelWas';
+    was.textContent = 'was: ' + noteTitleFromName(it.note || '');
+    was.title = was.textContent;
+    const date = document.createElement('span');
+    date.className = 'icDelDate';
+    date.textContent = it.recordedAt || '';
+    row.append(cb, name, was, date);
+    els.icImportDeletedList.appendChild(row);
+  }
+  els.icImportDeleted.hidden = list.length === 0;
+  updateIcReimportBtn();
+}
+
+function removeIcDeletedRows(imported) {
+  const done = new Set((imported || []).map(i => String(i.source || '').toLowerCase()));
+  for (const cb of [...els.icImportDeletedList.querySelectorAll('input[type="checkbox"]')]) {
+    if (done.has(String(cb.dataset.name || '').toLowerCase())) cb.closest('.icDeletedRow').remove();
+  }
+  if (!els.icImportDeletedList.children.length) els.icImportDeleted.hidden = true;
+  updateIcReimportBtn();
+}
+
+function icImportOpts() {
+  return { deepseekKey, whisperCliPath, whisperModelPath, icNotesFolder };
+}
+
+async function applyIcImportResult(result) {
+  if (!result) { els.icImportProgress.textContent = 'Import cancelled'; return; }
+  if (result.noDevice) { els.icImportProgress.textContent = result.error || 'No IC RECORDER found'; return; }
+  const imported = Array.isArray(result.imported) ? result.imported.length : 0;
+  const errors = Array.isArray(result.errors) ? result.errors.length : 0;
+  const skipped = result.skipped || 0;
+  const retried = result.retried || 0;
+  const reimported = result.reimported || 0;
+  const detail = (retried || reimported) ? ` (${retried} retried, ${reimported} re-imported)` : '';
+  const summary = `${imported} imported${detail}, ${skipped} skipped, ${errors} error${errors === 1 ? '' : 's'}`;
+  const prefix = result.cancelled ? 'Stopped' : (result.success ? 'Done' : 'Failed');
+  lastIcProgress = null;
+  els.icImportProgress.textContent = result.success ? `${prefix}: ${summary}` : `${prefix}: ${result.error || 'unknown error'} (${summary})`;
+  if (!result.success && result.error) icLogLine(`✖ ${result.error}`, 'err');
+  if (icListRefreshTimer) { clearTimeout(icListRefreshTimer); icListRefreshTimer = null; }
+  if (imported > 0 && folderPath && isPathWithin(folderPath, icNotesFolder)) {
+    await refreshNotes();
+  }
+}
+
 async function importFromIc() {
-  if (isIcImporting) return;
+  if (isIcImporting) { setIcImportModalOpen(true); return; } // re-open the live view
 
   if (!deepseekKey || !whisperCliPath || !whisperModelPath || !icNotesFolder) {
     await api.showAlert('Import from IC needs a DeepSeek API key, a Whisper CLI path, a Whisper model path and a notes folder. Set them in Preferences.');
@@ -3123,49 +3264,59 @@ async function importFromIc() {
   closeMiniCal();
   setFocusMode(false);
   els.icImportLog.innerHTML = '';
+  renderIcDeletedList([]);
   els.icImportProgress.textContent = 'Looking for IC RECORDER...';
-  els.icImportDoneBtn.disabled = true;
   setIcImportModalOpen(true);
-  isIcImporting = true;
-  els.importIcBtn.classList.add('fixing');
+  setIcBusy(true);
 
-  const opts = { deepseekKey, whisperCliPath, whisperModelPath, icNotesFolder };
+  const opts = icImportOpts();
   let result = null;
   try {
-    result = await api.icImportRun(opts);
-    if (result && result.noDevice) {
+    // 1. Read-only scan: find the recorder and classify its recordings.
+    let scan = await api.icImportScan({ icNotesFolder });
+    if (scan && scan.noDevice) {
       const pick = await api.showConfirm('No IC RECORDER found - plug it in and try again.\n\nPick the recorder\'s REC_FILE folder manually instead?');
       if (pick) {
         const dir = await api.openFolderDialog();
-        if (dir) result = await api.icImportRun({ ...opts, recFileDir: dir });
+        if (dir) scan = await api.icImportScan({ icNotesFolder, recFileDir: dir });
       }
+    }
+    if (!scan || !scan.success) {
+      result = scan || null;
+    } else {
+      icScanRecFileDir = scan.recFileDir;
+      renderIcDeletedList(scan.deleted);
+      const c = scan.counts || {};
+      els.icImportProgress.textContent = `Found ${c.total || 0} recording(s): ${c.fresh || 0} new, ${c.failed || 0} to retry, ${c.present || 0} already imported`;
+      // 2. Import new recordings and retry earlier failed imports.
+      result = await api.icImportRun({ ...opts, recFileDir: scan.recFileDir });
     }
   } catch (err) {
     result = { success: false, error: String(err?.message || err) };
   }
 
-  isIcImporting = false;
-  els.importIcBtn.classList.remove('fixing');
-  els.icImportDoneBtn.disabled = false;
+  setIcBusy(false);
+  await applyIcImportResult(result);
+}
 
-  if (!result) {
-    els.icImportProgress.textContent = 'Import cancelled';
-    return;
+async function reimportSelectedIc() {
+  if (isIcImporting || !icScanRecFileDir) return;
+  const boxes = [...els.icImportDeletedList.querySelectorAll('input[type="checkbox"]')];
+  const names = boxes.filter(cb => cb.checked).map(cb => cb.dataset.name);
+  if (!names.length) return;
+  for (const cb of boxes) cb.disabled = true;
+  setIcBusy(true);
+  els.icImportProgress.textContent = `Re-importing ${names.length} recording(s)...`;
+  let result = null;
+  try {
+    result = await api.icImportRun({ ...icImportOpts(), recFileDir: icScanRecFileDir, reimportNames: names, reimportOnly: true });
+  } catch (err) {
+    result = { success: false, error: String(err?.message || err) };
   }
-  if (result.noDevice) {
-    els.icImportProgress.textContent = result.error || 'No IC RECORDER found';
-    return;
-  }
-  const imported = Array.isArray(result.imported) ? result.imported.length : 0;
-  const errors = Array.isArray(result.errors) ? result.errors.length : 0;
-  const skipped = result.skipped || 0;
-  const summary = `${imported} imported, ${skipped} skipped, ${errors} error${errors === 1 ? '' : 's'}`;
-  els.icImportProgress.textContent = result.success ? `Done: ${summary}` : `Failed: ${result.error || 'unknown error'} (${summary})`;
-  if (!result.success && result.error) icLogLine(`✖ ${result.error}`, 'err');
-
-  if (imported > 0 && folderPath && isPathWithin(folderPath, icNotesFolder)) {
-    await refreshNotes();
-  }
+  for (const cb of boxes) cb.disabled = false;
+  setIcBusy(false);
+  if (result && Array.isArray(result.imported)) removeIcDeletedRows(result.imported);
+  await applyIcImportResult(result);
 }
 
 // --- Per-note AI actions: Transcribe Audio / Format Text ---
@@ -7482,6 +7633,9 @@ els.publishGithubBtn.addEventListener('click', publishToGithub);
 els.importIcBtn.addEventListener('click', () => importFromIc());
 els.icImportCloseBtn.addEventListener('click', closeIcImportModal);
 els.icImportDoneBtn.addEventListener('click', closeIcImportModal);
+els.icReimportBtn.addEventListener('click', () => reimportSelectedIc());
+els.icStopBtn.addEventListener('click', () => stopIcImport());
+els.icImportDeletedList.addEventListener('change', updateIcReimportBtn);
 els.icImportModal.addEventListener('mousedown', (e) => { if (e.target === els.icImportModal) closeIcImportModal(); });
 api.onIcImportProgress(handleIcImportProgress);
 
@@ -7741,7 +7895,7 @@ window.addEventListener('resize', () => {
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     if (miniCalIsOpen) { closeMiniCal(); return; }
-    if (icImportIsOpen) { if (!isIcImporting) closeIcImportModal(); return; }
+    if (icImportIsOpen) { closeIcImportModal(); return; }
     if (exportIsOpen && !isExporting) { closeExportModal(); return; }
     if (prefsIsOpen) { closePrefsModal(); return; }
     if (audioIsOpen) { closeAudioModal(); return; }

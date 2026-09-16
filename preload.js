@@ -51,7 +51,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // IC recorder import
   openWhisperCliDialog: () => ipcRenderer.invoke('open-whisper-cli-dialog'),
   openWhisperModelDialog: () => ipcRenderer.invoke('open-whisper-model-dialog'),
+  icImportScan: (opts) => ipcRenderer.invoke('ic-import-scan', opts),
   icImportRun: (opts) => ipcRenderer.invoke('ic-import-run', opts),
+  icImportCancel: () => ipcRenderer.invoke('ic-import-cancel'),
   onIcImportProgress: (callback) => ipcRenderer.on('ic-import-progress', (_event, payload) => callback(payload)),
   // Per-note background AI jobs (Transcribe Audio / Format Text)
   noteAiStart: (opts) => ipcRenderer.invoke('note-ai-start', opts),

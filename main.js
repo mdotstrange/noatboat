@@ -19,6 +19,19 @@ const fsp = fs.promises;
 const FILE_OP_TIMEOUT_MS = 5000;    // per-file ops during a folder scan
 const LAZY_READ_TIMEOUT_MS = 15000; // single-file reads (image/audio/canvas)
 
+// Cooperative cancellation for long jobs (Import from IC "Stop").
+function cancelledError() {
+  const e = new Error('Stopped');
+  e.code = 'CANCELLED';
+  return e;
+}
+function isCancelled(e) {
+  return !!(e && e.code === 'CANCELLED');
+}
+function throwIfAborted(signal) {
+  if (signal && signal.aborted) throw cancelledError();
+}
+
 function withTimeout(promise, ms, label) {
   let timer;
   const timeout = new Promise((_, reject) => {
@@ -189,10 +202,13 @@ async function transcodeToMp3DataUrl(inputPath, bitrateKbps = 128) {
 const DEEPSEEK_MODEL = 'deepseek-flash';
 const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/v1/chat/completions';
 
-async function callDeepSeek({ apiKey, system, user, temperature = 0.2, maxTokens = 4096, timeoutMs = 180000, thinking = false }) {
+async function callDeepSeek({ apiKey, system, user, temperature = 0.2, maxTokens = 4096, timeoutMs = 180000, thinking = false, signal = null }) {
   if (!apiKey) throw new Error('DeepSeek API key is not set');
+  throwIfAborted(signal);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onAbort = () => { try { controller.abort(); } catch (_e) {} };
+  if (signal) signal.addEventListener('abort', onAbort, { once: true });
   let res;
   try {
     res = await fetch(DEEPSEEK_ENDPOINT, {
@@ -217,13 +233,16 @@ async function callDeepSeek({ apiKey, system, user, temperature = 0.2, maxTokens
       signal: controller.signal
     });
   } catch (e) {
+    if (signal && signal.aborted) throw cancelledError();
     if (e && e.name === 'AbortError') throw new Error(`DeepSeek request timed out after ${Math.round(timeoutMs / 1000)}s`);
     throw new Error(`DeepSeek request failed: ${e.message || e}`);
   } finally {
     clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', onAbort);
   }
 
   const bodyText = await res.text();
+  throwIfAborted(signal);
   let data = null;
   try { data = JSON.parse(bodyText); } catch (_e) {}
 
@@ -1643,13 +1662,91 @@ function isAlreadyImported(ledger, rec) {
   return false;
 }
 
+// --- Ledger vs. disk -------------------------------------------------------
+// The ledger says what was imported; the notes folder says what still exists.
+// Notes can be moved into subfolders, so index every .txt under the folder.
+function buildNoteIndex(rootDir, maxDepth = 4) {
+  const index = new Map(); // lowercased file name -> absolute path
+  const walk = (dir, depth) => {
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_e) { return; }
+    for (const ent of entries) {
+      if (ent.isDirectory()) {
+        if (ent.name.startsWith('.') || depth >= maxDepth) continue;
+        walk(path.join(dir, ent.name), depth + 1);
+      } else if (ent.isFile() && /\.txt$/i.test(ent.name)) {
+        const key = ent.name.toLowerCase();
+        if (!index.has(key)) index.set(key, path.join(dir, ent.name));
+      }
+    }
+  };
+  if (rootDir) walk(rootDir, 0);
+  return index;
+}
+
+function findNoteUnderFolder(rootDir, noteName, maxDepth = 4, index = null) {
+  return (index || buildNoteIndex(rootDir, maxDepth)).get(String(noteName || '').toLowerCase()) || null;
+}
+
+// A note named "<recording basename> - YYYY-MM-DD" (optionally " (N)") is the
+// fallback used when the edit produced no title, i.e. that import failed.
+function isFallbackNoteName(noteName, rec) {
+  let base = String(noteName || '')
+    .replace(/\.txt$/i, '')
+    .replace(/ \(\d+\)$/, '')
+    .replace(/ - \d{4}-\d{2}-\d{2}$/, '')
+    .replace(/ \(\d+\)$/, '')
+    .trim().toLowerCase();
+  const expected = sanitizeTitleToFilenameMain(String(rec.name || '').replace(/\.[^.]+$/, '')).toLowerCase();
+  return base === expected || base === 'recording';
+}
+
+// All ledger entries for a recording (exact key plus name+size matches).
+function ledgerEntryFor(ledger, rec) {
+  const keys = [];
+  const exact = icImportKey(rec);
+  if (ledger.imports[exact]) keys.push(exact);
+  const lowerName = String(rec.name || '').toLowerCase();
+  for (const [k, entry] of Object.entries(ledger.imports)) {
+    if (k === exact || !entry) continue;
+    if (String(entry.sourceName || '').toLowerCase() === lowerName && entry.sourceSize === rec.size) keys.push(k);
+  }
+  if (!keys.length) return null;
+  let key = keys[0];
+  for (const k of keys) {
+    if (String(ledger.imports[k].importedAt || '') > String(ledger.imports[key].importedAt || '')) key = k;
+  }
+  return { key, entry: ledger.imports[key], keys };
+}
+
+// fresh: never imported. present: imported and the note still exists.
+// failed: imported, note gone, and it was a fallback-named (failed) import.
+// deleted: imported with a real title, note since removed by the user.
+function classifyRecordings(all, ledger, icNotesFolder) {
+  const index = buildNoteIndex(icNotesFolder);
+  const out = { fresh: [], present: [], failed: [], deleted: [] };
+  for (const rec of all) {
+    const m = ledgerEntryFor(ledger, rec);
+    if (!m) { out.fresh.push(rec); continue; }
+    const anyPresent = m.keys.some(k => { const e = ledger.imports[k]; return e && e.note && index.has(String(e.note).toLowerCase()); });
+    if (anyPresent) { out.present.push(rec); continue; }
+    const item = { rec, entry: m.entry, key: m.key, keys: m.keys };
+    if (isFallbackNoteName(m.entry.note, rec)) out.failed.push(item); else out.deleted.push(item);
+  }
+  return out;
+}
+
 function transcodeForWhisper(mp3Path, wavPath) {
   // whisper.cpp requires 16 kHz mono signed 16-bit PCM WAV.
   return runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', mp3Path, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', '-f', 'wav', wavPath]);
 }
 
-function runWhisperCli(cliPath, modelPath, wavPath, outBase) {
+// ctl (optional) = { signal, onChild }: signal aborts by killing the child,
+// onChild reports the spawned process so a Stop can reach it.
+function runWhisperCli(cliPath, modelPath, wavPath, outBase, ctl) {
   return new Promise((resolve, reject) => {
+    const signal = ctl && ctl.signal;
+    if (signal && signal.aborted) { reject(cancelledError()); return; }
     if (!isFileSync(cliPath)) { reject(new Error(`whisper-cli not found: ${cliPath}`)); return; }
     if (!isFileSync(modelPath)) { reject(new Error(`Whisper model not found: ${modelPath}`)); return; }
     // -oj also writes <outBase>.json with per-segment offsets so we can verify
@@ -1668,13 +1765,23 @@ function runWhisperCli(cliPath, modelPath, wavPath, outBase) {
     }
     let stdout = '';
     let stderr = '';
+    const onAbort = () => { try { p.kill(); } catch (_e) {} };
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    if (ctl && ctl.onChild) { try { ctl.onChild(p); } catch (_e) {} }
+    const cleanup = () => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      if (ctl && ctl.onChild) { try { ctl.onChild(null); } catch (_e) {} }
+    };
     p.stdout.on('data', (d) => { stdout += d.toString(); });
     p.stderr.on('data', (d) => { stderr += d.toString(); if (stderr.length > 20000) stderr = stderr.slice(-20000); });
     p.on('error', (err) => {
+      cleanup();
       const hint = err && err.code === 'EACCES' ? ' (not executable - run: chmod +x on the whisper-cli binary)' : '';
       reject(new Error(`whisper-cli failed to start: ${err.message}${hint}`));
     });
     p.on('close', (code) => {
+      cleanup();
+      if (signal && signal.aborted) { reject(cancelledError()); return; }
       if (code !== 0) {
         reject(new Error((stderr || '').trim().split('\n').slice(-5).join('\n') || `whisper-cli exited with code ${code}`));
         return;
@@ -1837,11 +1944,18 @@ function editedLengthRatio(edited, source) {
   return src === 0 ? 1 : norm(edited) / src;
 }
 
-async function editTranscriptWithDeepSeek(apiKey, transcript, fallbackTitle) {
-  const callOne = async (text) => {
+// opts (optional) = { signal, onPhase }: signal cancels, onPhase reports
+// sub-steps ("attempt 2 (larger budget)") so slow runs look alive.
+async function editTranscriptWithDeepSeek(apiKey, transcript, fallbackTitle, opts) {
+  const signal = (opts && opts.signal) || null;
+  const onPhase = (opts && opts.onPhase) || null;
+  const callOne = async (text, partLabel) => {
     let maxTokens = IC_DEEPSEEK_MAX_TOKENS;
     let lastErr = null;
+    let why = '';
     for (let attempt = 0; attempt < 3; attempt++) {
+      throwIfAborted(signal);
+      if (onPhase) onPhase('edit', 'Editing with DeepSeek' + (partLabel || '') + (attempt ? ` · attempt ${attempt + 1}${why}` : ''));
       let raw;
       try {
         raw = await callDeepSeek({
@@ -1850,13 +1964,16 @@ async function editTranscriptWithDeepSeek(apiKey, transcript, fallbackTitle) {
           user: text,
           temperature: 0.3,
           maxTokens,
-          timeoutMs: 10 * 60 * 1000
+          timeoutMs: 10 * 60 * 1000,
+          signal
         });
       } catch (e) {
+        if (isCancelled(e)) throw e;
         if (e && e.code === 'DEEPSEEK_TRUNCATED' && maxTokens < IC_DEEPSEEK_MAX_TOKENS_CAP) {
           console.warn(`DeepSeek reply truncated at ${maxTokens} tokens; retrying with a larger budget`);
           maxTokens = Math.min(maxTokens * 2, IC_DEEPSEEK_MAX_TOKENS_CAP);
           lastErr = e;
+          why = ' (larger budget)';
           continue;
         }
         throw e;
@@ -1865,17 +1982,19 @@ async function editTranscriptWithDeepSeek(apiKey, transcript, fallbackTitle) {
       const ratio = editedLengthRatio(parsed.body, text);
       if (ratio >= IC_EDIT_MIN_LENGTH_RATIO) return parsed;
       lastErr = new Error(`DeepSeek edit looks cut off (${Math.round(ratio * 100)}% of the transcript length)`);
+      why = ' (reply looked cut off)';
       console.warn(lastErr.message + (attempt < 2 ? '; retrying' : ''));
     }
     throw lastErr || new Error('DeepSeek edit failed');
   };
-  if (transcript.length <= IC_DEEPSEEK_SINGLE_CALL_MAX_CHARS) return callOne(transcript);
+  if (transcript.length <= IC_DEEPSEEK_SINGLE_CALL_MAX_CHARS) return callOne(transcript, '');
 
   const chunks = splitTranscriptIntoChunks(transcript, IC_DEEPSEEK_CHUNK_CHARS);
   let title = '';
   const bodies = [];
   for (let i = 0; i < chunks.length; i++) {
-    const r = await callOne(chunks[i]);
+    throwIfAborted(signal);
+    const r = await callOne(chunks[i], ` · part ${i + 1}/${chunks.length}`);
     if (i === 0) title = r.title;
     bodies.push(r.body.trim());
   }
@@ -1927,14 +2046,20 @@ const acquireDeepSeek = makeSemaphore(3);
 
 // Convert one audio file to text with ffmpeg + whisper-cli, waiting for the
 // whisper queue first.
-async function transcribeAudioToText(audioPath, whisperCliPath, whisperModelPath, onPhase) {
+async function transcribeAudioToText(audioPath, whisperCliPath, whisperModelPath, onPhase, ctl) {
   if (onPhase) onPhase('queued', 'Waiting for Whisper');
-  return runWhisperQueued(() => transcribeAudioToTextNow(audioPath, whisperCliPath, whisperModelPath, onPhase));
+  return runWhisperQueued(() => {
+    // A stopped run that was waiting its turn never spawns whisper.
+    throwIfAborted(ctl && ctl.signal);
+    return transcribeAudioToTextNow(audioPath, whisperCliPath, whisperModelPath, onPhase, ctl);
+  });
 }
 
 // The actual ffmpeg + whisper-cli run. Temp files live in the ic-import cache
 // under unique hashed names and are always removed.
-async function transcribeAudioToTextNow(audioPath, whisperCliPath, whisperModelPath, onPhase) {
+async function transcribeAudioToTextNow(audioPath, whisperCliPath, whisperModelPath, onPhase, ctl) {
+  const signal = ctl && ctl.signal;
+  throwIfAborted(signal);
   if (!ffmpegPath) throw new Error('ffmpeg is not available; cannot convert audio');
   if (!isFileSync(audioPath)) throw new Error(`Audio file not found: ${audioPath}`);
   const cacheDir = getIcImportCacheDir();
@@ -1945,13 +2070,17 @@ async function transcribeAudioToTextNow(audioPath, whisperCliPath, whisperModelP
   try {
     if (onPhase) onPhase('transcode', 'Converting audio');
     await transcodeForWhisper(audioPath, wavPath);
+    throwIfAborted(signal);
     const durationSec = wavDurationSec(wavPath);
     const speechEndSec = await detectSpeechEndSec(wavPath, durationSec);
+    throwIfAborted(signal);
 
     let lastErr = null;
     for (let attempt = 0; attempt < 2; attempt++) {
+      throwIfAborted(signal);
       if (onPhase) onPhase('transcribe', attempt === 0 ? 'Transcribing with Whisper' : 'Re-transcribing with Whisper');
-      const r = await withTimeout(runWhisperCli(whisperCliPath, whisperModelPath, wavPath, outBase), IC_WHISPER_TIMEOUT_MS, 'Whisper transcription');
+      const r = await withTimeout(runWhisperCli(whisperCliPath, whisperModelPath, wavPath, outBase, ctl), IC_WHISPER_TIMEOUT_MS, 'Whisper transcription');
+      throwIfAborted(signal);
       const text = String((r && r.text) || '').trim();
       if (!text) { lastErr = new Error('Empty transcript'); continue; }
 
@@ -2050,14 +2179,15 @@ function normaliseDashHeadings(md) {
   return String(md || '').replace(/^[ \t]*-{3,}[ \t]*(.+?)[ \t]*-{3,}[ \t]*$/gm, (_m, t) => `**${t.trim()}**`);
 }
 
-async function restructureWithDeepSeek(apiKey, body) {
+async function restructureWithDeepSeek(apiKey, body, opts) {
   const raw = await callDeepSeek({
     apiKey,
     system: IC_RESTRUCTURE_SYSTEM_PROMPT,
     user: body,
     temperature: 0.2,
     maxTokens: IC_DEEPSEEK_MAX_TOKENS,
-    timeoutMs: 10 * 60 * 1000
+    timeoutMs: 10 * 60 * 1000,
+    signal: (opts && opts.signal) || null
   });
   let out = stripCodeFences(raw).replace(/\r\n?/g, '\n').trim();
   out = out.replace(/^\s*[*_#\s]*title[*_\s]*:.*\n+/i, ''); // tolerate a stray title line
@@ -2069,26 +2199,34 @@ async function restructureWithDeepSeek(apiKey, body) {
 // Shared "edit + bold" step used by IC import, Transcribe Audio and Format Text.
 // Guarantees the structure rules: verified after the edit, one restructure pass
 // if needed, then a deterministic paragraph split as the last resort.
-async function editTextToNote(apiKey, rawText, fallbackTitle) {
+async function editTextToNote(apiKey, rawText, fallbackTitle, opts) {
+  const signal = (opts && opts.signal) || null;
+  const onPhase = (opts && opts.onPhase) || null;
   const release = await acquireDeepSeek();
   try {
+    throwIfAborted(signal); // cancelled while waiting for a DeepSeek slot
     const source = normaliseDashHeadings(rawText);
-    const edited = await editTranscriptWithDeepSeek(apiKey, source, fallbackTitle);
+    const edited = await editTranscriptWithDeepSeek(apiKey, source, fallbackTitle, { signal, onPhase });
     const title = edited.title;
     let body = normaliseDashHeadings(edited.body);
     let stats = noteStructureStats(body);
     for (let pass = 0; pass < 2 && !structureOk(stats); pass++) {
+      throwIfAborted(signal);
       console.warn(`Edit under-structured (max para ${stats.maxParaWords} words, ${stats.headings} headings for ${stats.words} words); restructuring (pass ${pass + 1})`);
+      if (onPhase) onPhase('edit', `Restructuring with DeepSeek · pass ${pass + 1}/2`);
       try {
-        const restructured = await restructureWithDeepSeek(apiKey, body);
+        const restructured = await restructureWithDeepSeek(apiKey, body, { signal });
         const s2 = noteStructureStats(restructured);
         // Accept the pass if it improved either measure without breaking the other.
         if (s2.headings >= stats.headings && s2.maxParaWords <= Math.max(stats.maxParaWords, NOTE_PARA_MAX_WORDS)) { body = restructured; stats = s2; }
       } catch (e) {
+        if (isCancelled(e)) throw e; // never fall through to the splitter on a Stop
         console.warn('Restructure pass failed:', e.message);
       }
     }
+    throwIfAborted(signal);
     if (stats.maxParaWords > NOTE_PARA_MAX_WORDS) {
+      if (onPhase) onPhase('edit', 'Splitting long paragraphs');
       body = splitLongParagraphsMd(body);
       stats = noteStructureStats(body);
     }
@@ -2138,6 +2276,53 @@ function recordedDateFor(rec) {
   return ymdLocal(rec.mtimeMs);
 }
 
+// Read-only look at the recorder vs. the ledger: what is new, what failed
+// before and will be retried, and what the user deleted (offered for re-import).
+ipcMain.handle('ic-import-scan', async (event, opts) => {
+  const o = opts || {};
+  try {
+    if (!o.icNotesFolder) return { success: false, error: 'Transcribed notes folder is not set' };
+    const recFileDir = o.recFileDir || findIcRecorderRoots()[0];
+    if (!recFileDir || !isDirSync(recFileDir)) {
+      return { success: false, noDevice: true, error: 'No IC RECORDER found - plug it in and try again' };
+    }
+    const all = listIcRecordings(recFileDir);
+    const ledger = loadIcLedger(icLedgerPath(o.icNotesFolder));
+    const c = classifyRecordings(all, ledger, o.icNotesFolder);
+    return {
+      success: true,
+      recFileDir,
+      counts: { total: all.length, fresh: c.fresh.length, failed: c.failed.length, deleted: c.deleted.length, present: c.present.length },
+      failed: c.failed.map(f => f.rec.name),
+      deleted: c.deleted.map(d => ({
+        name: d.rec.name,
+        size: d.rec.size,
+        folder: d.rec.folder,
+        recordedAt: recordedDateFor(d.rec),
+        note: d.entry.note,
+        importedAt: d.entry.importedAt
+      }))
+    };
+  } catch (e) {
+    console.error('ic-import-scan error:', e);
+    return { success: false, error: String((e && e.message) || e) };
+  }
+});
+
+// Stop the active import: no more recordings start, the in-flight DeepSeek
+// request is aborted and the in-flight whisper-cli is killed. The recording
+// being processed writes nothing, so the next import picks it up again.
+let icImportCancel = null; // { requested, controller, whisperChild } for the active run
+
+ipcMain.handle('ic-import-cancel', async () => {
+  const c = icImportCancel;
+  if (!c) return { success: true, running: false };
+  c.requested = true;
+  try { c.controller.abort(); } catch (_e) {}
+  if (c.whisperChild) { try { c.whisperChild.kill(); } catch (_e) {} }
+  return { success: true, running: icImportRunning };
+});
+
 ipcMain.handle('ic-import-run', async (event, opts) => {
   const o = opts || {};
   if (icImportRunning) return { success: false, error: 'An import is already running' };
@@ -2156,9 +2341,14 @@ ipcMain.handle('ic-import-run', async (event, opts) => {
   }
 
   icImportRunning = true;
+  const cancel = { requested: false, controller: new AbortController(), whisperChild: null };
+  icImportCancel = cancel;
+  const ctl = { signal: cancel.controller.signal, onChild: (p) => { cancel.whisperChild = p; } };
   const imported = [];
   const errors = [];
   let skipped = 0;
+  let retried = 0;
+  let reimported = 0;
   try {
     send({ phase: 'scan', message: 'Scanning recorder...' });
     const all = listIcRecordings(recFileDir);
@@ -2168,21 +2358,33 @@ ipcMain.handle('ic-import-run', async (event, opts) => {
     const ledgerPath = icLedgerPath(o.icNotesFolder);
     const ledger = loadIcLedger(ledgerPath);
 
-    const todo = all.filter(rec => !isAlreadyImported(ledger, rec));
+    // New recordings and earlier failed imports always run; notes the user
+    // deleted only run when explicitly ticked (reimportNames).
+    const c = classifyRecordings(all, ledger, o.icNotesFolder);
+    const reimportSet = new Set((Array.isArray(o.reimportNames) ? o.reimportNames : []).map(n => String(n).toLowerCase()));
+    const chosen = c.deleted.filter(d => reimportSet.has(d.rec.name.toLowerCase()));
+    const staleKeys = new Map(); // recording name (lowercased) -> ledger keys to replace
+    const origin = new Map();    // recording name (lowercased) -> 'failed' | 'deleted'
+    for (const f of c.failed) { staleKeys.set(f.rec.name.toLowerCase(), f.keys); origin.set(f.rec.name.toLowerCase(), 'failed'); }
+    for (const d of chosen) { staleKeys.set(d.rec.name.toLowerCase(), d.keys); origin.set(d.rec.name.toLowerCase(), 'deleted'); }
+    const todo = (o.reimportOnly ? chosen.map(d => d.rec) : [...c.fresh, ...c.failed.map(f => f.rec), ...chosen.map(d => d.rec)])
+      .sort((a, b) => a.mtimeMs - b.mtimeMs);
     skipped = all.length - todo.length;
     const total = todo.length;
-    send({ phase: 'scan', message: `Found ${all.length} recording(s), ${total} new`, total, current: 0 });
+    send({ phase: 'scan', message: `Found ${all.length} recording(s): ${o.reimportOnly ? 0 : c.fresh.length} new, ${o.reimportOnly ? 0 : c.failed.length} to retry, ${chosen.length} re-import, ${skipped} already imported`, total, current: 0 });
 
     for (let i = 0; i < todo.length; i++) {
+      if (cancel.requested) break;
       const rec = todo[i];
       const current = i + 1;
+      const onPhase = (phase, message) => send({ phase, current, total, file: rec.name, message });
       try {
-        const transcript = await transcribeAudioToText(rec.path, o.whisperCliPath, o.whisperModelPath,
-          (phase, message) => send({ phase, current, total, file: rec.name, message }));
+        const transcript = await transcribeAudioToText(rec.path, o.whisperCliPath, o.whisperModelPath, onPhase, ctl);
 
         send({ phase: 'edit', current, total, file: rec.name, message: 'Editing with DeepSeek' });
         const fallbackTitle = rec.name.replace(/\.mp3$/i, '');
-        const { title, text, spans } = await editTextToNote(o.deepseekKey, transcript, fallbackTitle);
+        const { title, text, spans } = await editTextToNote(o.deepseekKey, transcript, fallbackTitle, { signal: ctl.signal, onPhase });
+        if (cancel.requested) throw cancelledError(); // stopped after the edit: write nothing
 
         send({ phase: 'write', current, total, file: rec.name, message: 'Saving note' });
         const recordedAt = recordedDateFor(rec);
@@ -2195,6 +2397,8 @@ ipcMain.handle('ic-import-run', async (event, opts) => {
         fs.writeFileSync(path.join(sidecarDir, `${noteBase}.format.json`), JSON.stringify({ spans, icSource }), 'utf8');
         fs.copyFileSync(rec.path, path.join(sidecarDir, `${noteBase}.mp3`));
 
+        // Replace any stale entry for this recording (failed or deleted import).
+        for (const k of staleKeys.get(rec.name.toLowerCase()) || []) delete ledger.imports[k];
         ledger.imports[icImportKey(rec)] = {
           note: noteName,
           importedAt: new Date().toISOString(),
@@ -2205,21 +2409,28 @@ ipcMain.handle('ic-import-run', async (event, opts) => {
         };
         saveIcLedger(ledgerPath, ledger);
 
+        const from = origin.get(rec.name.toLowerCase());
+        if (from === 'failed') retried++; else if (from === 'deleted') reimported++;
         imported.push({ note: noteName, source: rec.name });
         send({ phase: 'done-file', current, total, file: rec.name, note: noteName, message: 'Imported' });
       } catch (e) {
+        if (isCancelled(e) || cancel.requested) {
+          send({ phase: 'cancelled', current, total, file: rec.name, message: 'Stopped' });
+          break;
+        }
         const msg = String((e && e.message) || e);
         console.error('IC import failed for', rec.name, msg);
         errors.push({ file: rec.name, error: msg });
         send({ phase: 'error', current, total, file: rec.name, message: msg });
       }
     }
-    return { success: true, imported, skipped, errors, recFileDir };
+    return { success: true, imported, skipped, errors, recFileDir, retried, reimported, cancelled: cancel.requested };
   } catch (e) {
     console.error('ic-import-run error:', e);
-    return { success: false, imported, skipped, errors, recFileDir, error: String((e && e.message) || e) };
+    return { success: false, imported, skipped, errors, recFileDir, retried, reimported, cancelled: cancel.requested, error: String((e && e.message) || e) };
   } finally {
     icImportRunning = false;
+    icImportCancel = null;
   }
 });
 
