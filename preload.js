@@ -60,6 +60,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   noteAiList: () => ipcRenderer.invoke('note-ai-list'),
   noteAiWriteResult: (opts) => ipcRenderer.invoke('note-ai-write-result', opts),
   onNoteAiProgress: (callback) => ipcRenderer.on('note-ai-progress', (_event, payload) => callback(payload)),
+  // Send note to Uberector's inbox folder
+  uberectorSend: (dir, text) => ipcRenderer.invoke('uberector-send', dir, text),
 
   // Dialog operations
   showPrompt: (message, defaultValue) => ipcRenderer.invoke('show-prompt', message, defaultValue),

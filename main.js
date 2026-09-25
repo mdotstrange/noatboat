@@ -493,6 +493,7 @@ ipcMain.handle('get-preferences', async () => {
     whisperCliPath: config.whisperCliPath || '',
     whisperModelPath: config.whisperModelPath || '',
     icNotesFolder: config.icNotesFolder || '',
+    uberectorFolder: config.uberectorFolder || path.join(app.getPath('documents'), 'Uberector Inbox'),
     githubToken: config.githubToken || '',
     githubRepo: config.githubRepo || '',
     publishingName: config.publishingName || '',
@@ -514,6 +515,7 @@ ipcMain.handle('save-preferences', async (event, prefs) => {
   if (prefs.whisperCliPath !== undefined) config.whisperCliPath = prefs.whisperCliPath;
   if (prefs.whisperModelPath !== undefined) config.whisperModelPath = prefs.whisperModelPath;
   if (prefs.icNotesFolder !== undefined) config.icNotesFolder = prefs.icNotesFolder;
+  if (prefs.uberectorFolder !== undefined) config.uberectorFolder = prefs.uberectorFolder;
   if (prefs.githubToken !== undefined) config.githubToken = prefs.githubToken;
   if (prefs.githubRepo !== undefined) config.githubRepo = prefs.githubRepo;
   if (prefs.publishingName !== undefined) config.publishingName = prefs.publishingName;
@@ -886,6 +888,20 @@ ipcMain.handle('write-file', async (event, filePath, content) => {
     fs.writeFileSync(filePath, content, 'utf8');
     const stats = fs.statSync(filePath);
     return { success: true, lastModified: stats.mtimeMs, size: stats.size };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+// Send a note to Uberector's inbox. Written as .tmp then renamed:
+// Uberector only picks a file up after the rename.
+ipcMain.handle('uberector-send', async (event, dir, text) => {
+  try {
+    await fsp.mkdir(dir, { recursive: true });
+    const file = path.join(dir, `${new Date().toISOString().replace(/[:.]/g, '-')}_${Math.random().toString(36).slice(2, 6)}.txt`);
+    await fsp.writeFile(file + '.tmp', text, 'utf8');
+    await fsp.rename(file + '.tmp', file);
+    return { success: true, path: file };
   } catch (e) {
     return { success: false, error: e.message };
   }

@@ -977,6 +977,7 @@
       user-select:none;
     }
     #refreshBtn .ico{ transform: scale( 2 ); transform-origin: center; }
+    #uberectorBtn img.ico{ image-rendering:pixelated; }
     @media (prefers-reduced-motion: reduce){ .thumb{ animation:none !important; } .canvasWorkspace{ animation:none !important; } }
     @media (max-width: 820px){
       .main{ grid-template-columns: 1fr; }
@@ -1204,6 +1205,7 @@
     <button id="audioBtn" class="btn" disabled aria-label="Audio"><span class="ico" aria-hidden="true">🔊</span></button>
     <button id="transcribeBtn" class="btn" disabled aria-label="Transcribe Audio" title="Transcribe Audio: transcribe the attached recording with Whisper and format it with DeepSeek"><span class="ico" aria-hidden="true">🗣️</span></button>
     <button id="formatBtn" class="btn" disabled aria-label="Format Text" title="Format Text: clean up this note with DeepSeek and bold the headings"><span class="ico" aria-hidden="true">🪄</span></button>
+    <button id="uberectorBtn" class="btn" disabled aria-label="Send note to Uberector" title="Send Note to Uberector: copy this note's text into the Uberector inbox"><img class="ico" src="uberector.png" alt="" aria-hidden="true"></button>
     <div class="spacer"></div>
     <button id="calendarBtn" class="btn" disabled aria-label="Calendar" title="Calendar"><span class="ico" aria-hidden="true">📅</span></button>
     <button id="importIcBtn" class="btn" aria-label="Import from IC" title="Import from IC recorder"><span class="ico" aria-hidden="true">🎙️</span></button>
@@ -1494,6 +1496,18 @@
           <div class="prefHint">Imported notes (with the original recording attached) are saved here</div>
         </div>
         <div class="prefItem" style="border-top:1px solid var(--border);padding-top:20px;margin-top:8px;">
+          <label class="prefLabel">Uberector</label>
+          <div class="prefHint" style="margin-bottom:12px;">Send the open note to Uberector with the eye button</div>
+        </div>
+        <div class="prefItem">
+          <label class="prefLabel">Uberector Inbox Folder</label>
+          <div class="prefControl" style="gap:8px;">
+            <input type="text" id="uberectorFolderInput" class="search" style="max-width:100%;flex:1;" placeholder="Select Uberector's inbox folder..." readonly>
+            <button id="browseUberectorFolderBtn" class="btn">Browse</button>
+          </div>
+          <div class="prefHint">Uberector's inbox. Notes sent with the Uberector button are dropped here as .txt files</div>
+        </div>
+        <div class="prefItem" style="border-top:1px solid var(--border);padding-top:20px;margin-top:8px;">
           <label class="prefLabel">GitHub Publishing</label>
           <div class="prefHint" style="margin-bottom:12px;">Publish notes to GitHub Pages for sharing</div>
         </div>
@@ -1682,12 +1696,15 @@ const els = {
   importIcBtn: document.getElementById('importIcBtn'),
   transcribeBtn: document.getElementById('transcribeBtn'),
   formatBtn: document.getElementById('formatBtn'),
+  uberectorBtn: document.getElementById('uberectorBtn'),
   whisperCliPathInput: document.getElementById('whisperCliPathInput'),
   browseWhisperCliBtn: document.getElementById('browseWhisperCliBtn'),
   whisperModelPathInput: document.getElementById('whisperModelPathInput'),
   browseWhisperModelBtn: document.getElementById('browseWhisperModelBtn'),
   icNotesFolderInput: document.getElementById('icNotesFolderInput'),
   browseIcNotesFolderBtn: document.getElementById('browseIcNotesFolderBtn'),
+  uberectorFolderInput: document.getElementById('uberectorFolderInput'),
+  browseUberectorFolderBtn: document.getElementById('browseUberectorFolderBtn'),
   icImportModal: document.getElementById('icImportModal'),
   icImportCloseBtn: document.getElementById('icImportCloseBtn'),
   icImportProgress: document.getElementById('icImportProgress'),
@@ -1879,6 +1896,7 @@ function setEditorEnabled(enabled) {
   els.fixBtn.disabled = !enabled;
   els.transcribeBtn.disabled = !enabled;
   els.formatBtn.disabled = !enabled;
+  els.uberectorBtn.disabled = !enabled;
   if (!enabled) {
     els.undoBtn.disabled = true;
     els.redoBtn.disabled = true;
@@ -3020,6 +3038,7 @@ let localModelPath = '';
 let whisperCliPath = '';
 let whisperModelPath = '';
 let icNotesFolder = '';
+let uberectorFolder = '';
 let githubToken = '';
 let githubRepo = '';
 let publishingName = '';
@@ -3491,6 +3510,20 @@ async function formatCurrentNoteText() {
   await flushSaveIfNeeded();
   if (currentIndex == null || notes[currentIndex] !== n) return;
   await startNoteAiJob({ kind: 'format', n, text });
+}
+
+// Drop the open note's text into Uberector's inbox (editor text, so unsaved edits go too).
+async function sendCurrentNoteToUberector() {
+  const n = getOpenNote();
+  if (!n || n.unavailable) return;
+  const text = els.editor.value;
+  if (!text.trim()) {
+    await api.showAlert('This note is empty.');
+    return;
+  }
+  const r = await api.uberectorSend(uberectorFolder, text);
+  if (r && r.success) flashSaveState('sent to Uberector ✓');
+  else await api.showAlert(`Send to Uberector failed: ${(r && r.error) || 'unknown error'}`);
 }
 
 // Apply a finished job. Open note: into the editor as one undo step, asking
@@ -5192,6 +5225,7 @@ function updatePrefsUI() {
   els.whisperCliPathInput.value = whisperCliPath || '';
   els.whisperModelPathInput.value = whisperModelPath || '';
   els.icNotesFolderInput.value = icNotesFolder || '';
+  els.uberectorFolderInput.value = uberectorFolder || '';
   
   // GitHub settings
   els.githubTokenInput.value = githubToken || '';
@@ -5383,6 +5417,15 @@ async function browseForIcNotesFolder() {
   if (result) {
     icNotesFolder = result;
     api.savePreferences({ icNotesFolder: result });
+    updatePrefsUI();
+  }
+}
+
+async function browseForUberectorFolder() {
+  const result = await api.openFolderDialog();
+  if (result) {
+    uberectorFolder = result;
+    api.savePreferences({ uberectorFolder: result });
     updatePrefsUI();
   }
 }
@@ -5695,6 +5738,7 @@ async function loadPreferences() {
     whisperCliPath = prefs.whisperCliPath || '';
     whisperModelPath = prefs.whisperModelPath || '';
     icNotesFolder = prefs.icNotesFolder || '';
+    uberectorFolder = prefs.uberectorFolder || '';
     githubToken = prefs.githubToken || '';
     githubRepo = prefs.githubRepo || '';
     publishingName = prefs.publishingName || '';
@@ -7642,6 +7686,7 @@ api.onIcImportProgress(handleIcImportProgress);
 // Per-note AI actions
 els.transcribeBtn.addEventListener('click', () => transcribeCurrentNoteAudio());
 els.formatBtn.addEventListener('click', () => formatCurrentNoteText());
+els.uberectorBtn.addEventListener('click', () => sendCurrentNoteToUberector());
 api.onNoteAiProgress(handleNoteAiProgress);
 
 els.themeLightBtn.addEventListener('click', () => applyTheme('light'));
@@ -7657,6 +7702,7 @@ els.deepseekKeyInput.addEventListener('blur', (e) => saveDeepseekKey(e.target.va
 els.browseWhisperCliBtn.addEventListener('click', () => browseForWhisperCli());
 els.browseWhisperModelBtn.addEventListener('click', () => browseForWhisperModel());
 els.browseIcNotesFolderBtn.addEventListener('click', () => browseForIcNotesFolder());
+els.browseUberectorFolderBtn.addEventListener('click', () => browseForUberectorFolder());
 
 // GitHub settings handlers
 els.githubTokenInput.addEventListener('change', (e) => saveGithubToken(e.target.value));
