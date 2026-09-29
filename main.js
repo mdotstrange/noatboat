@@ -3,7 +3,7 @@
 // Must be set before the threadpool is first used.
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';
 
-const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, shell, net } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, shell, net, protocol, safeStorage, systemPreferences } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os'); // Added for temp file handling
@@ -11,13 +11,35 @@ const os = require('os'); // Added for temp file handling
 const { spawn } = require('child_process');
 const { pathToFileURL } = require('url');
 const crypto = require('crypto');
+const vault = require('./vault');
+const yubikey = require('./hwkeys/yubikey');
+const trezor = require('./hwkeys/trezor');
 
 const fsp = fs.promises;
+
+// Encrypted audio can't be played from file://; it is served decrypted from
+// memory over noatvault:// instead (see registerVaultProtocol).
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'noatvault', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }
+]);
 
 // Timeouts for file operations against the notes folder. Cloud-synced files
 // (Dropbox online-only placeholders) can stall indefinitely on read when offline.
 const FILE_OP_TIMEOUT_MS = 5000;    // per-file ops during a folder scan
 const LAZY_READ_TIMEOUT_MS = 15000; // single-file reads (image/audio/canvas)
+
+// Cooperative cancellation for long jobs (Import from IC "Stop").
+function cancelledError() {
+  const e = new Error('Stopped');
+  e.code = 'CANCELLED';
+  return e;
+}
+function isCancelled(e) {
+  return !!(e && e.code === 'CANCELLED');
+}
+function throwIfAborted(signal) {
+  if (signal && signal.aborted) throw cancelledError();
+}
 
 function withTimeout(promise, ms, label) {
   let timer;
@@ -57,6 +79,21 @@ async function mapLimit(items, limit, fn) {
   });
   await Promise.all(workers);
   return results;
+}
+
+// Simple counting semaphore: `const release = await acquire(); try {...} finally { release(); }`
+function makeSemaphore(max) {
+  let active = 0;
+  const waiters = [];
+  const release = () => {
+    const next = waiters.shift();
+    if (next) next(); else active--;
+  };
+  return async () => {
+    if (active < max) { active++; return release; }
+    await new Promise((resolve) => waiters.push(resolve));
+    return release;
+  };
 }
 
 // All app-generated sidecar files (canvas, image/audio attachments, format
@@ -112,6 +149,12 @@ function getAudioCacheDir() {
   return dir;
 }
 
+// Transcodes are plaintext; once a folder is encrypted, copies made before
+// that must go (the cache is regenerated on demand).
+function clearAudioCache() {
+  try { fs.rmSync(path.join(app.getPath('userData'), 'audio-cache'), { recursive: true, force: true }); } catch (_e) {}
+}
+
 function getFileSignature(p) {
   try {
     const st = fs.statSync(p);
@@ -148,25 +191,106 @@ function runFfmpeg(args) {
   });
 }
 
+// Transcodes of encrypted audio are plaintext, so they go in the session temp
+// dir (wiped on quit) instead of the persistent audio-cache.
+function getTranscodeOutPath(inputPath, outExt) {
+  const cached = getCachedAudioPath(inputPath, outExt);
+  if (!vault.fileIsEncryptedSync(inputPath)) return cached;
+  return path.join(vault.getSessionTmpDir(), path.basename(cached));
+}
+
 async function transcodeToWavCached(inputPath) {
-  const outPath = getCachedAudioPath(inputPath, 'wav');
+  const outPath = getTranscodeOutPath(inputPath, 'wav');
   if (fs.existsSync(outPath)) return outPath;
 
   // -vn to ignore video streams, force stereo and 44.1kHz for predictable playback
-  await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', inputPath, '-vn', '-ac', '2', '-ar', '44100', '-f', 'wav', outPath]);
+  await vault.withPlainTemp(inputPath, (src) =>
+    runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', src, '-vn', '-ac', '2', '-ar', '44100', '-f', 'wav', outPath]));
   return outPath;
 }
 
 async function transcodeToMp3DataUrl(inputPath, bitrateKbps = 128) {
-  const outPath = getCachedAudioPath(inputPath, 'mp3');
+  const outPath = getTranscodeOutPath(inputPath, 'mp3');
   if (!fs.existsSync(outPath)) {
-    await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', inputPath, '-vn', '-ac', '2', '-ar', '44100', '-b:a', `${bitrateKbps}k`, '-f', 'mp3', outPath]);
+    await vault.withPlainTemp(inputPath, (src) =>
+      runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', src, '-vn', '-ac', '2', '-ar', '44100', '-b:a', `${bitrateKbps}k`, '-f', 'mp3', outPath]));
   }
   const buf = fs.readFileSync(outPath);
   const b64 = buf.toString('base64');
   return { path: outPath, dataUrl: `data:audio/mpeg;base64,${b64}` };
 }
 
+// ---------------------------------------------------------------------------
+// DeepSeek (OpenAI-compatible chat completions). Single shared helper used by
+// both the auto-fix feature and the IC recorder import so the API key is only
+// ever used from the main process.
+const DEEPSEEK_MODEL = 'deepseek-flash';
+const DEEPSEEK_ENDPOINT = 'https://api.deepseek.com/v1/chat/completions';
+
+async function callDeepSeek({ apiKey, system, user, temperature = 0.2, maxTokens = 4096, timeoutMs = 180000, thinking = false, signal = null }) {
+  if (!apiKey) throw new Error('DeepSeek API key is not set');
+  throwIfAborted(signal);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const onAbort = () => { try { controller.abort(); } catch (_e) {} };
+  if (signal) signal.addEventListener('abort', onAbort, { once: true });
+  let res;
+  try {
+    res = await fetch(DEEPSEEK_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: DEEPSEEK_MODEL,
+        messages: [
+          { role: 'system', content: system || '' },
+          { role: 'user', content: user || '' }
+        ],
+        temperature,
+        max_tokens: maxTokens,
+        // Thinking mode is on by default and its reasoning tokens count against
+        // max_tokens, which left long transcripts with an empty reply. These
+        // editing tasks do not need it.
+        thinking: { type: thinking ? 'enabled' : 'disabled' }
+      }),
+      signal: controller.signal
+    });
+  } catch (e) {
+    if (signal && signal.aborted) throw cancelledError();
+    if (e && e.name === 'AbortError') throw new Error(`DeepSeek request timed out after ${Math.round(timeoutMs / 1000)}s`);
+    throw new Error(`DeepSeek request failed: ${e.message || e}`);
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', onAbort);
+  }
+
+  const bodyText = await res.text();
+  throwIfAborted(signal);
+  let data = null;
+  try { data = JSON.parse(bodyText); } catch (_e) {}
+
+  if (!res.ok) {
+    const msg = (data && data.error && data.error.message) || bodyText.slice(0, 200) || res.statusText;
+    throw new Error(`DeepSeek ${res.status}: ${msg}`);
+  }
+  const choice = data && data.choices && data.choices[0];
+  const content = choice && choice.message && choice.message.content;
+  const reason = (choice && choice.finish_reason) || 'unknown';
+  if (typeof content !== 'string' || !content.trim()) {
+    throw new Error(`DeepSeek returned no text (finish_reason: ${reason})`);
+  }
+  if (reason === 'length') {
+    // The reply hit max_tokens and is cut off. Callers may retry with a
+    // bigger budget; never silently accept a truncated edit.
+    const err = new Error(`DeepSeek reply was cut off at ${maxTokens} tokens (finish_reason: length)`);
+    err.code = 'DEEPSEEK_TRUNCATED';
+    err.partialContent = content;
+    throw err;
+  }
+  return content;
+}
 
 // Note: MP3 encoding is done in the renderer process using vendored lamejs (lame.min.js)
 
@@ -330,6 +454,8 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  vault.cleanupSessionTmpDirs();
+  registerVaultProtocol();
   createWindow();
 
   app.on('activate', () => {
@@ -343,6 +469,11 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+app.on('will-quit', () => {
+  vault.removeSessionTmpDir();
+  trezor.dispose();
 });
 
 app.on('before-quit', async () => {
@@ -377,14 +508,24 @@ ipcMain.handle('save-folder-path', async (event, folderPath) => {
 // Get preferences
 ipcMain.handle('get-preferences', async () => {
   const config = loadConfig();
+  // One-time migration: OpenAI was replaced by DeepSeek as the cloud provider.
+  if (config.autoFixProvider === 'openai' || config.openAIKey !== undefined) {
+    if (config.autoFixProvider === 'openai') config.autoFixProvider = 'deepseek';
+    delete config.openAIKey;
+    saveConfig(config);
+  }
   return {
     theme: config.theme || 'light',
     focusStrength: config.focusStrength !== undefined ? config.focusStrength : 70,
     autoFixMode: config.autoFixMode || 'off',
     autoFixEnabled: config.autoFixEnabled || false, // Legacy support
-    autoFixProvider: config.autoFixProvider || 'openai',
-    openAIKey: config.openAIKey || '',
+    autoFixProvider: config.autoFixProvider || 'deepseek',
+    deepseekKey: config.deepseekKey || '',
     localModelPath: config.localModelPath || '',
+    whisperCliPath: config.whisperCliPath || '',
+    whisperModelPath: config.whisperModelPath || '',
+    icNotesFolder: config.icNotesFolder || '',
+    uberectorFolder: config.uberectorFolder || path.join(app.getPath('documents'), 'Uberector Inbox'),
     githubToken: config.githubToken || '',
     githubRepo: config.githubRepo || '',
     publishingName: config.publishingName || '',
@@ -401,8 +542,12 @@ ipcMain.handle('save-preferences', async (event, prefs) => {
   if (prefs.focusStrength !== undefined) config.focusStrength = prefs.focusStrength;
   if (prefs.autoFixMode !== undefined) config.autoFixMode = prefs.autoFixMode;
   if (prefs.autoFixProvider !== undefined) config.autoFixProvider = prefs.autoFixProvider;
-  if (prefs.openAIKey !== undefined) config.openAIKey = prefs.openAIKey;
+  if (prefs.deepseekKey !== undefined) config.deepseekKey = prefs.deepseekKey;
   if (prefs.localModelPath !== undefined) config.localModelPath = prefs.localModelPath;
+  if (prefs.whisperCliPath !== undefined) config.whisperCliPath = prefs.whisperCliPath;
+  if (prefs.whisperModelPath !== undefined) config.whisperModelPath = prefs.whisperModelPath;
+  if (prefs.icNotesFolder !== undefined) config.icNotesFolder = prefs.icNotesFolder;
+  if (prefs.uberectorFolder !== undefined) config.uberectorFolder = prefs.uberectorFolder;
   if (prefs.githubToken !== undefined) config.githubToken = prefs.githubToken;
   if (prefs.githubRepo !== undefined) config.githubRepo = prefs.githubRepo;
   if (prefs.publishingName !== undefined) config.publishingName = prefs.publishingName;
@@ -412,6 +557,424 @@ ipcMain.handle('save-preferences', async (event, prefs) => {
   saveConfig(config);
   return true;
 });
+
+// ============ Notes encryption (vault) ============
+// The password never touches disk. When "remember" is on, the vault's data key
+// is kept in config.vaultKeys[root], sealed with safeStorage (DPAPI/Keychain).
+
+function vaultConfigKey(root) {
+  return (process.platform === 'win32' || process.platform === 'darwin') ? path.resolve(root).toLowerCase() : path.resolve(root);
+}
+
+function rememberVaultKey(root, dataKey) {
+  if (!safeStorage.isEncryptionAvailable()) return false;
+  const config = loadConfig();
+  config.vaultKeys = config.vaultKeys || {};
+  config.vaultKeys[vaultConfigKey(root)] = safeStorage.encryptString(dataKey.toString('base64')).toString('base64');
+  saveConfig(config);
+  return true;
+}
+
+function forgetVaultKey(root) {
+  const config = loadConfig();
+  if (config.vaultKeys) {
+    delete config.vaultKeys[vaultConfigKey(root)];
+    saveConfig(config);
+  }
+}
+
+function forgetVaultTouchId(root) {
+  const config = loadConfig();
+  if (config.vaultTouchId && config.vaultTouchId[vaultConfigKey(root)]) {
+    delete config.vaultTouchId[vaultConfigKey(root)];
+    saveConfig(config);
+  }
+}
+
+// Long-running writers that must not overlap an encrypt/decrypt pass: a file
+// they write after the pass has visited its folder would be left in the wrong
+// state (and, after "turn off", without a key). Returns a message or null.
+function vaultJobsRunning() {
+  if (icImportRunning) return 'Wait for the IC import to finish first';
+  if (noteAiJobs.size) return 'Wait for the running AI actions on notes to finish first';
+  return null;
+}
+
+// Trezor Host Protocol pairing (newer firmware): the device pairs this
+// computer once via a code; the host key and credential live in
+// config.trezorThp, the key sealed with safeStorage where available.
+function trezorStoreGet() {
+  const c = loadConfig().trezorThp || {};
+  let staticKey = null;
+  try {
+    if (c.staticKeySealed && safeStorage.isEncryptionAvailable()) staticKey = safeStorage.decryptString(Buffer.from(c.staticKeySealed, 'base64'));
+    else if (c.staticKey) staticKey = c.staticKey;
+  } catch (e) {
+    console.warn('Stored Trezor pairing key unusable:', e.message);
+  }
+  return { staticKey, knownCredentials: Array.isArray(c.knownCredentials) ? c.knownCredentials : [] };
+}
+
+function trezorStoreSet({ staticKey, knownCredentials }) {
+  const config = loadConfig();
+  const entry = { knownCredentials: (knownCredentials || []).slice(-8) };
+  if (staticKey) {
+    if (safeStorage.isEncryptionAvailable()) entry.staticKeySealed = safeStorage.encryptString(staticKey).toString('base64');
+    else entry.staticKey = staticKey;
+  }
+  config.trezorThp = entry;
+  saveConfig(config);
+}
+trezor.setCredentialStore({ get: trezorStoreGet, set: trezorStoreSet });
+
+function touchIdSupported() {
+  try { return process.platform === 'darwin' && systemPreferences.canPromptTouchID(); } catch (_e) { return false; }
+}
+
+// Touch ID gate (macOS): the remembered key is only used after a fingerprint.
+function touchIdRequired(root) {
+  return touchIdSupported() && !!(loadConfig().vaultTouchId || {})[vaultConfigKey(root)];
+}
+
+// Unlock the vault covering folder from a remembered key, if there is one.
+// Only when asked (folder open, "Use Touch ID"), so a status refresh never
+// pops up a Touch ID prompt.
+async function tryAutoUnlock(folder, auto) {
+  vault.invalidate();
+  const st = vault.status(folder);
+  if (st.state !== 'locked' || !auto) return st;
+  const sealed = (loadConfig().vaultKeys || {})[vaultConfigKey(st.root)];
+  if (sealed && safeStorage.isEncryptionAvailable()) {
+    if (touchIdRequired(st.root)) {
+      try {
+        await systemPreferences.promptTouchID('unlock your Noat Boat notes');
+      } catch (_e) {
+        return vault.status(folder); // cancelled or failed: stay locked
+      }
+    }
+    try {
+      const dataKey = Buffer.from(safeStorage.decryptString(Buffer.from(sealed, 'base64')), 'base64');
+      // false: the folder was re-keyed, so the remembered key is useless.
+      // null: vault.json is unreadable right now (mid-sync); keep the key.
+      if (vault.unlockWithKey(st.root, dataKey) === false) forgetVaultKey(st.root);
+    } catch (e) {
+      console.warn('Remembered notes key unusable:', e.message);
+    }
+  }
+  return vault.status(folder);
+}
+
+async function vaultStatusPublic(folder, auto) {
+  const st = folder ? await tryAutoUnlock(folder, auto) : { state: 'off' };
+  const remembered = !!(st.root && (loadConfig().vaultKeys || {})[vaultConfigKey(st.root)]);
+  return {
+    state: st.state,
+    root: st.root || null,
+    remembered,
+    canRemember: safeStorage.isEncryptionAvailable(),
+    slots: st.root ? vault.listSlots(st.root) : [],
+    touchId: { supported: touchIdSupported(), required: !!(st.root && touchIdRequired(st.root)) }
+  };
+}
+
+function vaultMigrate(event, root, mode) {
+  return vault.migrateFolder(root, mode, {
+    shouldSkip: (stats) => isDatalessPlaceholder(stats) && isNetworkOffline(),
+    onProgress: (p) => { try { event.sender.send('vault-progress', { mode, done: p.done, total: p.total }); } catch (_e) {} }
+  });
+}
+
+function migrateSummary(r) {
+  return { changed: r.changed, total: r.total, skipped: r.skipped.length, failed: r.failed };
+}
+
+// opts.autoUnlock: try the remembered key (behind Touch ID when that is on).
+ipcMain.handle('vault-status', async (event, folder, opts) => {
+  return vaultStatusPublic(folder, !!(opts && opts.autoUnlock));
+});
+
+// Turn encryption on for folder: create vault.json, then encrypt everything.
+// Re-running it on an unlocked vault just finishes any skipped files.
+ipcMain.handle('vault-enable', async (event, folder, password, remember) => {
+  try {
+    const busy = vaultJobsRunning();
+    if (busy) return { success: false, error: busy };
+    vault.invalidate();
+    let st = vault.status(folder);
+    if (st.state === 'locked') return { success: false, error: 'The folder is already encrypted and locked' };
+    if (st.state === 'off') {
+      const dataKey = await vault.createVault(folder, password);
+      if (remember) rememberVaultKey(folder, dataKey);
+      st = vault.status(folder);
+      clearAudioCache();
+    }
+    const r = await vaultMigrate(event, st.root, 'encrypt');
+    return { success: true, ...migrateSummary(r) };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+ipcMain.handle('vault-unlock', async (event, folder, password, remember) => {
+  try {
+    vault.invalidate();
+    const { root, dataKey } = await vault.unlockWithPassword(folder, password);
+    if (remember) rememberVaultKey(root, dataKey); else forgetVaultKey(root);
+    return { success: true, ...(await vaultStatusPublic(folder)) };
+  } catch (e) {
+    return { success: false, wrongPassword: e.code === 'VAULT_WRONG_PASSWORD', error: e.message };
+  }
+});
+
+ipcMain.handle('vault-change-password', async (event, folder, oldPassword, newPassword) => {
+  try {
+    await vault.changePassword(folder, oldPassword, newPassword);
+    return { success: true };
+  } catch (e) {
+    return { success: false, wrongPassword: e.code === 'VAULT_WRONG_PASSWORD', error: e.message };
+  }
+});
+
+// Forget the remembered key and lock now; the next open asks for the password.
+ipcMain.handle('vault-forget-key', async (event, folder) => {
+  const st = vault.status(folder);
+  if (st.root) {
+    forgetVaultKey(st.root);
+    vault.lock(st.root);
+    dropVaultAudio();
+  }
+  return { success: true, ...(await vaultStatusPublic(folder)) };
+});
+
+// Decrypt every file and remove vault.json. The password is re-checked first.
+ipcMain.handle('vault-disable', async (event, folder, password) => {
+  try {
+    const busy = vaultJobsRunning();
+    if (busy) return { success: false, error: busy };
+    const { root } = await vault.unlockWithPassword(folder, password);
+    const r = await vaultMigrate(event, root, 'decrypt');
+    if (r.skipped.length || r.failed.length) {
+      return { success: false, ...migrateSummary(r), error: 'Some files could not be decrypted; encryption is still on. Try again once they are synced.' };
+    }
+    // Nothing may still be encrypted when vault.json goes: a file written
+    // during the pass would otherwise be lost for good.
+    const left = vault.listEncryptedFiles(root);
+    if (left.length) {
+      return { success: false, ...migrateSummary(r), error: `${left.length} file(s) were written while decrypting; encryption is still on. Run it again.` };
+    }
+    forgetVaultKey(root);
+    forgetVaultTouchId(root);
+    dropVaultAudio();
+    vault.removeVault(root);
+    return { success: true, ...migrateSummary(r) };
+  } catch (e) {
+    return { success: false, wrongPassword: e.code === 'VAULT_WRONG_PASSWORD', error: e.message };
+  }
+});
+
+// --- Hardware unlock methods (key slots) ---
+// Each slot stores a salt; the device turns it into the same secret every time
+// (YubiKey HMAC-SHA1 slot 2, Trezor cipherKeyValue). Prompts for the user
+// ("Touch your YubiKey") go to the renderer on 'vault-hw-event'.
+
+function hwNotify(event, type) {
+  return (message) => { try { event.sender.send('vault-hw-event', { type, message }); } catch (_e) {} };
+}
+
+// A device needs something typed (the Trezor pairing code): ask the renderer
+// on 'vault-hw-prompt' and wait for 'vault-hw-prompt-reply'. Resolves null
+// when the user cancels or nothing comes back.
+const hwPromptReplies = new Map(); // id -> resolve
+const HW_PROMPT_TIMEOUT_MS = 5 * 60 * 1000;
+ipcMain.on('vault-hw-prompt-reply', (event, id, value) => {
+  const resolve = hwPromptReplies.get(id);
+  if (!resolve) return;
+  hwPromptReplies.delete(id);
+  resolve(value == null ? null : String(value));
+});
+
+function hwPrompt(event, type) {
+  return (req) => new Promise((resolve) => {
+    const id = crypto.randomBytes(8).toString('hex');
+    hwPromptReplies.set(id, resolve);
+    try {
+      event.sender.send('vault-hw-prompt', { id, type, kind: req.kind, message: req.message, length: req.length || null });
+    } catch (_e) {
+      hwPromptReplies.delete(id);
+      resolve(null);
+      return;
+    }
+    setTimeout(() => { if (hwPromptReplies.delete(id)) resolve(null); }, HW_PROMPT_TIMEOUT_MS);
+  });
+}
+
+async function hwSecret(event, type, salt) {
+  const notify = hwNotify(event, type);
+  if (type === 'yubikey') {
+    notify('Looking for your YubiKey...');
+    return yubikey.challengeResponse(salt, { onTouch: () => notify('Touch your YubiKey') });
+  }
+  if (type === 'trezor') return { secret: await trezor.cipher(salt, notify, hwPrompt(event, type)) };
+  throw new Error(`Unknown key type: ${type}`);
+}
+
+function hwError(e) {
+  return { success: false, code: e.code || null, wrongPassword: e.code === 'VAULT_WRONG_PASSWORD', error: String((e && e.message) || e) };
+}
+
+ipcMain.handle('vault-hw-unlock', async (event, folder, slotId, remember) => {
+  try {
+    vault.invalidate();
+    const slot = vault.getSlot(folder, slotId);
+    if (!slot) return { success: false, error: 'That unlock method was removed' };
+    const { secret } = await hwSecret(event, slot.type, slot.salt);
+    const { root, dataKey } = vault.unlockWithSlot(folder, slotId, secret);
+    if (remember) rememberVaultKey(root, dataKey); else forgetVaultKey(root);
+    return { success: true, ...(await vaultStatusPublic(folder)) };
+  } catch (e) {
+    return hwError(e);
+  }
+});
+
+// Enroll a YubiKey or Trezor. The password is re-checked so an unlocked, unattended
+// session can't be used to add someone else's key.
+// opts.setupSlot2: program an empty Slot 2 of the YubiKey for challenge-
+// response first (the renderer asks the user before passing this).
+ipcMain.handle('vault-slot-add', async (event, folder, type, password, opts = {}) => {
+  try {
+    if (type !== 'yubikey' && type !== 'trezor') throw new Error(`Unknown key type: ${type}`);
+    const { root } = await vault.unlockWithPassword(folder, password);
+    const salt = vault.newSlotSalt(type);
+    let label;
+    let meta = {};
+    let secret;
+    if (type === 'yubikey') {
+      if (opts && opts.setupSlot2) {
+        hwNotify(event, type)('Setting up Slot 2 of your YubiKey...');
+        await yubikey.setupSlot2();
+      }
+      const r = await hwSecret(event, type, salt);
+      secret = r.secret;
+      label = r.serial ? `${r.product} #${r.serial}` : r.product;
+      meta = { serial: r.serial || null, deviceId: r.serial ? `yubikey-${r.serial}` : null };
+    } else {
+      // Check for a duplicate before asking the user to confirm on the device.
+      const d = await trezor.describe(hwNotify(event, type), hwPrompt(event, type));
+      vault.assertNotEnrolled(root, type, d.deviceId);
+      label = d.label;
+      secret = (await hwSecret(event, type, salt)).secret;
+      meta = { path: trezor.PATH, deviceId: d.deviceId };
+    }
+    const slot = vault.addSlot(root, { type, label, salt, meta }, secret);
+    return { success: true, slot, slots: vault.listSlots(root) };
+  } catch (e) {
+    return hwError(e);
+  }
+});
+
+ipcMain.handle('vault-slot-remove', async (event, folder, slotId) => {
+  try {
+    vault.removeSlot(folder, slotId);
+    return { success: true, slots: vault.listSlots(folder) };
+  } catch (e) {
+    return hwError(e);
+  }
+});
+
+// macOS: require Touch ID before the remembered key is used. Turning it on
+// asks for a fingerprint once so the user knows it works.
+ipcMain.handle('vault-touchid-set', async (event, folder, on) => {
+  try {
+    const st = vault.status(folder);
+    if (!st.root) throw new Error('This folder is not encrypted');
+    if (on) {
+      if (!touchIdSupported()) throw new Error('Touch ID is not available on this Mac');
+      await systemPreferences.promptTouchID('require Touch ID to unlock your Noat Boat notes');
+    }
+    const config = loadConfig();
+    config.vaultTouchId = config.vaultTouchId || {};
+    if (on) config.vaultTouchId[vaultConfigKey(st.root)] = true;
+    else delete config.vaultTouchId[vaultConfigKey(st.root)];
+    saveConfig(config);
+    return { success: true, ...(await vaultStatusPublic(folder)) };
+  } catch (e) {
+    return hwError(e);
+  }
+});
+
+// noatvault://audio/<token> serves a decrypted audio file from memory with
+// Range support, so <audio> can seek. Tokens are minted per file by
+// get-audio-playback-url; the renderer never passes raw paths through URLs.
+const vaultAudioTokens = new Map(); // token -> file path
+const vaultAudioCache = { path: null, sig: null, buf: null }; // last decrypted file
+
+// Forget served audio: the tokens and the decrypted copy held in memory.
+function dropVaultAudio() {
+  if (vaultAudioCache.buf) { try { vaultAudioCache.buf.fill(0); } catch (_e) {} }
+  vaultAudioCache.path = null;
+  vaultAudioCache.sig = null;
+  vaultAudioCache.buf = null;
+  vaultAudioTokens.clear();
+}
+
+function audioMimeFor(filePath) {
+  const ext = path.extname(filePath).toLowerCase().slice(1);
+  return { wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', flac: 'audio/flac', aiff: 'audio/x-aiff', aif: 'audio/x-aiff', wma: 'audio/x-ms-wma' }[ext] || 'audio/mpeg';
+}
+
+function vaultAudioUrl(filePath) {
+  const token = crypto.randomBytes(16).toString('hex');
+  vaultAudioTokens.set(token, filePath);
+  return `noatvault://audio/${token}${path.extname(filePath).toLowerCase()}`;
+}
+
+function registerVaultProtocol() {
+  protocol.handle('noatvault', async (request) => {
+    try {
+      const url = new URL(request.url);
+      const token = url.pathname.replace(/^\//, '').replace(/\.[^.]*$/, '');
+      const filePath = vaultAudioTokens.get(token);
+      if (!filePath) return new Response('Not found', { status: 404 });
+      // Never serve the in-memory copy once the vault is locked.
+      if (vault.status(path.dirname(filePath)).state !== 'unlocked') {
+        dropVaultAudio();
+        return new Response('Notes are locked', { status: 403 });
+      }
+
+      const sig = getFileSignature(filePath);
+      if (vaultAudioCache.path !== filePath || vaultAudioCache.sig !== sig) {
+        vaultAudioCache.buf = await vault.readFile(filePath);
+        vaultAudioCache.path = filePath;
+        vaultAudioCache.sig = sig;
+      }
+      const buf = vaultAudioCache.buf;
+      const headers = { 'Content-Type': audioMimeFor(filePath), 'Accept-Ranges': 'bytes' };
+
+      const m = /^bytes=(\d*)-(\d*)$/.exec(request.headers.get('Range') || '');
+      if (!m || (m[1] === '' && m[2] === '')) {
+        return new Response(buf, { status: 200, headers: { ...headers, 'Content-Length': String(buf.length) } });
+      }
+      let start, end;
+      if (m[1] === '') { // suffix range: last N bytes
+        start = Math.max(0, buf.length - Number(m[2]));
+        end = buf.length - 1;
+      } else {
+        start = Number(m[1]);
+        end = m[2] === '' ? buf.length - 1 : Math.min(Number(m[2]), buf.length - 1);
+      }
+      if (start >= buf.length || start > end) {
+        return new Response(null, { status: 416, headers: { ...headers, 'Content-Range': `bytes */${buf.length}` } });
+      }
+      const chunk = buf.subarray(start, end + 1);
+      return new Response(chunk, {
+        status: 206,
+        headers: { ...headers, 'Content-Length': String(chunk.length), 'Content-Range': `bytes ${start}-${end}/${buf.length}` }
+      });
+    } catch (e) {
+      return new Response(String(e.message || e), { status: e.code === 'VAULT_LOCKED' ? 403 : 500 });
+    }
+  });
+}
 
 // Open folder picker dialog
 ipcMain.handle('open-folder-dialog', async () => {
@@ -528,7 +1091,7 @@ async function scanFolder(folderPath, opts = {}) {
           }
           // A dataless read triggers a download, so give it the longer timeout.
           const content = readContent
-            ? await withTimeout(fsp.readFile(fullPath, 'utf8'), dataless ? LAZY_READ_TIMEOUT_MS : FILE_OP_TIMEOUT_MS, entry.name)
+            ? await withTimeout(vault.readFile(fullPath, 'utf8'), dataless ? LAZY_READ_TIMEOUT_MS : FILE_OP_TIMEOUT_MS, entry.name)
             : '';
           return {
             kind: 'file',
@@ -588,10 +1151,13 @@ async function scanFolder(folderPath, opts = {}) {
           };
         }
         return null;
-      } catch (_e) {
-        // Per-file failure (timeout, permissions, stalled hydration):
-        // isolate it so the rest of the folder still loads.
+      } catch (e) {
+        // Per-file failure (timeout, permissions, stalled hydration, locked
+        // vault): isolate it so the rest of the folder still loads.
         if (entry.isFile() && entry.name.toLowerCase().endsWith('.txt')) {
+          const locked = !!(e && e.code === 'VAULT_LOCKED');
+          let st = null;
+          if (locked) { try { st = await fsp.stat(fullPath); } catch (_e2) {} }
           return {
             kind: 'file',
             item: {
@@ -599,10 +1165,11 @@ async function scanFolder(folderPath, opts = {}) {
               type: 'text',
               path: fullPath,
               content: '',
-              size: 0,
-              created: 0,
-              lastModified: 0,
-              unavailable: true
+              size: st ? st.size : 0,
+              created: st ? st.birthtimeMs : 0,
+              lastModified: st ? st.mtimeMs : 0,
+              unavailable: true,
+              locked: locked || undefined
             }
           };
         }
@@ -688,6 +1255,7 @@ async function scanFolder(folderPath, opts = {}) {
 
 ipcMain.handle('read-folder', async (event, folderPath) => {
   try {
+    vault.invalidate(); // pick up a vault.json that synced in from elsewhere
     const r = await scanFolder(folderPath);
     return { success: true, files: r.files, folders: r.folders, skippedCount: r.skippedCount };
   } catch (e) {
@@ -696,7 +1264,7 @@ ipcMain.handle('read-folder', async (event, folderPath) => {
 });
 
 // Recursive lightweight scan for the calendar view: every note in the tree
-// with its timestamps, due date, and best thumbnail path. No text content.
+// with its timestamps and due date. No text content.
 ipcMain.handle('calendar-scan', async (event, rootPath) => {
   try {
     const notesOut = [];
@@ -705,44 +1273,19 @@ ipcMain.handle('calendar-scan', async (event, rootPath) => {
       let scan;
       try { scan = await scanFolder(folder, { readContent: false }); } catch (_e) { return; }
 
-      const images = new Map();   // baseKey -> newest non-empty image item
-      const canvases = new Map(); // baseKey -> canvas item (pngPath/pngSize)
-      for (const f of scan.files) {
-        if (f.type === 'image') {
-          if (!(f.size > 0)) continue;
-          const info = sidecarInfo(f.name);
-          if (!info) continue;
-          const prev = images.get(info.baseKey);
-          if (!prev || f.lastModified > prev.lastModified) images.set(info.baseKey, f);
-        } else if (f.type === 'canvas') {
-          const base = f.name.toLowerCase().slice(0, -'.canvas.json'.length);
-          canvases.set(base, f);
-        }
-      }
-
       await mapLimit(scan.files.filter(f => f.type === 'text'), 8, async (f) => {
         const title = f.name.replace(/\.txt$/i, '');
-        const baseKey = title.toLowerCase();
 
         let dueDate = null;
         try {
           const raw = await withTimeout(
-            fsp.readFile(path.join(folder, NOATFORMAT_DIR, title + '.format.json'), 'utf8'),
+            vault.readFile(path.join(folder, NOATFORMAT_DIR, title + '.format.json'), 'utf8'),
             FILE_OP_TIMEOUT_MS, f.name);
           const parsed = JSON.parse(raw);
           if (parsed && typeof parsed.dueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed.dueDate)) {
             dueDate = parsed.dueDate;
           }
         } catch (_e) { /* no format file or unreadable: no due date */ }
-
-        let thumbPath = null;
-        const img = images.get(baseKey);
-        if (img) {
-          thumbPath = img.path;
-        } else {
-          const cv = canvases.get(baseKey);
-          if (cv && cv.pngPath && cv.pngSize >= 102400) thumbPath = cv.pngPath;
-        }
 
         notesOut.push({
           name: f.name,
@@ -752,7 +1295,6 @@ ipcMain.handle('calendar-scan', async (event, rootPath) => {
           created: f.created || 0,
           modified: f.lastModified,
           dueDate: dueDate,
-          thumbPath: thumbPath,
           unavailable: !!f.unavailable
         });
       });
@@ -762,7 +1304,20 @@ ipcMain.handle('calendar-scan', async (event, rootPath) => {
       }
     }
     await walk(rootPath, 0);
-    return { success: true, notes: notesOut };
+
+    // Standalone per-day drawings: .noatformat/calendar/YYYY-MM-DD.png
+    const drawings = {};
+    try {
+      const calDir = path.join(rootPath, NOATFORMAT_DIR, 'calendar');
+      const calEntries = await fsp.readdir(calDir, { withFileTypes: true });
+      for (const entry of calEntries) {
+        if (!entry.isFile()) continue;
+        if (!/^\d{4}-\d{2}-\d{2}\.png$/i.test(entry.name)) continue;
+        drawings[entry.name.slice(0, 10)] = path.join(calDir, entry.name);
+      }
+    } catch (_e) { /* no calendar drawings dir: fine */ }
+
+    return { success: true, notes: notesOut, drawings: drawings };
   } catch (e) {
     return { success: false, error: e.message };
   }
@@ -775,19 +1330,38 @@ ipcMain.handle('read-file', async (event, filePath) => {
     if (isDatalessPlaceholder(stats) && isNetworkOffline()) {
       return { success: false, unavailable: true, error: 'File is online-only and not available offline' };
     }
-    const content = await withTimeout(fsp.readFile(filePath, 'utf8'), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
+    const content = await withTimeout(vault.readFile(filePath, 'utf8'), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
     return { success: true, content: content };
   } catch (e) {
-    return { success: false, error: e.message };
+    return { success: false, locked: e.code === 'VAULT_LOCKED' || undefined, error: e.message };
   }
 });
 
 // Write a text file
 ipcMain.handle('write-file', async (event, filePath, content) => {
   try {
-    fs.writeFileSync(filePath, content, 'utf8');
+    vault.writeFileSync(filePath, content, 'utf8');
     const stats = fs.statSync(filePath);
     return { success: true, lastModified: stats.mtimeMs, size: stats.size };
+  } catch (e) {
+    return { success: false, locked: e.code === 'VAULT_LOCKED' || undefined, error: e.message };
+  }
+});
+
+// Send a note to Uberector's inbox. Written as .tmp then renamed:
+// Uberector only picks a file up after the rename.
+ipcMain.handle('uberector-send', async (event, dir, text) => {
+  try {
+    // Uberector reads plain files, so its inbox cannot sit inside encrypted notes.
+    vault.invalidate();
+    if (vault.findVaultRoot(dir)) {
+      return { success: false, error: 'The Uberector inbox is inside an encrypted notes folder - choose a folder outside it in Preferences' };
+    }
+    await fsp.mkdir(dir, { recursive: true });
+    const file = path.join(dir, `${new Date().toISOString().replace(/[:.]/g, '-')}_${Math.random().toString(36).slice(2, 6)}.txt`);
+    await fsp.writeFile(file + '.tmp', text, 'utf8');
+    await fsp.rename(file + '.tmp', file);
+    return { success: true, path: file };
   } catch (e) {
     return { success: false, error: e.message };
   }
@@ -872,12 +1446,32 @@ ipcMain.handle('move-note', async (event, srcFolder, baseName, destFolder) => {
       }
     }
 
+    // Across a vault boundary (or between two vaults) the bytes are re-encoded:
+    // a plain rename would leave ciphertext in a plain folder or plaintext
+    // inside a vault. Both sides must be unlocked before anything moves.
+    vault.invalidate();
+    const srcRoot = vault.findVaultRoot(srcFolder);
+    const destRoot = vault.findVaultRoot(destFolder);
+    const sameVault = srcRoot === destRoot ||
+      (!!srcRoot && !!destRoot && vaultConfigKey(srcRoot) === vaultConfigKey(destRoot));
+    if (!sameVault) {
+      for (const r of [srcRoot, destRoot]) {
+        if (r && vault.status(r).state !== 'unlocked') throw new vault.LockedError(r);
+      }
+    }
+
     if (moves.some(m => m.destPath.startsWith(destSidecarDir))) {
       fs.mkdirSync(destSidecarDir, { recursive: true });
     }
 
     const movedFiles = [];
     for (const m of moves) {
+      if (!sameVault) {
+        vault.writeFileSync(m.destPath, vault.readFileSync(m.srcPath));
+        fs.unlinkSync(m.srcPath);
+        movedFiles.push(m.label);
+        continue;
+      }
       try {
         fs.renameSync(m.srcPath, m.destPath);
       } catch (renameErr) {
@@ -947,7 +1541,7 @@ ipcMain.handle('read-image-base64', async (event, filePath) => {
     if (isDatalessPlaceholder(stats) && isNetworkOffline()) {
       return { success: false, unavailable: true, error: 'File is online-only and not available offline' };
     }
-    const buffer = await withTimeout(fsp.readFile(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
+    const buffer = await withTimeout(vault.readFile(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
     const ext = path.extname(filePath).toLowerCase().slice(1);
     let mimeType = 'image/png';
     if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
@@ -970,7 +1564,7 @@ ipcMain.handle('read-image-thumbnail', async (event, filePath, maxWidth = 512) =
     if (isDatalessPlaceholder(stats) && isNetworkOffline()) {
       return { success: false, unavailable: true, error: 'File is online-only and not available offline' };
     }
-    const buffer = await withTimeout(fsp.readFile(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
+    const buffer = await withTimeout(vault.readFile(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
     const img = nativeImage.createFromBuffer(buffer);
     if (!img.isEmpty()) {
       const size = img.getSize();
@@ -1001,7 +1595,7 @@ ipcMain.handle('write-image-buffer', async (event, filePath, base64Data) => {
     }
     const buffer = Buffer.from(base64, 'base64');
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, buffer);
+    vault.writeFileSync(filePath, buffer);
     const stats = fs.statSync(filePath);
     return { success: true, lastModified: stats.mtimeMs, size: stats.size };
   } catch (e) {
@@ -1012,7 +1606,7 @@ ipcMain.handle('write-image-buffer', async (event, filePath, base64Data) => {
 // Copy image from source to destination
 ipcMain.handle('copy-image', async (event, srcPath, destPath) => {
   try {
-    fs.copyFileSync(srcPath, destPath);
+    vault.copyFileSync(srcPath, destPath);
     const stats = fs.statSync(destPath);
     return { success: true, lastModified: stats.mtimeMs, size: stats.size };
   } catch (e) {
@@ -1091,6 +1685,51 @@ ipcMain.handle('open-model-dialog', async () => {
   }
   
   return result.filePaths[0];
+});
+
+// Open file picker for the whisper.cpp CLI executable
+ipcMain.handle('open-whisper-cli-dialog', async () => {
+  const filters = process.platform === 'win32'
+    ? [{ name: 'Executables', extensions: ['exe'] }, { name: 'All Files', extensions: ['*'] }]
+    : [{ name: 'All Files', extensions: ['*'] }];
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return result.filePaths[0];
+});
+
+// Open file picker for a whisper.cpp ggml model file
+ipcMain.handle('open-whisper-model-dialog', async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    filters: [
+      { name: 'ggml models', extensions: ['bin'] },
+      { name: 'All Files', extensions: ['*'] }
+    ]
+  });
+  if (result.canceled || result.filePaths.length === 0) return null;
+  return result.filePaths[0];
+});
+
+// DeepSeek chat completion (used by auto-fix in the renderer)
+ipcMain.handle('deepseek-chat', async (event, opts) => {
+  try {
+    const o = opts || {};
+    if (!o.apiKey) return { success: false, error: 'DeepSeek API key is not set' };
+    const text = await callDeepSeek({
+      apiKey: o.apiKey,
+      system: o.system,
+      user: o.user,
+      temperature: typeof o.temperature === 'number' ? o.temperature : 0.2,
+      maxTokens: typeof o.maxTokens === 'number' ? o.maxTokens : 4096
+    });
+    return { success: true, text };
+  } catch (e) {
+    console.error('deepseek-chat error:', e);
+    return { success: false, error: String(e.message || e) };
+  }
 });
 
 // Run local LLM inference
@@ -1360,6 +1999,1091 @@ ipcMain.handle('run-local-llm', async (event, modelPath, text) => {
   }
 });
 
+// ===========================================================================
+// Import from IC (Sony IC recorder -> whisper.cpp -> DeepSeek -> notes)
+// ===========================================================================
+
+const IC_REC_DIR = 'REC_FILE';
+const IC_LEDGER_NAME = 'ic-imports.json';
+const IC_WHISPER_TIMEOUT_MS = 30 * 60 * 1000;
+// Keep each DeepSeek call's output comfortably inside its token budget:
+// ~24k chars of transcript is roughly 6k output tokens.
+const IC_DEEPSEEK_CHUNK_CHARS = 24000;
+const IC_DEEPSEEK_SINGLE_CALL_MAX_CHARS = 30000;
+const IC_DEEPSEEK_MAX_TOKENS = 16384;
+const IC_DEEPSEEK_MAX_TOKENS_CAP = 65536;
+// An edit only cleans up wording, so it should never come back much shorter
+// than the transcript it was given. Shorter than this means it was cut off.
+const IC_EDIT_MIN_LENGTH_RATIO = 0.6;
+// Whisper must have produced text up to (nearly) the end of the speech.
+const IC_WHISPER_MAX_END_GAP_SEC = 30;
+const IC_WHISPER_MIN_COVERAGE = 0.9;
+let icImportRunning = false;
+
+// Readability rules enforced on every edit (prompt + verification + fallback).
+const NOTE_PARA_MAX_WORDS = 120;     // hard limit per paragraph
+const NOTE_PARA_TARGET_WORDS = 90;   // where the deterministic splitter aims
+const NOTE_WORDS_PER_HEADING = 300;  // at least one bold heading per this many words
+const NOTE_MIN_WORDS_FOR_HEADING = 80;
+
+const IC_EDIT_SYSTEM_PROMPT =
+  'You are an editor cleaning up a raw voice-memo transcript (or rough note text). Follow these instructions exactly:\n' +
+  '1) Format the text into readable paragraphs - fixing grammar, spelling and punctuation and managing the flow of the paragraphs to make it more readable - with bold text for the titles of each subsection. Do not edit the text changing words etc; you are just cleaning up what exists and making it more presentable. Keep everything; do not summarise or drop content.\n' +
+  '2) Decide what the title should be based on the contents of the text.\n' +
+  'STRUCTURE RULES (mandatory):\n' +
+  `- Short paragraphs: aim for 40-${NOTE_PARA_TARGET_WORDS} words each and NEVER more than ${NOTE_PARA_MAX_WORDS} words. Split long stretches at natural sentence boundaries. Separate paragraphs with one blank line.\n` +
+  `- Subsection headings: put a short bold heading (2-6 words) before every group of 2-4 paragraphs, whenever the topic shifts. The very first line of the edited text must be a heading. For long texts that means at least one heading per ${NOTE_WORDS_PER_HEADING} words.\n` +
+  '- Mark every heading by wrapping it in double asterisks on its own line, e.g. **Subsection Title**. Use no other markdown (no #, no bullets, no code fences, no --- lines).\n' +
+  'Respond in plain text using exactly this layout and nothing else:\n' +
+  'Title: <short title, max 80 characters, one line>\n' +
+  '\n' +
+  '<the edited text>';
+
+// Second pass when the first result is under-structured: same text back,
+// only allowed to insert headings and paragraph breaks.
+const IC_RESTRUCTURE_SYSTEM_PROMPT =
+  'You are restructuring an already-edited note for readability. Do NOT change, reorder, add or remove any words or sentences. You may only:\n' +
+  `- insert blank lines to split paragraphs so that every paragraph is between 40 and ${NOTE_PARA_TARGET_WORDS} words (hard maximum ${NOTE_PARA_MAX_WORDS}), splitting only between sentences;\n` +
+  `- insert short bold subsection headings (2-6 words, on their own line, wrapped in double asterisks like **Heading**) before every group of 2-4 paragraphs, with at least one heading per ${NOTE_WORDS_PER_HEADING} words, and one as the very first line.\n` +
+  'Keep existing **headings**. Use no other markdown. Respond with ONLY the restructured text, no title line, no commentary.';
+
+function getIcImportCacheDir() {
+  const dir = path.join(app.getPath('userData'), 'ic-import-cache');
+  try {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  } catch (_e) {}
+  return dir;
+}
+
+function isDirSync(p) {
+  try { return fs.statSync(p).isDirectory(); } catch (_e) { return false; }
+}
+
+function isFileSync(p) {
+  try { return fs.statSync(p).isFile(); } catch (_e) { return false; }
+}
+
+// Find every mounted IC recorder's REC_FILE directory. First hit wins.
+function findIcRecorderRoots() {
+  const roots = [];
+  const envDir = process.env.NOATBOAT_IC_REC_FILE;
+  if (envDir && isDirSync(envDir)) return [envDir];
+
+  const tryAdd = (p) => { if (isDirSync(p)) roots.push(p); };
+
+  if (process.platform === 'win32') {
+    const letters = 'CDEFGHIJKLMNOPQRSTUVWXYZAB'.split('');
+    for (const L of letters) tryAdd(`${L}:\\${IC_REC_DIR}`);
+  } else if (process.platform === 'darwin') {
+    tryAdd(path.join('/Volumes', 'IC RECORDER', IC_REC_DIR));
+    try {
+      for (const v of fs.readdirSync('/Volumes')) {
+        const p = path.join('/Volumes', v, IC_REC_DIR);
+        if (!roots.includes(p)) tryAdd(p);
+      }
+    } catch (_e) {}
+  } else {
+    let user = '';
+    try { user = os.userInfo().username; } catch (_e) {}
+    for (const base of [`/media/${user}`, `/run/media/${user}`, '/media', '/mnt']) {
+      try {
+        for (const v of fs.readdirSync(base)) tryAdd(path.join(base, v, IC_REC_DIR));
+      } catch (_e) {}
+    }
+  }
+  return roots;
+}
+
+// List every .mp3 under REC_FILE/FOLDER* sorted oldest first.
+function listIcRecordings(recFileDir) {
+  const out = [];
+  let entries = [];
+  try { entries = fs.readdirSync(recFileDir, { withFileTypes: true }); } catch (_e) { return out; }
+  for (const ent of entries) {
+    if (!ent.isDirectory() || !/^FOLDER\d*$/i.test(ent.name)) continue;
+    const dir = path.join(recFileDir, ent.name);
+    let files = [];
+    try { files = fs.readdirSync(dir, { withFileTypes: true }); } catch (_e) { continue; }
+    for (const f of files) {
+      if (!f.isFile() || !/\.mp3$/i.test(f.name)) continue;
+      const p = path.join(dir, f.name);
+      try {
+        const st = fs.statSync(p);
+        out.push({ name: f.name, path: p, size: st.size, mtimeMs: st.mtimeMs, folder: ent.name });
+      } catch (_e) {}
+    }
+  }
+  out.sort((a, b) => a.mtimeMs - b.mtimeMs);
+  return out;
+}
+
+function icLedgerPath(icNotesFolder) {
+  return path.join(icNotesFolder, NOATFORMAT_DIR, IC_LEDGER_NAME);
+}
+
+function loadIcLedger(ledgerPath) {
+  try {
+    if (fs.existsSync(ledgerPath)) {
+      const parsed = JSON.parse(vault.readFileSync(ledgerPath, 'utf8'));
+      if (parsed && typeof parsed === 'object' && parsed.imports && typeof parsed.imports === 'object') {
+        return { version: 1, imports: parsed.imports };
+      }
+    }
+  } catch (e) {
+    if (e && e.code === 'VAULT_LOCKED') throw e; // never start a fresh ledger over a locked one
+    console.warn('IC import ledger unreadable, starting fresh:', e.message);
+  }
+  return { version: 1, imports: {} };
+}
+
+function saveIcLedger(ledgerPath, ledger) {
+  fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
+  const tmp = ledgerPath + '.tmp';
+  vault.writeFileSync(tmp, JSON.stringify(ledger, null, 2), 'utf8');
+  fs.renameSync(tmp, ledgerPath);
+}
+
+function icImportKey(rec) {
+  return `${rec.name}|${rec.size}|${Math.round(rec.mtimeMs)}`;
+}
+
+// FAT mtimes are 2s-granular and drift with timezone handling across OSes, so a
+// name+size match is also treated as already imported.
+function isAlreadyImported(ledger, rec) {
+  if (ledger.imports[icImportKey(rec)]) return true;
+  const lowerName = rec.name.toLowerCase();
+  for (const entry of Object.values(ledger.imports)) {
+    if (!entry) continue;
+    if (String(entry.sourceName || '').toLowerCase() === lowerName && entry.sourceSize === rec.size) return true;
+  }
+  return false;
+}
+
+// --- Ledger vs. disk -------------------------------------------------------
+// The ledger says what was imported; the notes folder says what still exists.
+// Notes can be moved into subfolders, so index every .txt under the folder.
+function buildNoteIndex(rootDir, maxDepth = 4) {
+  const index = new Map(); // lowercased file name -> absolute path
+  const walk = (dir, depth) => {
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (_e) { return; }
+    for (const ent of entries) {
+      if (ent.isDirectory()) {
+        if (ent.name.startsWith('.') || depth >= maxDepth) continue;
+        walk(path.join(dir, ent.name), depth + 1);
+      } else if (ent.isFile() && /\.txt$/i.test(ent.name)) {
+        const key = ent.name.toLowerCase();
+        if (!index.has(key)) index.set(key, path.join(dir, ent.name));
+      }
+    }
+  };
+  if (rootDir) walk(rootDir, 0);
+  return index;
+}
+
+function findNoteUnderFolder(rootDir, noteName, maxDepth = 4, index = null) {
+  return (index || buildNoteIndex(rootDir, maxDepth)).get(String(noteName || '').toLowerCase()) || null;
+}
+
+// A note named "<recording basename> - YYYY-MM-DD" (optionally " (N)") is the
+// fallback used when the edit produced no title, i.e. that import failed.
+function isFallbackNoteName(noteName, rec) {
+  let base = String(noteName || '')
+    .replace(/\.txt$/i, '')
+    .replace(/ \(\d+\)$/, '')
+    .replace(/ - \d{4}-\d{2}-\d{2}$/, '')
+    .replace(/ \(\d+\)$/, '')
+    .trim().toLowerCase();
+  const expected = sanitizeTitleToFilenameMain(String(rec.name || '').replace(/\.[^.]+$/, '')).toLowerCase();
+  return base === expected || base === 'recording';
+}
+
+// All ledger entries for a recording (exact key plus name+size matches).
+function ledgerEntryFor(ledger, rec) {
+  const keys = [];
+  const exact = icImportKey(rec);
+  if (ledger.imports[exact]) keys.push(exact);
+  const lowerName = String(rec.name || '').toLowerCase();
+  for (const [k, entry] of Object.entries(ledger.imports)) {
+    if (k === exact || !entry) continue;
+    if (String(entry.sourceName || '').toLowerCase() === lowerName && entry.sourceSize === rec.size) keys.push(k);
+  }
+  if (!keys.length) return null;
+  let key = keys[0];
+  for (const k of keys) {
+    if (String(ledger.imports[k].importedAt || '') > String(ledger.imports[key].importedAt || '')) key = k;
+  }
+  return { key, entry: ledger.imports[key], keys };
+}
+
+// fresh: never imported. present: imported and the note still exists.
+// failed: imported, note gone, and it was a fallback-named (failed) import.
+// deleted: imported with a real title, note since removed by the user.
+function classifyRecordings(all, ledger, icNotesFolder) {
+  const index = buildNoteIndex(icNotesFolder);
+  const out = { fresh: [], present: [], failed: [], deleted: [] };
+  for (const rec of all) {
+    const m = ledgerEntryFor(ledger, rec);
+    if (!m) { out.fresh.push(rec); continue; }
+    const anyPresent = m.keys.some(k => { const e = ledger.imports[k]; return e && e.note && index.has(String(e.note).toLowerCase()); });
+    if (anyPresent) { out.present.push(rec); continue; }
+    const item = { rec, entry: m.entry, key: m.key, keys: m.keys };
+    if (isFallbackNoteName(m.entry.note, rec)) out.failed.push(item); else out.deleted.push(item);
+  }
+  return out;
+}
+
+function transcodeForWhisper(mp3Path, wavPath) {
+  // whisper.cpp requires 16 kHz mono signed 16-bit PCM WAV.
+  return runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', mp3Path, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', '-f', 'wav', wavPath]);
+}
+
+// ctl (optional) = { signal, onChild }: signal aborts by killing the child,
+// onChild reports the spawned process so a Stop can reach it.
+function runWhisperCli(cliPath, modelPath, wavPath, outBase, ctl) {
+  return new Promise((resolve, reject) => {
+    const signal = ctl && ctl.signal;
+    if (signal && signal.aborted) { reject(cancelledError()); return; }
+    if (!isFileSync(cliPath)) { reject(new Error(`whisper-cli not found: ${cliPath}`)); return; }
+    if (!isFileSync(modelPath)) { reject(new Error(`Whisper model not found: ${modelPath}`)); return; }
+    // -oj also writes <outBase>.json with per-segment offsets so we can verify
+    // the transcript reaches the end of the audio.
+    // -mc 0: do not feed the previous segment back in as context. With context
+    // on, Whisper falls into repetition loops on long memos and silently
+    // replaces minutes of speech with one phrase repeated (measured: ~40%
+    // of a 10-minute memo lost). Without it the transcript is complete.
+    const args = ['-m', modelPath, '-f', wavPath, '-nt', '-np', '-otxt', '-oj', '-of', outBase, '-l', 'auto', '-mc', '0'];
+    let p;
+    try {
+      p = spawn(cliPath, args, { windowsHide: true, cwd: path.dirname(cliPath) });
+    } catch (e) {
+      reject(new Error(`Could not start whisper-cli: ${e.message}`));
+      return;
+    }
+    let stdout = '';
+    let stderr = '';
+    const onAbort = () => { try { p.kill(); } catch (_e) {} };
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    if (ctl && ctl.onChild) { try { ctl.onChild(p); } catch (_e) {} }
+    const cleanup = () => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+      if (ctl && ctl.onChild) { try { ctl.onChild(null); } catch (_e) {} }
+    };
+    p.stdout.on('data', (d) => { stdout += d.toString(); });
+    p.stderr.on('data', (d) => { stderr += d.toString(); if (stderr.length > 20000) stderr = stderr.slice(-20000); });
+    p.on('error', (err) => {
+      cleanup();
+      const hint = err && err.code === 'EACCES' ? ' (not executable - run: chmod +x on the whisper-cli binary)' : '';
+      reject(new Error(`whisper-cli failed to start: ${err.message}${hint}`));
+    });
+    p.on('close', (code) => {
+      cleanup();
+      if (signal && signal.aborted) { reject(cancelledError()); return; }
+      if (code !== 0) {
+        reject(new Error((stderr || '').trim().split('\n').slice(-5).join('\n') || `whisper-cli exited with code ${code}`));
+        return;
+      }
+      const txtPath = outBase + '.txt';
+      let text = '';
+      try {
+        if (fs.existsSync(txtPath)) text = fs.readFileSync(txtPath, 'utf8');
+      } catch (_e) {}
+      if (!text.trim()) text = stdout;
+      // Segment offsets (ms) from the JSON output, when the build provides it.
+      let lastEndMs = null;
+      let segmentCount = null;
+      try {
+        const jsonPath = outBase + '.json';
+        if (fs.existsSync(jsonPath)) {
+          const j = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+          const segs = Array.isArray(j.transcription) ? j.transcription : [];
+          segmentCount = segs.length;
+          for (const s of segs) {
+            const to = s && s.offsets && Number(s.offsets.to);
+            if (Number.isFinite(to) && (lastEndMs === null || to > lastEndMs)) lastEndMs = to;
+          }
+        }
+      } catch (_e) {}
+      resolve({ text, lastEndMs, segmentCount });
+    });
+  });
+}
+
+// Whisper can fall into a loop that repeats one phrase over and over. Collapse
+// any sentence/line repeated 3+ times in a row down to a single copy.
+function collapseRepetitions(text) {
+  const units = String(text || '').split(/(?<=[.!?])\s+|\n+/).map(u => u.trim()).filter(Boolean);
+  const out = [];
+  let i = 0;
+  while (i < units.length) {
+    const norm = units[i].toLowerCase();
+    let j = i;
+    while (j < units.length && units[j].toLowerCase() === norm) j++;
+    const count = j - i;
+    if (count >= 3) out.push(units[i]);           // a loop: keep one copy
+    else for (let k = i; k < j; k++) out.push(units[k]); // 1-2 copies may be genuine
+    i = j;
+  }
+  return out.join(' ');
+}
+
+// Seconds of audio in a 16 kHz mono 16-bit WAV.
+function wavDurationSec(wavPath) {
+  try { return Math.max(0, (fs.statSync(wavPath).size - 44) / 32000); } catch (_e) { return 0; }
+}
+
+// Where speech effectively ends: the start of an unterminated trailing
+// silence (recorder left running), else the full duration.
+function detectSpeechEndSec(wavPath, durationSec) {
+  return new Promise((resolve) => {
+    if (!ffmpegPath) { resolve(durationSec); return; }
+    const p = spawn(ffmpegPath, ['-hide_banner', '-nostats', '-i', wavPath, '-af', 'silencedetect=noise=-35dB:d=3', '-f', 'null', '-'], { windowsHide: true });
+    let err = '';
+    p.stderr.on('data', (d) => { err += d.toString(); if (err.length > 200000) err = err.slice(-200000); });
+    p.on('error', () => resolve(durationSec));
+    p.on('close', () => {
+      let lastStart = null;
+      let lastEnd = null;
+      for (const m of err.matchAll(/silence_(start|end): *([\d.]+)/g)) {
+        const v = parseFloat(m[2]);
+        if (m[1] === 'start') lastStart = v; else lastEnd = v;
+      }
+      if (lastStart !== null && (lastEnd === null || lastEnd < lastStart)) resolve(Math.max(0, lastStart));
+      else resolve(durationSec);
+    });
+  });
+}
+
+function stripCodeFences(s) {
+  let t = String(s || '').trim();
+  const m = t.match(/^```[a-zA-Z]*\s*\n([\s\S]*?)\n```\s*$/);
+  if (m) t = m[1].trim();
+  return t;
+}
+
+function cleanTitle(t) {
+  return String(t || '').replace(/[*_#`"]/g, '').replace(/\s+/g, ' ').trim().slice(0, 80);
+}
+
+// Decode a JSON-ish string value that may contain raw (unescaped) newlines.
+function decodeLooseJsonString(s) {
+  return s.replace(/\\(["\\/bfnrt]|u[0-9a-fA-F]{4})/g, (_m, c) => {
+    switch (c[0]) {
+      case '"': return '"'; case '\\': return '\\'; case '/': return '/';
+      case 'b': return '\b'; case 'f': return '\f'; case 'n': return '\n';
+      case 'r': return '\r'; case 't': return '\t';
+      default: return String.fromCharCode(parseInt(c.slice(1), 16));
+    }
+  });
+}
+
+// Parse a DeepSeek editing reply into { title, body }.
+// Preferred layout is "Title: ...\n\n<body>"; legacy JSON replies (possibly
+// with raw newlines inside the strings) are also understood.
+function parseDeepSeekNote(raw, fallbackTitle) {
+  const cleaned = stripCodeFences(raw).replace(/\r\n?/g, '\n');
+  const trimmed = cleaned.trim();
+
+  // 1) Legacy / accidental JSON
+  if (trimmed.startsWith('{')) {
+    const last = trimmed.lastIndexOf('}');
+    const jsonText = last > 0 ? trimmed.slice(0, last + 1) : trimmed;
+    try {
+      const parsed = JSON.parse(jsonText);
+      if (parsed && typeof parsed.body === 'string' && parsed.body.trim()) {
+        return { title: cleanTitle(parsed.title) || fallbackTitle, body: parsed.body };
+      }
+    } catch (_e) {}
+    const tm = jsonText.match(/"title"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    const bm = jsonText.match(/"body"\s*:\s*"([\s\S]*?)"\s*}?\s*$/);
+    if (bm && bm[1].trim()) {
+      return { title: cleanTitle(tm ? decodeLooseJsonString(tm[1]) : '') || fallbackTitle, body: decodeLooseJsonString(bm[1]) };
+    }
+  }
+
+  // 2) "Title: ..." first line
+  const lines = trimmed.split('\n');
+  let i = 0;
+  while (i < lines.length && !lines[i].trim()) i++;
+  const tm = i < lines.length ? lines[i].match(/^\s*[*_#\s]*title[*_\s]*:\s*(.+?)\s*$/i) : null;
+  if (tm) {
+    const body = lines.slice(i + 1).join('\n').trim();
+    if (body) return { title: cleanTitle(tm[1]) || fallbackTitle, body };
+  }
+
+  // 3) Fallback: whole reply is the body; title from its first line
+  const firstLine = lines.map(l => cleanTitle(l)).find(l => l.length > 0) || '';
+  return { title: (firstLine.startsWith('{') ? '' : firstLine) || fallbackTitle, body: trimmed || String(raw || '') };
+}
+
+function splitTranscriptIntoChunks(transcript, maxChars) {
+  const paras = transcript.split(/\n\s*\n/);
+  const chunks = [];
+  let cur = '';
+  for (const p of paras) {
+    if (cur && (cur.length + p.length + 2) > maxChars) { chunks.push(cur); cur = ''; }
+    if (p.length > maxChars) {
+      if (cur) { chunks.push(cur); cur = ''; }
+      for (let i = 0; i < p.length; i += maxChars) chunks.push(p.slice(i, i + maxChars));
+      continue;
+    }
+    cur = cur ? cur + '\n\n' + p : p;
+  }
+  if (cur) chunks.push(cur);
+  return chunks.length ? chunks : [transcript];
+}
+
+// Length sanity check: strip formatting markers before comparing so bold
+// markup and paragraph breaks do not skew the ratio.
+function editedLengthRatio(edited, source) {
+  const norm = (s) => String(s || '').replace(/\*\*/g, '').replace(/\s+/g, ' ').trim().length;
+  const src = norm(source);
+  return src === 0 ? 1 : norm(edited) / src;
+}
+
+// opts (optional) = { signal, onPhase }: signal cancels, onPhase reports
+// sub-steps ("attempt 2 (larger budget)") so slow runs look alive.
+async function editTranscriptWithDeepSeek(apiKey, transcript, fallbackTitle, opts) {
+  const signal = (opts && opts.signal) || null;
+  const onPhase = (opts && opts.onPhase) || null;
+  const callOne = async (text, partLabel) => {
+    let maxTokens = IC_DEEPSEEK_MAX_TOKENS;
+    let lastErr = null;
+    let why = '';
+    for (let attempt = 0; attempt < 3; attempt++) {
+      throwIfAborted(signal);
+      if (onPhase) onPhase('edit', 'Editing with DeepSeek' + (partLabel || '') + (attempt ? ` · attempt ${attempt + 1}${why}` : ''));
+      let raw;
+      try {
+        raw = await callDeepSeek({
+          apiKey,
+          system: IC_EDIT_SYSTEM_PROMPT,
+          user: text,
+          temperature: 0.3,
+          maxTokens,
+          timeoutMs: 10 * 60 * 1000,
+          signal
+        });
+      } catch (e) {
+        if (isCancelled(e)) throw e;
+        if (e && e.code === 'DEEPSEEK_TRUNCATED' && maxTokens < IC_DEEPSEEK_MAX_TOKENS_CAP) {
+          console.warn(`DeepSeek reply truncated at ${maxTokens} tokens; retrying with a larger budget`);
+          maxTokens = Math.min(maxTokens * 2, IC_DEEPSEEK_MAX_TOKENS_CAP);
+          lastErr = e;
+          why = ' (larger budget)';
+          continue;
+        }
+        throw e;
+      }
+      const parsed = parseDeepSeekNote(raw, fallbackTitle);
+      const ratio = editedLengthRatio(parsed.body, text);
+      if (ratio >= IC_EDIT_MIN_LENGTH_RATIO) return parsed;
+      lastErr = new Error(`DeepSeek edit looks cut off (${Math.round(ratio * 100)}% of the transcript length)`);
+      why = ' (reply looked cut off)';
+      console.warn(lastErr.message + (attempt < 2 ? '; retrying' : ''));
+    }
+    throw lastErr || new Error('DeepSeek edit failed');
+  };
+  if (transcript.length <= IC_DEEPSEEK_SINGLE_CALL_MAX_CHARS) return callOne(transcript, '');
+
+  const chunks = splitTranscriptIntoChunks(transcript, IC_DEEPSEEK_CHUNK_CHARS);
+  let title = '';
+  const bodies = [];
+  for (let i = 0; i < chunks.length; i++) {
+    throwIfAborted(signal);
+    const r = await callOne(chunks[i], ` · part ${i + 1}/${chunks.length}`);
+    if (i === 0) title = r.title;
+    bodies.push(r.body.trim());
+  }
+  return { title: title || fallbackTitle, body: bodies.join('\n\n') };
+}
+
+// Convert **bold** markers into plain text plus Noat Boat bold spans
+// (character offsets into the returned text).
+function markdownBoldToSpans(text) {
+  let src = String(text || '').replace(/\r\n?/g, '\n').replace(/[ \t]+$/gm, '').trim();
+  // Markdown headings ("## Title") become bold lines too.
+  src = src.replace(/^#{1,6}[ \t]+(.+?)[ \t]*#*$/gm, (_m, t) => /^\*\*.*\*\*$/.test(t.trim()) ? t.trim() : `**${t.trim()}**`);
+  const re = /\*\*([^*\n][^*\n]*?)\*\*/g;
+  let out = '';
+  let last = 0;
+  const spans = [];
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    out += src.slice(last, m.index);
+    const start = out.length;
+    out += m[1];
+    spans.push({ start, end: out.length, type: 'bold' });
+    last = m.index + m[0].length;
+  }
+  out += src.slice(last);
+  // Stray markers: strip them and shift the spans that follow each removal.
+  let idx;
+  while ((idx = out.indexOf('**')) !== -1) {
+    out = out.slice(0, idx) + out.slice(idx + 2);
+    for (const sp of spans) {
+      if (sp.start > idx) sp.start -= 2;
+      if (sp.end > idx) sp.end -= 2;
+    }
+  }
+  return { text: out, spans: spans.filter(sp => sp.end > sp.start) };
+}
+
+// One whisper-cli at a time, app-wide: note jobs and IC import share this
+// queue so N requests never mean N CPU-bound whisper processes.
+let whisperChain = Promise.resolve();
+function runWhisperQueued(fn) {
+  const run = whisperChain.then(fn, fn);   // run even if the previous job failed
+  whisperChain = run.catch(() => {});      // never poison the chain
+  return run;
+}
+
+// DeepSeek calls may overlap, but not without limit.
+const acquireDeepSeek = makeSemaphore(3);
+
+// Convert one audio file to text with ffmpeg + whisper-cli, waiting for the
+// whisper queue first.
+async function transcribeAudioToText(audioPath, whisperCliPath, whisperModelPath, onPhase, ctl) {
+  if (onPhase) onPhase('queued', 'Waiting for Whisper');
+  return runWhisperQueued(() => {
+    // A stopped run that was waiting its turn never spawns whisper.
+    throwIfAborted(ctl && ctl.signal);
+    return vault.withPlainTemp(audioPath, (plainPath) =>
+      transcribeAudioToTextNow(plainPath, whisperCliPath, whisperModelPath, onPhase, ctl));
+  });
+}
+
+// The actual ffmpeg + whisper-cli run. Temp files live in the ic-import cache
+// under unique hashed names and are always removed.
+async function transcribeAudioToTextNow(audioPath, whisperCliPath, whisperModelPath, onPhase, ctl) {
+  const signal = ctl && ctl.signal;
+  throwIfAborted(signal);
+  if (!ffmpegPath) throw new Error('ffmpeg is not available; cannot convert audio');
+  if (!isFileSync(audioPath)) throw new Error(`Audio file not found: ${audioPath}`);
+  // A plaintext copy of an encrypted recording lives in the session temp dir;
+  // keep its wav and transcript there too (wiped on quit / next start).
+  const cacheDir = audioPath.startsWith(vault.getSessionTmpDir()) ? vault.getSessionTmpDir() : getIcImportCacheDir();
+  const sig = getFileSignature(audioPath);
+  const hash = crypto.createHash('sha1').update(`${audioPath}|${sig}|${Date.now()}`).digest('hex');
+  const wavPath = path.join(cacheDir, `${hash}.wav`);
+  const outBase = path.join(cacheDir, hash);
+  try {
+    if (onPhase) onPhase('transcode', 'Converting audio');
+    await transcodeForWhisper(audioPath, wavPath);
+    throwIfAborted(signal);
+    const durationSec = wavDurationSec(wavPath);
+    const speechEndSec = await detectSpeechEndSec(wavPath, durationSec);
+    throwIfAborted(signal);
+
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      throwIfAborted(signal);
+      if (onPhase) onPhase('transcribe', attempt === 0 ? 'Transcribing with Whisper' : 'Re-transcribing with Whisper');
+      const r = await withTimeout(runWhisperCli(whisperCliPath, whisperModelPath, wavPath, outBase, ctl), IC_WHISPER_TIMEOUT_MS, 'Whisper transcription');
+      throwIfAborted(signal);
+      const text = String((r && r.text) || '').trim();
+      if (!text) { lastErr = new Error('Empty transcript'); continue; }
+
+      // Completeness: the last segment must reach (nearly) the end of speech.
+      if (r.lastEndMs !== null && speechEndSec > 0) {
+        const lastEndSec = r.lastEndMs / 1000;
+        const gap = speechEndSec - lastEndSec;
+        const coverage = lastEndSec / speechEndSec;
+        if (gap > IC_WHISPER_MAX_END_GAP_SEC && coverage < IC_WHISPER_MIN_COVERAGE) {
+          lastErr = new Error(`Transcription incomplete: Whisper stopped at ${Math.round(lastEndSec)}s of ${Math.round(speechEndSec)}s of speech`);
+          console.warn(lastErr.message + (attempt === 0 ? '; retrying' : ''));
+          continue;
+        }
+      } else if (r.lastEndMs === null) {
+        console.warn('whisper-cli produced no JSON segment data; skipping completeness check');
+      }
+      return collapseRepetitions(text);
+    }
+    throw lastErr || new Error('Transcription failed');
+  } finally {
+    try { fs.unlinkSync(wavPath); } catch (_e) {}
+    try { fs.unlinkSync(outBase + '.txt'); } catch (_e) {}
+    try { fs.unlinkSync(outBase + '.json'); } catch (_e) {}
+  }
+}
+
+// --- Structure verification on the markdown body (before span conversion) ---
+const MD_HEADING_LINE_RE = /^\s*\*\*[^*\n]+\*\*\s*$/;
+
+function countWords(s) {
+  const t = String(s || '').trim();
+  return t ? t.split(/\s+/).length : 0;
+}
+
+function noteStructureStats(md) {
+  const paras = String(md || '').replace(/\r\n?/g, '\n').split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+  let headings = 0;
+  let maxParaWords = 0;
+  let words = 0;
+  for (const p of paras) {
+    const lines = p.split('\n');
+    const bodyLines = [];
+    for (const l of lines) {
+      if (MD_HEADING_LINE_RE.test(l)) headings++; else bodyLines.push(l);
+    }
+    const w = countWords(bodyLines.join(' ').replace(/\*\*/g, ''));
+    words += w;
+    if (w > maxParaWords) maxParaWords = w;
+  }
+  return { words, paras: paras.length, headings, maxParaWords };
+}
+
+function expectedHeadings(words) {
+  if (words < NOTE_MIN_WORDS_FOR_HEADING) return 0;
+  return Math.max(1, Math.floor(words / NOTE_WORDS_PER_HEADING));
+}
+
+function structureOk(stats) {
+  return stats.maxParaWords <= NOTE_PARA_MAX_WORDS && stats.headings >= expectedHeadings(stats.words);
+}
+
+// Deterministic fallback: split any paragraph over the limit at sentence
+// boundaries into chunks of about NOTE_PARA_TARGET_WORDS words.
+function splitLongParagraphsMd(md) {
+  const paras = String(md || '').replace(/\r\n?/g, '\n').split(/\n\s*\n/);
+  const out = [];
+  for (const para of paras) {
+    const p = para.trim();
+    if (!p) continue;
+    if (countWords(p) <= NOTE_PARA_MAX_WORDS || /\n/.test(p) && p.split('\n').some(l => MD_HEADING_LINE_RE.test(l)) && countWords(p) <= NOTE_PARA_MAX_WORDS + 6) { out.push(p); continue; }
+    // Keep a leading heading line attached to the first chunk.
+    const lines = p.split('\n');
+    let heading = '';
+    let text = p;
+    if (MD_HEADING_LINE_RE.test(lines[0])) { heading = lines[0].trim(); text = lines.slice(1).join(' ').trim(); }
+    else text = lines.join(' ').trim();
+    const sentences = text.split(/(?<=[.!?…]["')\]]?)\s+/).filter(Boolean);
+    const chunks = [];
+    let cur = [];
+    let curWords = 0;
+    for (const s of sentences) {
+      const w = countWords(s);
+      if (cur.length && curWords + w > NOTE_PARA_TARGET_WORDS) { chunks.push(cur.join(' ')); cur = []; curWords = 0; }
+      cur.push(s);
+      curWords += w;
+    }
+    if (cur.length) chunks.push(cur.join(' '));
+    if (heading) chunks[0] = heading + '\n' + chunks[0];
+    out.push(...chunks);
+  }
+  return out.join('\n\n');
+}
+
+// Old-tool style "--- Title ---" heading lines become bold headings.
+function normaliseDashHeadings(md) {
+  return String(md || '').replace(/^[ \t]*-{3,}[ \t]*(.+?)[ \t]*-{3,}[ \t]*$/gm, (_m, t) => `**${t.trim()}**`);
+}
+
+async function restructureWithDeepSeek(apiKey, body, opts) {
+  const raw = await callDeepSeek({
+    apiKey,
+    system: IC_RESTRUCTURE_SYSTEM_PROMPT,
+    user: body,
+    temperature: 0.2,
+    maxTokens: IC_DEEPSEEK_MAX_TOKENS,
+    timeoutMs: 10 * 60 * 1000,
+    signal: (opts && opts.signal) || null
+  });
+  let out = stripCodeFences(raw).replace(/\r\n?/g, '\n').trim();
+  out = out.replace(/^\s*[*_#\s]*title[*_\s]*:.*\n+/i, ''); // tolerate a stray title line
+  const ratio = editedLengthRatio(out, body);
+  if (ratio < 0.85 || ratio > 1.2) throw new Error(`Restructure pass changed the text length (${Math.round(ratio * 100)}%)`);
+  return out;
+}
+
+// Shared "edit + bold" step used by IC import, Transcribe Audio and Format Text.
+// Guarantees the structure rules: verified after the edit, one restructure pass
+// if needed, then a deterministic paragraph split as the last resort.
+async function editTextToNote(apiKey, rawText, fallbackTitle, opts) {
+  const signal = (opts && opts.signal) || null;
+  const onPhase = (opts && opts.onPhase) || null;
+  const release = await acquireDeepSeek();
+  try {
+    throwIfAborted(signal); // cancelled while waiting for a DeepSeek slot
+    const source = normaliseDashHeadings(rawText);
+    const edited = await editTranscriptWithDeepSeek(apiKey, source, fallbackTitle, { signal, onPhase });
+    const title = edited.title;
+    let body = normaliseDashHeadings(edited.body);
+    let stats = noteStructureStats(body);
+    for (let pass = 0; pass < 2 && !structureOk(stats); pass++) {
+      throwIfAborted(signal);
+      console.warn(`Edit under-structured (max para ${stats.maxParaWords} words, ${stats.headings} headings for ${stats.words} words); restructuring (pass ${pass + 1})`);
+      if (onPhase) onPhase('edit', `Restructuring with DeepSeek · pass ${pass + 1}/2`);
+      try {
+        const restructured = await restructureWithDeepSeek(apiKey, body, { signal });
+        const s2 = noteStructureStats(restructured);
+        // Accept the pass if it improved either measure without breaking the other.
+        if (s2.headings >= stats.headings && s2.maxParaWords <= Math.max(stats.maxParaWords, NOTE_PARA_MAX_WORDS)) { body = restructured; stats = s2; }
+      } catch (e) {
+        if (isCancelled(e)) throw e; // never fall through to the splitter on a Stop
+        console.warn('Restructure pass failed:', e.message);
+      }
+    }
+    throwIfAborted(signal);
+    if (stats.maxParaWords > NOTE_PARA_MAX_WORDS) {
+      if (onPhase) onPhase('edit', 'Splitting long paragraphs');
+      body = splitLongParagraphsMd(body);
+      stats = noteStructureStats(body);
+    }
+    if (stats.headings < expectedHeadings(stats.words)) {
+      console.warn(`Note still has ${stats.headings} heading(s) for ${stats.words} words after restructuring`);
+    }
+    const { text, spans } = markdownBoldToSpans(body);
+    if (!text.trim()) throw new Error('DeepSeek returned an empty note');
+    return { title, text, spans };
+  } finally {
+    release();
+  }
+}
+
+// Mirrors sanitizeTitleToFilename in the renderer so both agree on names.
+function sanitizeTitleToFilenameMain(title) {
+  let t = (title || '').trim();
+  if (t.toLowerCase().endsWith('.txt')) t = t.slice(0, -4);
+  t = t.replace(/[\\\/:*?"<>|]/g, ' ');
+  t = t.replace(/\s+/g, ' ').trim();
+  if (t.length > 120) t = t.slice(0, 120).trim();
+  return t;
+}
+
+function uniqueNoteName(dir, title) {
+  let existing = new Set();
+  try { existing = new Set(fs.readdirSync(dir).map(n => n.toLowerCase())); } catch (_e) {}
+  let name = `${title}.txt`;
+  let i = 1;
+  while (existing.has(name.toLowerCase())) name = `${title} (${i++}).txt`;
+  return name;
+}
+
+function ymdLocal(ms) {
+  const d = new Date(ms);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// Sony recorders name files YYMMDD_HHMM.mp3; prefer that over the FAT mtime.
+function recordedDateFor(rec) {
+  const m = rec.name.match(/^(\d{2})(\d{2})(\d{2})_\d{4}/);
+  if (m) {
+    const mm = parseInt(m[2], 10), dd = parseInt(m[3], 10);
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) return `20${m[1]}-${m[2]}-${m[3]}`;
+  }
+  return ymdLocal(rec.mtimeMs);
+}
+
+// Read-only look at the recorder vs. the ledger: what is new, what failed
+// before and will be retried, and what the user deleted (offered for re-import).
+// The transcribed-notes folder may be encrypted; importing into it while it
+// is locked would fail after minutes of transcription.
+function icNotesFolderLocked(folder) {
+  vault.invalidate();
+  if (vault.status(folder).state !== 'locked') return null;
+  return { success: false, locked: true, error: 'The transcribed notes folder is encrypted and locked - unlock it in Preferences > Encryption first' };
+}
+
+ipcMain.handle('ic-import-scan', async (event, opts) => {
+  const o = opts || {};
+  try {
+    if (!o.icNotesFolder) return { success: false, error: 'Transcribed notes folder is not set' };
+    const lockedErr = icNotesFolderLocked(o.icNotesFolder);
+    if (lockedErr) return lockedErr;
+    const recFileDir = o.recFileDir || findIcRecorderRoots()[0];
+    if (!recFileDir || !isDirSync(recFileDir)) {
+      return { success: false, noDevice: true, error: 'No IC RECORDER found - plug it in and try again' };
+    }
+    const all = listIcRecordings(recFileDir);
+    const ledger = loadIcLedger(icLedgerPath(o.icNotesFolder));
+    const c = classifyRecordings(all, ledger, o.icNotesFolder);
+    return {
+      success: true,
+      recFileDir,
+      counts: { total: all.length, fresh: c.fresh.length, failed: c.failed.length, deleted: c.deleted.length, present: c.present.length },
+      failed: c.failed.map(f => f.rec.name),
+      deleted: c.deleted.map(d => ({
+        name: d.rec.name,
+        size: d.rec.size,
+        folder: d.rec.folder,
+        recordedAt: recordedDateFor(d.rec),
+        note: d.entry.note,
+        importedAt: d.entry.importedAt
+      }))
+    };
+  } catch (e) {
+    console.error('ic-import-scan error:', e);
+    return { success: false, error: String((e && e.message) || e) };
+  }
+});
+
+// Stop the active import: no more recordings start, the in-flight DeepSeek
+// request is aborted and the in-flight whisper-cli is killed. The recording
+// being processed writes nothing, so the next import picks it up again.
+let icImportCancel = null; // { requested, controller, whisperChild } for the active run
+
+ipcMain.handle('ic-import-cancel', async () => {
+  const c = icImportCancel;
+  if (!c) return { success: true, running: false };
+  c.requested = true;
+  try { c.controller.abort(); } catch (_e) {}
+  if (c.whisperChild) { try { c.whisperChild.kill(); } catch (_e) {} }
+  return { success: true, running: icImportRunning };
+});
+
+ipcMain.handle('ic-import-run', async (event, opts) => {
+  const o = opts || {};
+  if (icImportRunning) return { success: false, error: 'An import is already running' };
+
+  if (!o.deepseekKey) return { success: false, error: 'DeepSeek API key is not set' };
+  if (!o.whisperCliPath || !isFileSync(o.whisperCliPath)) return { success: false, error: `whisper-cli not found: ${o.whisperCliPath || '(not set)'}` };
+  if (!o.whisperModelPath || !isFileSync(o.whisperModelPath)) return { success: false, error: `Whisper model not found: ${o.whisperModelPath || '(not set)'}` };
+  if (!o.icNotesFolder) return { success: false, error: 'Transcribed notes folder is not set' };
+  const lockedErr = icNotesFolderLocked(o.icNotesFolder);
+  if (lockedErr) return lockedErr;
+  if (!ffmpegPath) return { success: false, error: 'ffmpeg is not available; cannot convert recordings' };
+
+  const send = (p) => { try { event.sender.send('ic-import-progress', p); } catch (_e) {} };
+
+  const recFileDir = o.recFileDir || findIcRecorderRoots()[0];
+  if (!recFileDir || !isDirSync(recFileDir)) {
+    return { success: false, noDevice: true, error: 'No IC RECORDER found - plug it in and try again' };
+  }
+
+  icImportRunning = true;
+  const cancel = { requested: false, controller: new AbortController(), whisperChild: null };
+  icImportCancel = cancel;
+  const ctl = { signal: cancel.controller.signal, onChild: (p) => { cancel.whisperChild = p; } };
+  const imported = [];
+  const errors = [];
+  let skipped = 0;
+  let retried = 0;
+  let reimported = 0;
+  try {
+    send({ phase: 'scan', message: 'Scanning recorder...' });
+    const all = listIcRecordings(recFileDir);
+
+    const sidecarDir = path.join(o.icNotesFolder, NOATFORMAT_DIR);
+    fs.mkdirSync(sidecarDir, { recursive: true });
+    const ledgerPath = icLedgerPath(o.icNotesFolder);
+    const ledger = loadIcLedger(ledgerPath);
+
+    // New recordings and earlier failed imports always run; notes the user
+    // deleted only run when explicitly ticked (reimportNames).
+    const c = classifyRecordings(all, ledger, o.icNotesFolder);
+    const reimportSet = new Set((Array.isArray(o.reimportNames) ? o.reimportNames : []).map(n => String(n).toLowerCase()));
+    const chosen = c.deleted.filter(d => reimportSet.has(d.rec.name.toLowerCase()));
+    const staleKeys = new Map(); // recording name (lowercased) -> ledger keys to replace
+    const origin = new Map();    // recording name (lowercased) -> 'failed' | 'deleted'
+    for (const f of c.failed) { staleKeys.set(f.rec.name.toLowerCase(), f.keys); origin.set(f.rec.name.toLowerCase(), 'failed'); }
+    for (const d of chosen) { staleKeys.set(d.rec.name.toLowerCase(), d.keys); origin.set(d.rec.name.toLowerCase(), 'deleted'); }
+    const todo = (o.reimportOnly ? chosen.map(d => d.rec) : [...c.fresh, ...c.failed.map(f => f.rec), ...chosen.map(d => d.rec)])
+      .sort((a, b) => a.mtimeMs - b.mtimeMs);
+    skipped = all.length - todo.length;
+    const total = todo.length;
+    send({ phase: 'scan', message: `Found ${all.length} recording(s): ${o.reimportOnly ? 0 : c.fresh.length} new, ${o.reimportOnly ? 0 : c.failed.length} to retry, ${chosen.length} re-import, ${skipped} already imported`, total, current: 0 });
+
+    for (let i = 0; i < todo.length; i++) {
+      if (cancel.requested) break;
+      const rec = todo[i];
+      const current = i + 1;
+      const onPhase = (phase, message) => send({ phase, current, total, file: rec.name, message });
+      try {
+        const transcript = await transcribeAudioToText(rec.path, o.whisperCliPath, o.whisperModelPath, onPhase, ctl);
+
+        send({ phase: 'edit', current, total, file: rec.name, message: 'Editing with DeepSeek' });
+        const fallbackTitle = rec.name.replace(/\.mp3$/i, '');
+        const { title, text, spans } = await editTextToNote(o.deepseekKey, transcript, fallbackTitle, { signal: ctl.signal, onPhase });
+        if (cancel.requested) throw cancelledError(); // stopped after the edit: write nothing
+
+        send({ phase: 'write', current, total, file: rec.name, message: 'Saving note' });
+        const recordedAt = recordedDateFor(rec);
+        const base = sanitizeTitleToFilenameMain(title) || 'Recording';
+        const noteName = uniqueNoteName(o.icNotesFolder, `${base} - ${recordedAt}`);
+        const noteBase = noteName.slice(0, -4);
+
+        vault.writeFileSync(path.join(o.icNotesFolder, noteName), text, 'utf8');
+        const icSource = { name: rec.name, size: rec.size, mtime: rec.mtimeMs, recordedAt, folder: rec.folder };
+        vault.writeFileSync(path.join(sidecarDir, `${noteBase}.format.json`), JSON.stringify({ spans, icSource }), 'utf8');
+        vault.copyFileSync(rec.path, path.join(sidecarDir, `${noteBase}.mp3`));
+
+        // Replace any stale entry for this recording (failed or deleted import).
+        for (const k of staleKeys.get(rec.name.toLowerCase()) || []) delete ledger.imports[k];
+        ledger.imports[icImportKey(rec)] = {
+          note: noteName,
+          importedAt: new Date().toISOString(),
+          sourceName: rec.name,
+          sourceSize: rec.size,
+          sourceMtime: rec.mtimeMs,
+          sourceFolder: rec.folder
+        };
+        saveIcLedger(ledgerPath, ledger);
+
+        const from = origin.get(rec.name.toLowerCase());
+        if (from === 'failed') retried++; else if (from === 'deleted') reimported++;
+        imported.push({ note: noteName, source: rec.name });
+        send({ phase: 'done-file', current, total, file: rec.name, note: noteName, message: 'Imported' });
+      } catch (e) {
+        if (isCancelled(e) || cancel.requested) {
+          send({ phase: 'cancelled', current, total, file: rec.name, message: 'Stopped' });
+          break;
+        }
+        const msg = String((e && e.message) || e);
+        console.error('IC import failed for', rec.name, msg);
+        errors.push({ file: rec.name, error: msg });
+        send({ phase: 'error', current, total, file: rec.name, message: msg });
+      }
+    }
+    return { success: true, imported, skipped, errors, recFileDir, retried, reimported, cancelled: cancel.requested };
+  } catch (e) {
+    console.error('ic-import-run error:', e);
+    return { success: false, imported, skipped, errors, recFileDir, retried, reimported, cancelled: cancel.requested, error: String((e && e.message) || e) };
+  } finally {
+    icImportRunning = false;
+    icImportCancel = null;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Per-note AI jobs (Transcribe Audio / Format Text). Any number of notes may
+// have a job at once (one per note). Jobs run in the background; whisper runs
+// are serialised through runWhisperQueued and DeepSeek through acquireDeepSeek.
+// Progress and completion go out on 'note-ai-progress' as
+//   { jobId, notePath, noteName, kind, phase, message, result?, error? }
+// with phase in queued | transcode | transcribe | edit | done | error.
+// The main process never writes note files on its own; the renderer decides
+// (conflict prompts live there) and calls 'note-ai-write-result'.
+const noteAiJobs = new Map(); // jobId -> job
+let noteAiSeq = 0;
+
+function noteKeyOf(p) {
+  const r = path.resolve(String(p || ''));
+  return (process.platform === 'win32' || process.platform === 'darwin') ? r.toLowerCase() : r;
+}
+
+function activeNoteAiJobFor(notePath) {
+  const k = noteKeyOf(notePath);
+  for (const j of noteAiJobs.values()) if (j.noteKey === k) return j;
+  return null;
+}
+
+function noteAiPublic(j) {
+  return { jobId: j.jobId, kind: j.kind, notePath: j.notePath, noteName: j.noteName, phase: j.phase, message: j.message, startedText: j.startedText, startedAt: j.startedAt };
+}
+
+async function runNoteAiJob(job, o) {
+  const send = (phase, message, extra) => {
+    job.phase = phase;
+    job.message = message;
+    const payload = { jobId: job.jobId, notePath: job.notePath, noteName: job.noteName, kind: job.kind, phase, message, ...(extra || {}) };
+    let wc = null;
+    try {
+      if (job.sender && !job.sender.isDestroyed()) wc = job.sender;
+      else if (mainWindow && !mainWindow.isDestroyed()) wc = mainWindow.webContents;
+    } catch (_e) {}
+    try { if (wc) wc.send('note-ai-progress', payload); } catch (_e) {}
+  };
+  try {
+    let raw;
+    let transcript = null;
+    let fallbackTitle;
+    if (job.kind === 'transcribe') {
+      transcript = await transcribeAudioToText(o.audioPath, o.whisperCliPath, o.whisperModelPath, send);
+      raw = transcript;
+      fallbackTitle = path.basename(o.audioPath).replace(/\.[^.]+$/, '');
+    } else {
+      raw = String(o.text || '').trim();
+      fallbackTitle = o.fallbackTitle || 'Note';
+    }
+    send('edit', job.kind === 'transcribe' ? 'Editing with DeepSeek' : 'Formatting with DeepSeek');
+    const { title, text, spans } = await editTextToNote(o.deepseekKey, raw, fallbackTitle);
+    send('done', 'Done', { result: { title, text, spans, transcript } });
+  } catch (e) {
+    console.error('note-ai job failed:', job.kind, job.notePath, e);
+    send('error', 'Failed', { error: String((e && e.message) || e) });
+  } finally {
+    noteAiJobs.delete(job.jobId);
+  }
+}
+
+ipcMain.handle('note-ai-start', async (event, opts) => {
+  const o = opts || {};
+  if (o.kind !== 'transcribe' && o.kind !== 'format') return { success: false, error: 'Unknown AI action' };
+  if (!o.notePath) return { success: false, error: 'No note path given' };
+  if (!o.deepseekKey) return { success: false, error: 'DeepSeek API key is not set' };
+  if (o.kind === 'transcribe') {
+    if (!o.audioPath) return { success: false, error: 'This note has no audio attached' };
+    if (!o.whisperCliPath || !isFileSync(o.whisperCliPath)) return { success: false, error: `whisper-cli not found: ${o.whisperCliPath || '(not set)'}` };
+    if (!o.whisperModelPath || !isFileSync(o.whisperModelPath)) return { success: false, error: `Whisper model not found: ${o.whisperModelPath || '(not set)'}` };
+    if (!ffmpegPath) return { success: false, error: 'ffmpeg is not available; cannot convert audio' };
+  } else if (!String(o.text || '').trim()) {
+    return { success: false, error: 'The note is empty' };
+  }
+  if (activeNoteAiJobFor(o.notePath)) return { success: false, error: 'An AI action is already running for this note' };
+
+  const job = {
+    jobId: 'nai-' + (++noteAiSeq),
+    noteKey: noteKeyOf(o.notePath),
+    kind: o.kind,
+    notePath: o.notePath,
+    noteName: o.noteName || path.basename(o.notePath),
+    startedText: o.kind === 'format' ? String(o.text || '') : (typeof o.startedText === 'string' ? o.startedText : null),
+    phase: 'queued',
+    message: 'Queued',
+    startedAt: Date.now(),
+    sender: event.sender
+  };
+  noteAiJobs.set(job.jobId, job);
+  runNoteAiJob(job, o); // not awaited: runs in the background
+  return { success: true, jobId: job.jobId };
+});
+
+ipcMain.handle('note-ai-list', async () => {
+  return { success: true, jobs: [...noteAiJobs.values()].map(noteAiPublic) };
+});
+
+// Write an AI result to disk: the .txt plus the .format.json sidecar with the
+// new bold spans merged over whatever else the sidecar holds (dueDate, icSource).
+// With expectText set, refuses (conflict) when the file on disk differs from it.
+ipcMain.handle('note-ai-write-result', async (event, opts) => {
+  const o = opts || {};
+  try {
+    if (!o.notePath) return { success: false, error: 'No note path given' };
+    let diskText = null;
+    try { diskText = vault.readFileSync(o.notePath, 'utf8'); } catch (e) {
+      if (e.code === 'VAULT_LOCKED') return { success: false, locked: true, error: e.message };
+    }
+    if (!o.force && typeof o.expectText === 'string' && (diskText === null ? '' : diskText) !== o.expectText) {
+      return { success: false, conflict: true, missing: diskText === null };
+    }
+    fs.mkdirSync(path.dirname(o.notePath), { recursive: true });
+    vault.writeFileSync(o.notePath, String(o.text || ''), 'utf8');
+    const st = fs.statSync(o.notePath);
+
+    const base = path.basename(o.notePath).replace(/\.txt$/i, '');
+    const fmtPath = path.join(path.dirname(o.notePath), NOATFORMAT_DIR, base + '.format.json');
+    let existing = {};
+    try {
+      const parsed = JSON.parse(vault.readFileSync(fmtPath, 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) existing = parsed;
+    } catch (_e) {}
+    const payload = { ...existing, spans: Array.isArray(o.spans) ? o.spans : [] };
+    // Same rule as the renderer's saveFormatSpans: no spans and nothing else -> no sidecar.
+    if (payload.spans.length === 0 && !payload.dueDate && !payload.icSource) {
+      try { fs.unlinkSync(fmtPath); } catch (_e) {}
+    } else {
+      fs.mkdirSync(path.dirname(fmtPath), { recursive: true });
+      vault.writeFileSync(fmtPath, JSON.stringify(payload), 'utf8');
+    }
+    return { success: true, lastModified: st.mtimeMs, size: st.size };
+  } catch (e) {
+    console.error('note-ai-write-result error:', e);
+    return { success: false, error: String((e && e.message) || e) };
+  }
+});
+
 // Read audio as base64 data URL
 ipcMain.handle('read-audio-base64', async (event, filePath) => {
   try {
@@ -1367,7 +3091,7 @@ ipcMain.handle('read-audio-base64', async (event, filePath) => {
     if (isDatalessPlaceholder(stats) && isNetworkOffline()) {
       return { success: false, unavailable: true, error: 'File is online-only and not available offline' };
     }
-    const buffer = await withTimeout(fsp.readFile(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
+    const buffer = await withTimeout(vault.readFile(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
     const ext = path.extname(filePath).toLowerCase().slice(1);
     let mimeType = 'audio/mpeg';
     if (ext === 'wav') mimeType = 'audio/wav';
@@ -1390,7 +3114,7 @@ ipcMain.handle('write-audio-buffer', async (event, filePath, base64Data) => {
     const base64 = base64Data.replace(/^data:audio\/[^;]+;base64,/, '');
     const buffer = Buffer.from(base64, 'base64');
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, buffer);
+    vault.writeFileSync(filePath, buffer);
     const stats = fs.statSync(filePath);
     return { success: true, lastModified: stats.mtimeMs, size: stats.size };
   } catch (e) {
@@ -1419,13 +3143,20 @@ ipcMain.handle('get-audio-playback-url', async (event, filePath, options = {}) =
     const passthrough = new Set(['mp3', 'wav', 'ogg']);
     const needsTranscode = forceTranscode || !passthrough.has(ext);
 
+    // Encrypted files are served decrypted from memory over noatvault://.
+    const encrypted = vault.fileIsEncryptedSync(filePath);
+    if (encrypted && vault.status(path.dirname(filePath)).state !== 'unlocked') {
+      return { success: false, locked: true, error: 'Notes are encrypted and locked' };
+    }
+    const directUrl = () => encrypted ? vaultAudioUrl(filePath) : pathToFileURL(filePath).href;
+
     if (!needsTranscode) {
-      return { success: true, url: pathToFileURL(filePath).href, wasTranscoded: false };
+      return { success: true, url: directUrl(), wasTranscoded: false };
     }
 
     if (!ffmpegPath) {
       // No ffmpeg available; return the original file URL and let the renderer try.
-      return { success: true, url: pathToFileURL(filePath).href, wasTranscoded: false, warning: 'ffmpeg unavailable' };
+      return { success: true, url: directUrl(), wasTranscoded: false, warning: 'ffmpeg unavailable' };
     }
 
     const wavPath = await transcodeToWavCached(filePath);
@@ -1466,7 +3197,7 @@ ipcMain.handle('read-canvas-json', async (event, filePath) => {
     if (isDatalessPlaceholder(stats) && isNetworkOffline()) {
       return { success: false, unavailable: true, error: 'Canvas is online-only and not available offline' };
     }
-    const content = await withTimeout(fsp.readFile(filePath, 'utf8'), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
+    const content = await withTimeout(vault.readFile(filePath, 'utf8'), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
     return { success: true, data: content };
   } catch (e) {
     return { success: false, error: e.message };
@@ -1477,7 +3208,7 @@ ipcMain.handle('read-canvas-json', async (event, filePath) => {
 ipcMain.handle('write-canvas-json', async (event, filePath, jsonData) => {
   try {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, jsonData, 'utf8');
+    vault.writeFileSync(filePath, jsonData, 'utf8');
     const stats = fs.statSync(filePath);
     return { success: true, lastModified: stats.mtimeMs };
   } catch (e) {
@@ -1551,13 +3282,15 @@ ipcMain.handle('show-prompt', async (event, message, defaultValue) => {
 });
 
 // Show confirm dialog
-ipcMain.handle('show-confirm', async (event, message) => {
+// opts = { title, okLabel }; defaults suit the delete prompts.
+ipcMain.handle('show-confirm', async (event, message, opts = {}) => {
   const result = await dialog.showMessageBox(mainWindow, {
     type: 'question',
-    buttons: ['Cancel', 'Delete'],
+    buttons: ['Cancel', opts.okLabel || 'Delete'],
     defaultId: 0,
     cancelId: 0,
-    title: 'Confirm Delete',
+    noLink: true, // plain buttons, not Windows command links
+    title: opts.title || 'Confirm Delete',
     message: message
   });
   return result.response === 1;

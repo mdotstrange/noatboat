@@ -5,6 +5,8 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "test": "node --test vault.test.js hwkeys/yubikey.test.js",
+    "yubikey-check": "electron hwkeys/yubikey-check.js",
     "postinstall": "npx @electron/rebuild",
     "build-win": "electron-builder --win",
     "build-mac": "electron-builder --mac",
@@ -22,11 +24,14 @@
     },
     "files": [
       "**/*",
-      "!dist/**"
+      "!dist/**",
+      "!**/*.test.js"
     ],
     "asarUnpack": [
       "**/node-llama-cpp/**",
-      "**/ffmpeg-static/**"
+      "**/ffmpeg-static/**",
+      "**/node-hid/**",
+      "**/usb/**"
     ],
     "win": {
       "target": [
@@ -92,7 +97,9 @@
   "license": "GPL-3.0",
   "dependencies": {
     "@netlify/blobs": "^10.5.0",
+    "@trezor/connect": "^9.7.3",
     "ffmpeg-static": "^5.2.0",
+    "node-hid": "^3.4.0",
     "node-llama-cpp": "^3.2.0"
   },
   "devDependencies": {

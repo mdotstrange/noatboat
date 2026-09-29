@@ -8,6 +8,10 @@
 - Clicking any note on the calendar opens it, even if it lives in a subfolder
 - Days with many notes show "+N more" which expands to the full list
 - Due dates are stored in the hidden `.noatformat` sidecar files — the .txt notes stay untouched
+- Illustrated notes fill their day cell with the note's image (newest-modified note wins); titles are bold with a contrasting outline so they read over any image
+- ✦ marks a note's creation day, ✎ marks its last-modified day
+- Today's cell shows the animated ASCII boat in the drawing palette colors
+- **Draw on days**: a mini drawing toolbar (draw toggle, pen size, colors) at the top of the calendar lets you sketch quick reminders directly on any day; each day's drawing is saved as a standalone image in `.noatformat/calendar/` (not tied to a note). Right-click a drawing to delete it.
 
 ## Wacom Tablet Support (Feb 5 2026)
 - Switched drawing input from mouse events to pointer events, enabling full Wacom tablet and stylus support

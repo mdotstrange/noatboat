@@ -221,6 +221,17 @@
     .noteItem.unavailable{
       opacity:0.55;
     }
+    /* A note with a background AI job (transcribe/format) running */
+    .noteItem.aiBusy, .noteItem.aiBusy.active{
+      border-left:3px solid #f0c674;
+      padding-left:8px; /* 1px border + 10px pad == 3px border + 8px pad: no text shift */
+    }
+    .noteItem.aiBusy .noteMeta::before{
+      content:'● ';
+      color:#c9962b;
+      animation: pulse-fix 1s infinite;
+    }
+    body.dark-mode .noteItem.aiBusy .noteMeta::before{ color:#f0c674; }
     .noteItem.folder{
       background:var(--bg);
       border-color:var(--border);
@@ -507,13 +518,13 @@
       border:2px solid var(--border); flex-shrink:0;
     }
     .colorPalette{ display:flex; gap:4px; align-items:center; }
-    .colorBtn, .drawColorBtn{
+    .colorBtn, .drawColorBtn, .calColorBtn{
       width:22px; height:22px; border-radius:50%; border:2px solid var(--border);
       cursor:pointer; padding:0; flex-shrink:0;
       transition:transform 0.1s;
     }
-    .colorBtn:hover, .drawColorBtn:hover{ transform:scale(1.15); }
-    .colorBtn.active, .drawColorBtn.active{ border-color:var(--fg); box-shadow:0 0 0 2px var(--bg), 0 0 0 4px var(--fg); }
+    .colorBtn:hover, .drawColorBtn:hover, .calColorBtn:hover{ transform:scale(1.15); }
+    .colorBtn.active, .drawColorBtn.active, .calColorBtn.active{ border-color:var(--fg); box-shadow:0 0 0 2px var(--bg), 0 0 0 4px var(--fg); }
     .canvasContainer{
       flex:1;
       position:relative;
@@ -741,6 +752,19 @@
       padding:18px;
     }
     .prefsModal.open{ display:flex; }
+    #vaultPwModal{ z-index:10002; }
+    .vaultRow{ display:flex; gap:8px; flex-wrap:wrap; }
+    .vaultRow .search{ max-width:100%; flex:1; min-width:120px; }
+    .vaultError{ font-size:12px; color:#c0392b; min-height:0; }
+    .vaultError:empty{ display:none; }
+    .vaultCheck{ display:flex; gap:6px; align-items:center; font-size:12px; color:var(--text); }
+    .vaultHwStatus{ font-size:12px; color:var(--text); font-weight:600; }
+    .vaultHwStatus:empty{ display:none; }
+    .vaultSlotList{ display:flex; flex-direction:column; border:1px solid var(--border); border-radius:8px; }
+    .vaultSlot{ display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 10px; font-size:12px; color:var(--text); }
+    .vaultSlot + .vaultSlot{ border-top:1px solid var(--border); }
+    .vaultSlot .vaultSlotMeta{ color:var(--muted); font-size:11px; }
+    .vaultSlot .btn{ padding:3px 8px; font-size:11px; }
     .prefsDialog{
       width:min(450px, 90vw);
       max-height:min(85vh, 700px);
@@ -896,6 +920,37 @@
       color:var(--muted);
       font-family:var(--mono);
     }
+    .icLog{
+      max-height:220px;
+      overflow:auto;
+      font-family:var(--mono);
+      font-size:12px;
+      color:var(--muted);
+      border:1px solid var(--border);
+      border-radius:8px;
+      padding:8px;
+      display:flex;
+      flex-direction:column;
+      gap:4px;
+      white-space:pre-wrap;
+      word-break:break-word;
+    }
+    .icLog:empty{ display:none; }
+    .icLog .ok{ color:#1e6b2a; }
+    .icLog .err{ color:#b42318; }
+    body.dark-mode .icLog .ok{ color:#8fd19e; }
+    body.dark-mode .icLog .err{ color:#f19c93; }
+    .icActions{ display:flex; justify-content:flex-end; margin-top:12px; }
+    /* Recordings imported before whose note was later deleted (opt-in re-import) */
+    .icDeleted{ border:1px solid var(--border); border-radius:8px; padding:8px; margin-top:12px; }
+    .icDeleted[hidden]{ display:none; }
+    .icDeletedTitle{ font-family:var(--mono); font-size:11px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; padding:0 4px 6px; }
+    .icDeletedList{ max-height:180px; overflow:auto; display:flex; flex-direction:column; gap:2px; }
+    .icDeletedRow{ display:grid; grid-template-columns:auto minmax(0,1fr) minmax(0,1.4fr) auto; gap:8px; align-items:center; padding:4px; font-family:var(--mono); font-size:12px; cursor:pointer; border-radius:6px; }
+    .icDeletedRow:hover{ background:var(--note-active-bg); }
+    .icDelName, .icDelWas{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .icDelWas, .icDelDate{ color:var(--muted); }
+    .icDeleted .icActions{ margin-top:8px; }
     @keyframes gridScrollUp{
       from{ background-position: 0px 0px, 0px 0px, 0px 0px, 0px 0px; }
       to{ background-position: 0px -240px, 0px -240px, 0px -1200px, 0px -1200px; }
@@ -935,6 +990,7 @@
       user-select:none;
     }
     #refreshBtn .ico{ transform: scale( 2 ); transform-origin: center; }
+    #uberectorBtn img.ico{ image-rendering:pixelated; }
     @media (prefers-reduced-motion: reduce){ .thumb{ animation:none !important; } .canvasWorkspace{ animation:none !important; } }
     @media (max-width: 820px){
       .main{ grid-template-columns: 1fr; }
@@ -996,15 +1052,6 @@
       border:1px solid var(--note-active-border);
       border-radius:6px;
     }
-    .calCellBg{
-      position:absolute;
-      inset:0;
-      width:100%;
-      height:100%;
-      object-fit:cover;
-      z-index:0;
-      pointer-events:none;
-    }
     .calDayNum{
       font-size:11px;
       color:var(--muted);
@@ -1052,6 +1099,32 @@
       text-shadow:-1px -1px 0 var(--cal-outline), 1px -1px 0 var(--cal-outline), -1px 1px 0 var(--cal-outline), 1px 1px 0 var(--cal-outline);
     }
     .calMore:hover{ color:var(--text); }
+    .calToolbar{
+      border:1px solid var(--border);
+      border-radius:8px;
+      margin-bottom:10px;
+      flex:none;
+    }
+    .calDrawHint{ font-size:11px; color:var(--muted); font-family:var(--mono); white-space:nowrap; }
+    .calGridWrap{ position:relative; flex:1; min-height:0; display:flex; }
+    .calGridWrap .calGrid{ flex:1; }
+    .calDrawOverlay{
+      position:absolute;
+      inset:0;
+      z-index:5;
+      display:none;
+      cursor:crosshair;
+      touch-action:none;
+    }
+    .calDrawOverlay.active{ display:block; }
+    .calDayDrawing{
+      position:absolute;
+      inset:0;
+      width:100%;
+      height:100%;
+      z-index:2;
+      pointer-events:none;
+    }
     .calBoat{
       position:absolute;
       left:0; right:0; bottom:2px;
@@ -1143,8 +1216,12 @@
     <button id="drawBtn" class="btn" disabled aria-label="Draw"><span class="ico" aria-hidden="true">✏️</span></button>
     <button id="attachBtn" class="btn" disabled aria-label="Attach image"><span class="ico" aria-hidden="true">🖼️</span></button>
     <button id="audioBtn" class="btn" disabled aria-label="Audio"><span class="ico" aria-hidden="true">🔊</span></button>
+    <button id="transcribeBtn" class="btn" disabled aria-label="Transcribe Audio" title="Transcribe Audio: transcribe the attached recording with Whisper and format it with DeepSeek"><span class="ico" aria-hidden="true">🗣️</span></button>
+    <button id="formatBtn" class="btn" disabled aria-label="Format Text" title="Format Text: clean up this note with DeepSeek and bold the headings"><span class="ico" aria-hidden="true">🪄</span></button>
+    <button id="uberectorBtn" class="btn" disabled aria-label="Send note to Uberector" title="Send Note to Uberector: copy this note's text into the Uberector inbox"><img class="ico" src="uberector.png" alt="" aria-hidden="true"></button>
     <div class="spacer"></div>
     <button id="calendarBtn" class="btn" disabled aria-label="Calendar" title="Calendar"><span class="ico" aria-hidden="true">📅</span></button>
+    <button id="importIcBtn" class="btn" aria-label="Import from IC" title="Import from IC recorder"><span class="ico" aria-hidden="true">🎙️</span></button>
     <div class="gapBtn"></div>
     <div id="status" class="status" style="display:none"></div>
     <button id="exportBtn" class="btn" disabled aria-label="Export"><span class="ico" aria-hidden="true">📤</span></button>
@@ -1245,6 +1322,28 @@
         <div id="thumb" class="thumb" style="display:none !important;"><img id="thumbImg" alt="attachment" /></div>
       </div>
       <div id="calendarView" class="calendarView" style="display:none;">
+        <div class="calToolbar canvasToolbar">
+          <button id="calDrawToggleBtn" class="btn" title="Draw on days">✏️ Draw</button>
+          <div class="separator"></div>
+          <button id="calPenSizeUp" class="btn penSizeBtn" title="Increase pen size">+</button>
+          <div id="calPenSizePreview" class="penSizePreview"><span id="calPenSizeDot" class="penSizeDot"></span></div>
+          <button id="calPenSizeDown" class="btn penSizeBtn" title="Decrease pen size">−</button>
+          <div class="separator"></div>
+          <div id="calCurrentColorSwatch" class="colorSwatch" style="background:#000000;" title="Current color"></div>
+          <div id="calColorPalette" class="colorPalette">
+            <button class="calColorBtn" data-color="#000000" style="background:#000000;" title="Black"></button>
+            <button class="calColorBtn" data-color="#00FF2F" style="background:#00FF2F;" title="Green"></button>
+            <button class="calColorBtn" data-color="#FF00D0" style="background:#FF00D0;" title="Pink"></button>
+            <button class="calColorBtn" data-color="#00EAFF" style="background:#00EAFF;" title="Cyan"></button>
+            <button class="calColorBtn" data-color="#FF1500" style="background:#FF1500;" title="Red"></button>
+            <button class="calColorBtn" data-color="#FC4C00" style="background:#FC4C00;" title="Orange"></button>
+            <button class="calColorBtn" data-color="#0032FC" style="background:#0032FC;" title="Blue"></button>
+            <button class="calColorBtn" data-color="#FCEF00" style="background:#FCEF00;" title="Yellow"></button>
+            <button class="calColorBtn" data-color="#A400FC" style="background:#A400FC;" title="Purple"></button>
+          </div>
+          <div class="spacer"></div>
+          <span class="calDrawHint">Draw mode: strokes save to the day you start on · right-click a drawing to delete</span>
+        </div>
         <div class="calHeader">
           <button id="calPrevBtn" class="btn" aria-label="Previous month">‹</button>
           <div id="calTitle" class="calTitle"></div>
@@ -1253,7 +1352,10 @@
         <div class="calDayNames">
           <div>Sunday</div><div>Monday</div><div>Tuesday</div><div>Wednesday</div><div>Thursday</div><div>Friday</div><div>Saturday</div>
         </div>
-        <div id="calGrid" class="calGrid"></div>
+        <div class="calGridWrap">
+          <div id="calGrid" class="calGrid"></div>
+          <canvas id="calDrawOverlay" class="calDrawOverlay"></canvas>
+        </div>
         <div id="calOverflowPopover" class="calOverflowPopover" style="display:none;"></div>
       </div>
     </div>
@@ -1353,16 +1455,16 @@
         <div class="prefItem" id="autoFixProviderItem" style="display:none;">
           <label class="prefLabel">Auto-Fix Provider</label>
           <div class="prefControl">
-            <button id="providerOpenAIBtn" class="themeBtn active">OpenAI API</button>
+            <button id="providerDeepSeekBtn" class="themeBtn active">DeepSeek API</button>
             <button id="providerLocalBtn" class="themeBtn">Local LLM</button>
           </div>
         </div>
-        <div class="prefItem" id="openAIKeyItem" style="display:none;">
-          <label class="prefLabel">OpenAI API Key</label>
+        <div class="prefItem" id="deepseekKeyItem">
+          <label class="prefLabel">DeepSeek API Key</label>
           <div class="prefControl">
-            <input type="password" id="openAIKeyInput" class="search" style="max-width:100%;flex:1;" placeholder="sk-...">
+            <input type="password" id="deepseekKeyInput" class="search" style="max-width:100%;flex:1;" placeholder="sk-...">
           </div>
-          <div class="prefHint">Your key is stored locally and never shared</div>
+          <div class="prefHint">Used for text correction and Import from IC. Get a key at platform.deepseek.com - stored locally and never shared</div>
         </div>
         <div class="prefItem" id="localModelItem" style="display:none;">
           <label class="prefLabel">GGUF Model File</label>
@@ -1377,6 +1479,98 @@
           <div class="prefControl">
             <span id="localModelStatus" style="font-size:12px;color:var(--muted);">Not loaded</span>
           </div>
+        </div>
+        <div class="prefItem" style="border-top:1px solid var(--border);padding-top:20px;margin-top:8px;">
+          <label class="prefLabel">Encryption</label>
+          <div class="prefHint" id="vaultStatusText">Open a notes folder first</div>
+        </div>
+        <div class="prefItem" id="vaultOffItem" style="display:none;">
+          <label class="prefLabel">Notes Password</label>
+          <div class="vaultRow">
+            <input type="password" id="vaultNewPwInput" class="search" placeholder="Password" autocomplete="new-password">
+            <input type="password" id="vaultNewPw2Input" class="search" placeholder="Confirm password" autocomplete="new-password">
+          </div>
+          <div class="prefControl">
+            <button id="vaultEnableBtn" class="btn">Encrypt notes folder</button>
+          </div>
+          <div class="prefHint">Encrypts every note, drawing, image and recording in this folder (AES-256). Note titles stay visible as file names. Forget this password and your notes cannot be recovered.</div>
+          <div class="prefHint">The password is always your recovery method. Once the folder is encrypted you can also unlock it with a YubiKey or a Trezor (and Touch ID on a Mac) - add them here afterwards.</div>
+        </div>
+        <div class="prefItem" id="vaultLockedItem" style="display:none;">
+          <div class="prefControl">
+            <button id="vaultUnlockBtn" class="btn">Unlock notes...</button>
+          </div>
+        </div>
+        <div class="prefItem" id="vaultOnItem" style="display:none;">
+          <label class="prefLabel">Unlock Methods</label>
+          <div id="vaultSlotList" class="vaultSlotList"></div>
+          <div class="prefControl">
+            <button id="vaultAddYubiBtn" class="btn">Add YubiKey...</button>
+            <button id="vaultAddTrezorBtn" class="btn">Add Trezor...</button>
+          </div>
+          <div class="prefHint">Any one of these unlocks the notes on any computer that syncs this folder. YubiKey: uses Slot 2 in challenge-response mode; if Slot 2 is empty, Noat Boat offers to set it up (touch required). A Slot 2 that already holds something is left alone - clear it in Yubico Authenticator first. Add a second YubiKey as a backup. Trezor: you confirm on the device, and restoring its seed restores access. A Trezor with newer firmware first asks you to pair this computer: type the code it shows into the dialog.</div>
+          <label class="vaultCheck" id="vaultTouchIdRow" style="display:none;"><input type="checkbox" id="vaultTouchIdCheck"> Require Touch ID before using the remembered password</label>
+          <label class="prefLabel" style="margin-top:12px;">Change Password</label>
+          <div class="vaultRow">
+            <input type="password" id="vaultOldPwInput" class="search" placeholder="Current password" autocomplete="current-password">
+          </div>
+          <div class="vaultRow">
+            <input type="password" id="vaultChangePwInput" class="search" placeholder="New password" autocomplete="new-password">
+            <input type="password" id="vaultChangePw2Input" class="search" placeholder="Confirm new password" autocomplete="new-password">
+          </div>
+          <div class="prefControl">
+            <button id="vaultChangePwBtn" class="btn">Change password</button>
+          </div>
+          <div class="prefHint">Changing the password does not re-encrypt the notes: a computer that remembered them, or a key listed above, keeps opening them until you use "Lock &amp; forget" there or remove the key here.</div>
+          <div class="prefControl" style="margin-top:8px;">
+            <button id="vaultResumeBtn" class="btn">Encrypt new files</button>
+            <button id="vaultForgetBtn" class="btn">Lock &amp; forget</button>
+            <button id="vaultDisableBtn" class="btn">Decrypt &amp; turn off...</button>
+          </div>
+          <div class="prefHint" id="vaultRememberHint"></div>
+        </div>
+        <div class="prefItem" id="vaultMsgItem" style="display:none;">
+          <div class="prefHint" id="vaultMsg"></div>
+        </div>
+        <div class="prefItem" style="border-top:1px solid var(--border);padding-top:20px;margin-top:8px;">
+          <label class="prefLabel">IC Recorder Import</label>
+          <div class="prefHint" style="margin-bottom:12px;">Transcribe Sony IC recorder memos with whisper.cpp and tidy them with DeepSeek (uses the DeepSeek key above)</div>
+        </div>
+        <div class="prefItem">
+          <label class="prefLabel">Whisper CLI</label>
+          <div class="prefControl" style="gap:8px;">
+            <input type="text" id="whisperCliPathInput" class="search" style="max-width:100%;flex:1;" placeholder="Select whisper-cli executable..." readonly>
+            <button id="browseWhisperCliBtn" class="btn">Browse</button>
+          </div>
+          <div class="prefHint">whisper-cli / whisper-cli.exe from whisper.cpp (brew install whisper-cpp on Mac)</div>
+        </div>
+        <div class="prefItem">
+          <label class="prefLabel">Whisper Model</label>
+          <div class="prefControl" style="gap:8px;">
+            <input type="text" id="whisperModelPathInput" class="search" style="max-width:100%;flex:1;" placeholder="Select a ggml model file..." readonly>
+            <button id="browseWhisperModelBtn" class="btn">Browse</button>
+          </div>
+          <div class="prefHint">ggml model file, e.g. ggml-large-v3-turbo.bin</div>
+        </div>
+        <div class="prefItem">
+          <label class="prefLabel">Transcribed &amp; Edited Notes Folder</label>
+          <div class="prefControl" style="gap:8px;">
+            <input type="text" id="icNotesFolderInput" class="search" style="max-width:100%;flex:1;" placeholder="Select a folder for imported notes..." readonly>
+            <button id="browseIcNotesFolderBtn" class="btn">Browse</button>
+          </div>
+          <div class="prefHint">Imported notes (with the original recording attached) are saved here</div>
+        </div>
+        <div class="prefItem" style="border-top:1px solid var(--border);padding-top:20px;margin-top:8px;">
+          <label class="prefLabel">Uberector</label>
+          <div class="prefHint" style="margin-bottom:12px;">Send the open note to Uberector with the eye button</div>
+        </div>
+        <div class="prefItem">
+          <label class="prefLabel">Uberector Inbox Folder</label>
+          <div class="prefControl" style="gap:8px;">
+            <input type="text" id="uberectorFolderInput" class="search" style="max-width:100%;flex:1;" placeholder="Select Uberector's inbox folder..." readonly>
+            <button id="browseUberectorFolderBtn" class="btn">Browse</button>
+          </div>
+          <div class="prefHint">Uberector's inbox. Notes sent with the Uberector button are dropped here as .txt files</div>
         </div>
         <div class="prefItem" style="border-top:1px solid var(--border);padding-top:20px;margin-top:8px;">
           <label class="prefLabel">GitHub Publishing</label>
@@ -1433,6 +1627,33 @@
     </div>
   </div>
 
+  <div id="vaultPwModal" class="prefsModal" aria-hidden="true">
+    <div class="prefsDialog" role="dialog" aria-modal="true" aria-labelledby="vaultPwTitle">
+      <div class="prefsTop">
+        <div class="prefsTitle" id="vaultPwTitle">Unlock Notes</div>
+        <button id="vaultPwCancelX" class="btn">✕</button>
+      </div>
+      <form class="prefsBody" id="vaultPwForm">
+        <div class="prefItem">
+          <div class="prefHint" id="vaultPwMessage" style="font-size:12px;color:var(--text);"></div>
+          <input type="password" id="vaultPwInput" class="search" style="max-width:100%;" placeholder="Password" autocomplete="current-password">
+          <div class="vaultRow" id="vaultPwHwRow" style="display:none;"></div>
+        <div class="vaultRow" id="vaultPwCodeRow" style="display:none;">
+          <input type="text" id="vaultPwCodeInput" class="search" placeholder="Code shown on the Trezor" inputmode="numeric" autocomplete="one-time-code" maxlength="6">
+          <button type="button" id="vaultPwCodeBtn" class="btn">Send code</button>
+        </div>
+          <label class="vaultCheck" id="vaultPwRememberRow"><input type="checkbox" id="vaultPwRemember" checked> Remember on this computer</label>
+          <div class="vaultHwStatus" id="vaultPwHwStatus"></div>
+          <div class="vaultError" id="vaultPwError"></div>
+        </div>
+        <div class="prefControl" style="justify-content:flex-end;">
+          <button type="button" id="vaultPwCancelBtn" class="btn">Cancel</button>
+          <button type="submit" id="vaultPwOkBtn" class="btn">Unlock</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <div id="exportModal" class="exportModal" aria-hidden="true">
     <div class="exportDialog" role="dialog" aria-modal="true" aria-label="Export">
       <div class="exportTop">
@@ -1466,6 +1687,28 @@
         </div>
         <div id="exportProgress" class="exportProgress" style="display:none;">
           Exporting... <span id="exportProgressText">0%</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="icImportModal" class="exportModal" aria-hidden="true">
+    <div class="exportDialog" role="dialog" aria-modal="true" aria-label="Import from IC">
+      <div class="exportTop">
+        <div class="exportTitle">🎙️ Import from IC</div>
+        <button id="icImportCloseBtn" class="btn">✕</button>
+      </div>
+      <div class="exportBody">
+        <div id="icImportProgress" class="exportProgress">Idle</div>
+        <div id="icImportLog" class="icLog"></div>
+        <div id="icImportDeleted" class="icDeleted" hidden>
+          <div class="icDeletedTitle">Imported before, note since deleted</div>
+          <div id="icImportDeletedList" class="icDeletedList"></div>
+          <div class="icActions"><button id="icReimportBtn" class="btn" disabled>Re-import selected</button></div>
+        </div>
+        <div class="icActions">
+          <button id="icStopBtn" class="btn danger" hidden>Stop</button>
+          <button id="icImportDoneBtn" class="btn primary">Close</button>
         </div>
       </div>
     </div>
@@ -1529,6 +1772,45 @@ const els = {
   audioPlayer: document.getElementById('audioPlayer'),
   prefsModal: document.getElementById('prefsModal'),
   prefsCloseBtn: document.getElementById('prefsCloseBtn'),
+  vaultStatusText: document.getElementById('vaultStatusText'),
+  vaultOffItem: document.getElementById('vaultOffItem'),
+  vaultNewPwInput: document.getElementById('vaultNewPwInput'),
+  vaultNewPw2Input: document.getElementById('vaultNewPw2Input'),
+  vaultEnableBtn: document.getElementById('vaultEnableBtn'),
+  vaultLockedItem: document.getElementById('vaultLockedItem'),
+  vaultUnlockBtn: document.getElementById('vaultUnlockBtn'),
+  vaultOnItem: document.getElementById('vaultOnItem'),
+  vaultOldPwInput: document.getElementById('vaultOldPwInput'),
+  vaultChangePwInput: document.getElementById('vaultChangePwInput'),
+  vaultChangePw2Input: document.getElementById('vaultChangePw2Input'),
+  vaultChangePwBtn: document.getElementById('vaultChangePwBtn'),
+  vaultForgetBtn: document.getElementById('vaultForgetBtn'),
+  vaultDisableBtn: document.getElementById('vaultDisableBtn'),
+  vaultResumeBtn: document.getElementById('vaultResumeBtn'),
+  vaultRememberHint: document.getElementById('vaultRememberHint'),
+  vaultMsgItem: document.getElementById('vaultMsgItem'),
+  vaultMsg: document.getElementById('vaultMsg'),
+  vaultPwModal: document.getElementById('vaultPwModal'),
+  vaultPwTitle: document.getElementById('vaultPwTitle'),
+  vaultPwForm: document.getElementById('vaultPwForm'),
+  vaultPwMessage: document.getElementById('vaultPwMessage'),
+  vaultPwInput: document.getElementById('vaultPwInput'),
+  vaultPwRememberRow: document.getElementById('vaultPwRememberRow'),
+  vaultPwRemember: document.getElementById('vaultPwRemember'),
+  vaultPwError: document.getElementById('vaultPwError'),
+  vaultPwOkBtn: document.getElementById('vaultPwOkBtn'),
+  vaultPwCancelBtn: document.getElementById('vaultPwCancelBtn'),
+  vaultPwCancelX: document.getElementById('vaultPwCancelX'),
+  vaultPwHwRow: document.getElementById('vaultPwHwRow'),
+  vaultPwCodeRow: document.getElementById('vaultPwCodeRow'),
+  vaultPwCodeInput: document.getElementById('vaultPwCodeInput'),
+  vaultPwCodeBtn: document.getElementById('vaultPwCodeBtn'),
+  vaultPwHwStatus: document.getElementById('vaultPwHwStatus'),
+  vaultSlotList: document.getElementById('vaultSlotList'),
+  vaultAddYubiBtn: document.getElementById('vaultAddYubiBtn'),
+  vaultAddTrezorBtn: document.getElementById('vaultAddTrezorBtn'),
+  vaultTouchIdRow: document.getElementById('vaultTouchIdRow'),
+  vaultTouchIdCheck: document.getElementById('vaultTouchIdCheck'),
   themeLightBtn: document.getElementById('themeLightBtn'),
   themeDarkBtn: document.getElementById('themeDarkBtn'),
   focusStrengthSlider: document.getElementById('focusStrengthSlider'),
@@ -1537,10 +1819,32 @@ const els = {
   autoFixAutoBtn: document.getElementById('autoFixAutoBtn'),
   autoFixManualBtn: document.getElementById('autoFixManualBtn'),
   autoFixProviderItem: document.getElementById('autoFixProviderItem'),
-  providerOpenAIBtn: document.getElementById('providerOpenAIBtn'),
+  providerDeepSeekBtn: document.getElementById('providerDeepSeekBtn'),
   providerLocalBtn: document.getElementById('providerLocalBtn'),
-  openAIKeyItem: document.getElementById('openAIKeyItem'),
-  openAIKeyInput: document.getElementById('openAIKeyInput'),
+  deepseekKeyItem: document.getElementById('deepseekKeyItem'),
+  deepseekKeyInput: document.getElementById('deepseekKeyInput'),
+  // IC recorder import / per-note AI actions
+  importIcBtn: document.getElementById('importIcBtn'),
+  transcribeBtn: document.getElementById('transcribeBtn'),
+  formatBtn: document.getElementById('formatBtn'),
+  uberectorBtn: document.getElementById('uberectorBtn'),
+  whisperCliPathInput: document.getElementById('whisperCliPathInput'),
+  browseWhisperCliBtn: document.getElementById('browseWhisperCliBtn'),
+  whisperModelPathInput: document.getElementById('whisperModelPathInput'),
+  browseWhisperModelBtn: document.getElementById('browseWhisperModelBtn'),
+  icNotesFolderInput: document.getElementById('icNotesFolderInput'),
+  browseIcNotesFolderBtn: document.getElementById('browseIcNotesFolderBtn'),
+  uberectorFolderInput: document.getElementById('uberectorFolderInput'),
+  browseUberectorFolderBtn: document.getElementById('browseUberectorFolderBtn'),
+  icImportModal: document.getElementById('icImportModal'),
+  icImportCloseBtn: document.getElementById('icImportCloseBtn'),
+  icImportProgress: document.getElementById('icImportProgress'),
+  icImportLog: document.getElementById('icImportLog'),
+  icImportDoneBtn: document.getElementById('icImportDoneBtn'),
+  icStopBtn: document.getElementById('icStopBtn'),
+  icImportDeleted: document.getElementById('icImportDeleted'),
+  icImportDeletedList: document.getElementById('icImportDeletedList'),
+  icReimportBtn: document.getElementById('icReimportBtn'),
   localModelItem: document.getElementById('localModelItem'),
   localModelPath: document.getElementById('localModelPath'),
   browseModelBtn: document.getElementById('browseModelBtn'),
@@ -1567,6 +1871,8 @@ const els = {
   calPrevBtn: document.getElementById('calPrevBtn'),
   calNextBtn: document.getElementById('calNextBtn'),
   calOverflowPopover: document.getElementById('calOverflowPopover'),
+  calDrawToggleBtn: document.getElementById('calDrawToggleBtn'),
+  calDrawOverlay: document.getElementById('calDrawOverlay'),
   dueDateBtn: document.getElementById('dueDateBtn'),
   miniCalPopup: document.getElementById('miniCalPopup'),
   miniCalTitle: document.getElementById('miniCalTitle'),
@@ -1628,14 +1934,21 @@ let prevEditorText = '';
 
 // Calendar
 let currentDueDate = null;       // 'YYYY-MM-DD' | null for the open note
+let currentIcSource = null;      // provenance written by Import from IC; preserved on save
 let calendarIsOpen = false;
 let calendarMonth = null;        // {year, month 0-11}
 let calendarNotes = [];          // records from api.calendarScan, refreshed per open
-let calRenderGen = 0;            // stale-async guard for thumbnails
-const calThumbCache = new Map(); // path -> dataUrl
+let calRenderGen = 0;            // stale-async guard for async cell loads
 let miniCalIsOpen = false;
 let miniCalMonth = null;
 let latestBoatLines = null;      // current ASCII boat frame, shared with the calendar
+// Calendar day drawings
+let calDrawMode = false;
+let calSignatureMark = null;       // single instance, created lazily, never re-created
+let calDrawings = {};              // ymd -> file path (from calendar-scan)
+const calDrawingCache = new Map(); // ymd -> dataUrl
+let calStrokeCell = null;          // .calCell element the current stroke started in
+let calStrokeYmd = null;
 
 let currentImageURL = null;
 let listNavActive = false;
@@ -1712,6 +2025,9 @@ function setEditorEnabled(enabled) {
   els.drawBtn.disabled = !enabled;
   els.audioBtn.disabled = !enabled;
   els.fixBtn.disabled = !enabled;
+  els.transcribeBtn.disabled = !enabled;
+  els.formatBtn.disabled = !enabled;
+  els.uberectorBtn.disabled = !enabled;
   if (!enabled) {
     els.undoBtn.disabled = true;
     els.redoBtn.disabled = true;
@@ -2847,9 +3163,13 @@ let prefsIsOpen = false;
 let currentTheme = 'light';
 let currentFocusStrength = 70;
 let autoFixMode = 'off'; // 'off', 'auto', or 'manual'
-let autoFixProvider = 'openai'; // 'openai' or 'local'
-let openAIKey = '';
+let autoFixProvider = 'deepseek'; // 'deepseek' or 'local'
+let deepseekKey = '';
 let localModelPath = '';
+let whisperCliPath = '';
+let whisperModelPath = '';
+let icNotesFolder = '';
+let uberectorFolder = '';
 let githubToken = '';
 let githubRepo = '';
 let publishingName = '';
@@ -2875,11 +3195,455 @@ function openPrefsModal() {
   closeMiniCal();
   setPrefsModalOpen(true);
   updatePrefsUI();
+  setVaultMsg('');
+  refreshVaultInfo();
 }
 
 function closePrefsModal() {
   setPrefsModalOpen(false);
 }
+
+// --- Notes encryption (vault) ---
+// State of the vault covering rootFolderPath: off | locked | unlocked.
+let vaultInfo = { state: 'off', root: null, remembered: false, canRemember: true, slots: [], touchId: {} };
+let vaultBusy = false;
+let vaultPwPending = null; // { opts, resolve } while the password dialog is open
+let vaultHwBusy = false;   // a YubiKey/Trezor request is in flight for that dialog
+let vaultHwPrompt = null;  // { id } while the main process waits for a typed value (Trezor pairing code)
+
+// autoUnlock: let the main process use the remembered key (behind Touch ID if set).
+async function refreshVaultInfo(autoUnlock = false) {
+  try {
+    vaultInfo = rootFolderPath ? await api.vaultStatus(rootFolderPath, { autoUnlock }) : { state: 'off', root: null };
+  } catch (_e) {
+    vaultInfo = { state: 'off', root: null };
+  }
+  vaultInfo.slots = vaultInfo.slots || [];
+  vaultInfo.touchId = vaultInfo.touchId || {};
+  renderVaultPrefs();
+  return vaultInfo;
+}
+
+const VAULT_SLOT_KIND = { yubikey: 'YubiKey', trezor: 'Trezor' };
+
+function renderVaultSlots() {
+  els.vaultSlotList.innerHTML = '';
+  const row = (label, meta, onRemove) => {
+    const div = document.createElement('div');
+    div.className = 'vaultSlot';
+    const text = document.createElement('div');
+    const name = document.createElement('div');
+    name.textContent = label;
+    const sub = document.createElement('div');
+    sub.className = 'vaultSlotMeta';
+    sub.textContent = meta;
+    text.append(name, sub);
+    div.appendChild(text);
+    if (onRemove) {
+      const b = document.createElement('button');
+      b.className = 'btn';
+      b.textContent = 'Remove';
+      b.disabled = vaultBusy;
+      b.addEventListener('click', onRemove);
+      div.appendChild(b);
+    }
+    els.vaultSlotList.appendChild(div);
+  };
+  row('Password', 'Always works - your recovery method');
+  for (const s of vaultInfo.slots) {
+    const added = s.createdAt ? `added ${new Date(s.createdAt).toLocaleDateString()}` : '';
+    row(s.label, [VAULT_SLOT_KIND[s.type] || s.type, added].filter(Boolean).join(' · '), () => vaultRemoveSlot(s));
+  }
+}
+
+function setVaultMsg(text) {
+  els.vaultMsg.textContent = text || '';
+  els.vaultMsgItem.style.display = text ? 'flex' : 'none';
+}
+
+function renderVaultPrefs() {
+  const st = vaultInfo.state;
+  els.vaultStatusText.textContent = !rootFolderPath ? 'Open a notes folder first'
+    : st === 'off' ? 'Off - notes in this folder are stored as plain files'
+    : st === 'locked' ? 'On - locked. Enter the password to read and edit notes'
+    : 'On - notes, drawings, images and recordings in this folder are encrypted';
+  els.vaultOffItem.style.display = (rootFolderPath && st === 'off') ? 'flex' : 'none';
+  els.vaultLockedItem.style.display = st === 'locked' ? 'flex' : 'none';
+  els.vaultOnItem.style.display = st === 'unlocked' ? 'flex' : 'none';
+  els.vaultRememberHint.textContent = vaultInfo.remembered
+    ? 'Remembered on this computer: the folder unlocks automatically. Lock & forget asks for the password next time.'
+    : 'Not remembered: you will be asked for the password each time the folder opens.';
+  for (const b of [els.vaultEnableBtn, els.vaultUnlockBtn, els.vaultChangePwBtn, els.vaultForgetBtn, els.vaultDisableBtn, els.vaultResumeBtn, els.vaultAddYubiBtn, els.vaultAddTrezorBtn]) {
+    b.disabled = vaultBusy;
+  }
+  if (st === 'unlocked') renderVaultSlots();
+  els.vaultTouchIdRow.style.display = (vaultInfo.touchId.supported && vaultInfo.remembered) ? 'flex' : 'none';
+  els.vaultTouchIdCheck.checked = !!vaultInfo.touchId.required;
+  els.vaultTouchIdCheck.disabled = vaultBusy;
+}
+
+function vaultSummary(verb, r) {
+  let msg = `${verb} ${r.changed} file(s).`;
+  if (r.skipped) msg += ` ${r.skipped} online-only file(s) were skipped - run it again once they have synced.`;
+  if (r.failed && r.failed.length) msg += ` ${r.failed.length} file(s) failed (${r.failed[0].error}).`;
+  return msg;
+}
+
+// Password dialog. opts: { title, message, okLabel, showRemember, verify, hwMethods }.
+// verify(password, remember) returns an error string to keep the dialog open.
+// hwMethods: [{ key, label, run(remember) }] - buttons that unlock without the
+// password; run returns an error string or null.
+// Resolves { password, remember } / { hw: key } or null when cancelled.
+function askVaultPassword(opts) {
+  if (vaultPwPending) closeVaultPw(null);
+  return new Promise((resolve) => {
+    els.vaultPwTitle.textContent = opts.title;
+    els.vaultPwMessage.textContent = opts.message || '';
+    els.vaultPwOkBtn.textContent = opts.okLabel || 'OK';
+    els.vaultPwOkBtn.disabled = false;
+    els.vaultPwRememberRow.style.display = opts.showRemember ? 'flex' : 'none';
+    els.vaultPwRemember.checked = true;
+    els.vaultPwInput.value = '';
+    els.vaultPwError.textContent = '';
+    els.vaultPwHwStatus.textContent = '';
+    hideVaultHwPrompt();
+    els.vaultPwHwRow.innerHTML = '';
+    for (const m of opts.hwMethods || []) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn';
+      b.textContent = m.label;
+      b.addEventListener('click', () => runVaultHwMethod(m));
+      els.vaultPwHwRow.appendChild(b);
+    }
+    els.vaultPwHwRow.style.display = (opts.hwMethods || []).length ? 'flex' : 'none';
+    vaultPwPending = { opts, resolve };
+    els.vaultPwModal.classList.add('open');
+    els.vaultPwModal.setAttribute('aria-hidden', 'false');
+    setTimeout(() => els.vaultPwInput.focus(), 0);
+  });
+}
+
+function closeVaultPw(result) {
+  if (!vaultPwPending) return;
+  cancelVaultHwPrompt();
+  const { resolve } = vaultPwPending;
+  vaultPwPending = null;
+  els.vaultPwModal.classList.remove('open');
+  els.vaultPwModal.setAttribute('aria-hidden', 'true');
+  els.vaultPwInput.value = '';
+  resolve(result);
+}
+
+els.vaultPwForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!vaultPwPending || els.vaultPwOkBtn.disabled) return;
+  const { opts } = vaultPwPending;
+  const password = els.vaultPwInput.value;
+  const remember = !!opts.showRemember && els.vaultPwRemember.checked;
+  if (!password) { els.vaultPwError.textContent = 'Enter the password.'; return; }
+  if (opts.verify) {
+    els.vaultPwOkBtn.disabled = true;
+    els.vaultPwOkBtn.textContent = 'Checking...';
+    let err = null;
+    try { err = await opts.verify(password, remember); } catch (ex) { err = String(ex?.message || ex); }
+    els.vaultPwOkBtn.disabled = false;
+    els.vaultPwOkBtn.textContent = opts.okLabel || 'OK';
+    if (err) {
+      els.vaultPwError.textContent = err;
+      els.vaultPwInput.select();
+      return;
+    }
+  }
+  closeVaultPw({ password, remember });
+});
+function setVaultPwControlsDisabled(on) {
+  els.vaultPwOkBtn.disabled = on;
+  for (const b of els.vaultPwHwRow.querySelectorAll('button')) b.disabled = on;
+}
+
+async function runVaultHwMethod(m) {
+  if (!vaultPwPending) return;
+  const pending = vaultPwPending;
+  const remember = !!pending.opts.showRemember && els.vaultPwRemember.checked;
+  els.vaultPwError.textContent = '';
+  els.vaultPwHwStatus.textContent = 'Working...';
+  setVaultPwControlsDisabled(true);
+  vaultHwBusy = true;
+  let err = null;
+  try { err = await m.run(remember); } catch (ex) { err = String(ex?.message || ex); }
+  vaultHwBusy = false;
+  if (vaultPwPending !== pending) {
+    // Dialog was closed meanwhile; the main process may still have unlocked.
+    if (!err) { await refreshVaultInfo(); await reloadNotes(); }
+    return;
+  }
+  setVaultPwControlsDisabled(false);
+  els.vaultPwHwStatus.textContent = '';
+  if (err) { els.vaultPwError.textContent = err; return; }
+  closeVaultPw({ hw: m.key });
+}
+
+// Device prompts from the main process ("Touch your YubiKey").
+api.onVaultHwEvent((p) => {
+  if (!p || !p.message) return;
+  if (vaultPwPending) els.vaultPwHwStatus.textContent = p.message;
+  else if (vaultBusy) setVaultMsg(p.message);
+});
+
+// The main process needs something typed for the device (the code a Trezor
+// shows when pairing this computer). Answered in the open password dialog;
+// with no dialog open the request is declined.
+function hideVaultHwPrompt() {
+  els.vaultPwCodeRow.style.display = 'none';
+  els.vaultPwCodeInput.value = '';
+}
+
+function cancelVaultHwPrompt() {
+  if (!vaultHwPrompt) return;
+  const { id } = vaultHwPrompt;
+  vaultHwPrompt = null;
+  hideVaultHwPrompt();
+  api.vaultHwPromptReply(id, null);
+}
+
+function sendVaultHwCode() {
+  if (!vaultHwPrompt) return;
+  const code = els.vaultPwCodeInput.value.trim();
+  if (!code) { els.vaultPwCodeInput.focus(); return; }
+  const { id } = vaultHwPrompt;
+  vaultHwPrompt = null;
+  hideVaultHwPrompt();
+  els.vaultPwHwStatus.textContent = 'Checking the code...';
+  api.vaultHwPromptReply(id, code);
+}
+
+api.onVaultHwPrompt((p) => {
+  if (!p || !p.id) return;
+  if (!vaultPwPending) { api.vaultHwPromptReply(p.id, null); return; }
+  cancelVaultHwPrompt();
+  vaultHwPrompt = { id: p.id };
+  els.vaultPwError.textContent = '';
+  els.vaultPwHwStatus.textContent = p.message || 'Enter the code shown on your Trezor';
+  els.vaultPwCodeInput.value = '';
+  els.vaultPwCodeInput.maxLength = p.length || 6;
+  els.vaultPwCodeRow.style.display = 'flex';
+  setTimeout(() => els.vaultPwCodeInput.focus(), 0);
+});
+els.vaultPwCodeBtn.addEventListener('click', sendVaultHwCode);
+els.vaultPwCodeInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); sendVaultHwCode(); }
+});
+
+function vaultHwError(res) {
+  if (res && res.code === 'VAULT_WRONG_KEY') return 'That key does not unlock these notes.';
+  if (res && res.wrongPassword) return 'Wrong password.';
+  return (res && res.error) || 'Something went wrong';
+}
+
+els.vaultPwCancelBtn.addEventListener('click', () => closeVaultPw(null));
+els.vaultPwCancelX.addEventListener('click', () => closeVaultPw(null));
+els.vaultPwModal.addEventListener('mousedown', (e) => { if (e.target === els.vaultPwModal && !vaultHwBusy) closeVaultPw(null); });
+
+async function promptVaultUnlock() {
+  const name = api.basename(vaultInfo.root || rootFolderPath || '');
+  const hwMethods = vaultInfo.slots.map(s => ({
+    key: s.id,
+    label: `Use ${s.label}`,
+    run: async (remember) => {
+      const res = await api.vaultHwUnlock(rootFolderPath, s.id, remember);
+      return res && res.success ? null : vaultHwError(res);
+    }
+  }));
+  // Touch ID only guards a key remembered on this Mac.
+  if (vaultInfo.touchId.required && vaultInfo.remembered) {
+    hwMethods.unshift({
+      key: 'touchid',
+      label: 'Use Touch ID',
+      run: async () => {
+        const res = await api.vaultStatus(rootFolderPath, { autoUnlock: true });
+        return res && res.state === 'unlocked' ? null : 'Touch ID did not unlock the notes.';
+      }
+    });
+  }
+  const r = await askVaultPassword({
+    title: 'Unlock Notes',
+    message: hwMethods.length
+      ? `"${name}" is encrypted. Enter its password, or use one of your keys.`
+      : `"${name}" is encrypted. Enter its password to read and edit your notes.`,
+    okLabel: 'Unlock',
+    showRemember: vaultInfo.canRemember !== false,
+    hwMethods,
+    verify: async (password, remember) => {
+      const res = await api.vaultUnlock(rootFolderPath, password, remember);
+      if (res && res.success) return null;
+      return res && res.wrongPassword ? 'Wrong password.' : `Could not unlock: ${(res && res.error) || 'unknown error'}`;
+    }
+  });
+  await refreshVaultInfo();
+  return !!r;
+}
+
+// Called whenever a notes folder is opened: auto-unlocks from a remembered
+// key (main process, behind Touch ID when set) and otherwise asks.
+async function ensureVaultUnlocked() {
+  const info = await refreshVaultInfo(true);
+  if (info.state === 'locked') await promptVaultUnlock();
+}
+
+async function vaultAddSlot(type) {
+  const kind = VAULT_SLOT_KIND[type];
+  let added = null;
+  const r = await askVaultPassword({
+    title: `Add ${kind}`,
+    message: type === 'yubikey'
+      ? 'Enter the notes password, then touch your YubiKey when it blinks. An empty Slot 2 is set up for you first.'
+      : 'Enter the notes password, then confirm "Unlock Noat Boat notes?" on your Trezor.',
+    okLabel: 'Add',
+    showRemember: false,
+    verify: async (password) => {
+      let res = await api.vaultSlotAdd(rootFolderPath, type, password);
+      if (res && res.code === 'SLOT_EMPTY') {
+        // The YubiKey is fine but Slot 2 has nothing in it: offer to program it.
+        const ok = await api.showConfirm(
+          'Slot 2 of this YubiKey is empty.\n\nSet it up now for challenge-response? Noat Boat writes a new random secret into Slot 2 (touch required to use it). Slot 1 and the other YubiKey features are not touched.',
+          { title: 'Set Up YubiKey', okLabel: 'Set up Slot 2' });
+        if (!ok) return 'Slot 2 was left empty - set it up to use this YubiKey.';
+        els.vaultPwHwStatus.textContent = 'Setting up Slot 2...';
+        res = await api.vaultSlotAdd(rootFolderPath, type, password, { setupSlot2: true });
+      }
+      if (res && res.success) { added = res.slot; return null; }
+      return vaultHwError(res);
+    }
+  });
+  await refreshVaultInfo();
+  if (r && added) setVaultMsg(`Added ${added.label}. It now unlocks these notes on any computer that syncs this folder.`);
+}
+
+async function vaultRemoveSlot(slot) {
+  const ok = await api.showConfirm(
+    `Remove "${slot.label}"? It will no longer unlock these notes.\n\nOlder copies of the folder (for example in your sync service's history) can still be opened with it.`,
+    { title: 'Remove Unlock Method', okLabel: 'Remove' });
+  if (!ok) return;
+  const res = await api.vaultSlotRemove(rootFolderPath, slot.id);
+  setVaultMsg(res && res.success ? `Removed ${slot.label}.` : vaultHwError(res));
+  await refreshVaultInfo();
+}
+
+async function vaultSetTouchId(on) {
+  vaultBusy = true;
+  renderVaultPrefs();
+  const res = await api.vaultTouchIdSet(rootFolderPath, on);
+  vaultBusy = false;
+  setVaultMsg(res && res.success
+    ? (on ? 'Touch ID is now required before the remembered password is used.' : 'Touch ID is no longer required.')
+    : `Could not change the Touch ID setting: ${vaultHwError(res)}`);
+  await refreshVaultInfo();
+}
+
+async function vaultEnable() {
+  const pw = els.vaultNewPwInput.value;
+  if (!pw) { setVaultMsg('Enter a password.'); return; }
+  if (pw.length < 8) { setVaultMsg('Use at least 8 characters.'); return; }
+  if (pw !== els.vaultNewPw2Input.value) { setVaultMsg('The passwords do not match.'); return; }
+  const name = api.basename(rootFolderPath);
+  const ok = await api.showConfirm(
+    `Encrypt every note in "${name}" and its subfolders?\n\n` +
+    'If you forget this password your notes cannot be recovered.\n\n' +
+    'Every computer that syncs this folder must run this version of Noat Boat - older versions can damage encrypted notes.',
+    { title: 'Encrypt Notes', okLabel: 'Encrypt' });
+  if (!ok) return;
+  await flushSaveIfNeeded();
+  vaultBusy = true;
+  renderVaultPrefs();
+  setVaultMsg('Encrypting...');
+  let r;
+  try { r = await api.vaultEnable(rootFolderPath, pw, true); } catch (e) { r = { success: false, error: String(e?.message || e) }; }
+  vaultBusy = false;
+  els.vaultNewPwInput.value = '';
+  els.vaultNewPw2Input.value = '';
+  setVaultMsg(r.success ? vaultSummary('Encrypted', r) : `Encryption failed: ${r.error}`);
+  await refreshVaultInfo();
+  await reloadNotes();
+}
+
+// Encrypt anything still plain (skipped online-only files, notes written by
+// other tools or older versions).
+async function vaultResume() {
+  await flushSaveIfNeeded();
+  vaultBusy = true;
+  renderVaultPrefs();
+  setVaultMsg('Checking for unencrypted files...');
+  let r;
+  try { r = await api.vaultEnable(rootFolderPath, '', false); } catch (e) { r = { success: false, error: String(e?.message || e) }; }
+  vaultBusy = false;
+  setVaultMsg(r.success ? vaultSummary('Encrypted', r) : `Encryption failed: ${r.error}`);
+  renderVaultPrefs();
+}
+
+async function vaultChangePassword() {
+  const oldPw = els.vaultOldPwInput.value;
+  const newPw = els.vaultChangePwInput.value;
+  if (!oldPw || !newPw) { setVaultMsg('Enter the current and the new password.'); return; }
+  if (newPw.length < 8) { setVaultMsg('Use at least 8 characters.'); return; }
+  if (newPw !== els.vaultChangePw2Input.value) { setVaultMsg('The new passwords do not match.'); return; }
+  vaultBusy = true;
+  renderVaultPrefs();
+  setVaultMsg('Changing password...');
+  const r = await api.vaultChangePassword(rootFolderPath, oldPw, newPw);
+  vaultBusy = false;
+  if (r.success) {
+    els.vaultOldPwInput.value = '';
+    els.vaultChangePwInput.value = '';
+    els.vaultChangePw2Input.value = '';
+  }
+  setVaultMsg(r.success ? 'Password changed. Computers that remembered these notes still open them until you use "Lock & forget" there; others will ask for the new password.'
+    : r.wrongPassword ? 'The current password is wrong.' : `Could not change the password: ${r.error}`);
+  renderVaultPrefs();
+}
+
+async function vaultForget() {
+  await flushSaveIfNeeded();
+  await api.vaultForgetKey(rootFolderPath);
+  setVaultMsg('Locked. The password is no longer stored on this computer.');
+  await refreshVaultInfo();
+  await reloadNotes();
+}
+
+async function vaultDisable() {
+  const r = await askVaultPassword({
+    title: 'Turn Off Encryption',
+    message: 'Every file in this folder will be decrypted and stored as plain files again. Enter the password to confirm.',
+    okLabel: 'Decrypt',
+    showRemember: false
+  });
+  if (!r) return;
+  await flushSaveIfNeeded();
+  vaultBusy = true;
+  renderVaultPrefs();
+  setVaultMsg('Decrypting...');
+  let res;
+  try { res = await api.vaultDisable(rootFolderPath, r.password); } catch (e) { res = { success: false, error: String(e?.message || e) }; }
+  vaultBusy = false;
+  setVaultMsg(res.success ? vaultSummary('Decrypted', res) + ' Encryption is off.'
+    : res.wrongPassword ? 'Wrong password - nothing was changed.' : `Decryption stopped: ${res.error}`);
+  await refreshVaultInfo();
+  await reloadNotes();
+}
+
+api.onVaultProgress((p) => {
+  if (!vaultBusy || !p) return;
+  setVaultMsg(`${p.mode === 'decrypt' ? 'Decrypting' : 'Encrypting'} ${p.done} / ${p.total}...`);
+});
+els.vaultEnableBtn.addEventListener('click', vaultEnable);
+els.vaultResumeBtn.addEventListener('click', vaultResume);
+els.vaultUnlockBtn.addEventListener('click', async () => { if (await promptVaultUnlock()) await reloadNotes(); });
+els.vaultChangePwBtn.addEventListener('click', vaultChangePassword);
+els.vaultForgetBtn.addEventListener('click', vaultForget);
+els.vaultDisableBtn.addEventListener('click', vaultDisable);
+els.vaultAddYubiBtn.addEventListener('click', () => vaultAddSlot('yubikey'));
+els.vaultAddTrezorBtn.addEventListener('click', () => vaultAddSlot('trezor'));
+els.vaultTouchIdCheck.addEventListener('change', () => vaultSetTouchId(els.vaultTouchIdCheck.checked));
 
 // --- Export functions ---
 let exportIsOpen = false;
@@ -2916,6 +3680,527 @@ function showExportProgress(text) {
 function hideExportProgress() {
   els.exportOptions.style.display = 'block';
   els.exportProgress.style.display = 'none';
+}
+
+// --- Import from IC (Sony IC recorder -> Whisper -> DeepSeek -> notes) ---
+let icImportIsOpen = false;
+let isIcImporting = false;
+
+function setIcImportModalOpen(on) {
+  icImportIsOpen = !!on;
+  els.icImportModal.classList.toggle('open', icImportIsOpen);
+  els.icImportModal.setAttribute('aria-hidden', icImportIsOpen ? 'false' : 'true');
+}
+
+// Hiding the window never blocks: the import keeps running in the main
+// process and the 🎙️ button keeps pulsing until it finishes.
+function closeIcImportModal() {
+  setIcImportModalOpen(false);
+}
+
+function icLogLine(text, cls) {
+  const div = document.createElement('div');
+  if (cls) div.className = cls;
+  div.textContent = text;
+  els.icImportLog.appendChild(div);
+  els.icImportLog.scrollTop = els.icImportLog.scrollHeight;
+}
+
+let lastIcProgress = null;
+let icRunStartedAt = 0;
+let icTickTimer = null;
+let icListRefreshTimer = null;
+
+function formatElapsed(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+}
+
+// Status line = last progress message + (current/total) file + elapsed time.
+function renderIcStatus() {
+  const p = lastIcProgress;
+  if (!p) return;
+  const where = (p.total ? ` (${p.current || 0}/${p.total})` : '') + (p.file ? ` ${p.file}` : '');
+  const elapsed = isIcImporting && icRunStartedAt ? ` · ${formatElapsed(Date.now() - icRunStartedAt)}` : '';
+  els.icImportProgress.textContent = (p.message || '') + where + elapsed;
+}
+
+// Imported notes show up in the sidebar as they land (debounced).
+function scheduleIcListRefresh() {
+  if (icListRefreshTimer) clearTimeout(icListRefreshTimer);
+  icListRefreshTimer = setTimeout(() => {
+    icListRefreshTimer = null;
+    if (folderPath && isPathWithin(folderPath, icNotesFolder)) refreshNotes();
+  }, 500);
+}
+
+function handleIcImportProgress(p) {
+  if (!p) return;
+  lastIcProgress = p;
+  renderIcStatus();
+  if (p.phase === 'done-file') { icLogLine(`✔ ${p.file} → ${p.note}`, 'ok'); scheduleIcListRefresh(); }
+  else if (p.phase === 'error') icLogLine(`✖ ${p.file}: ${p.message}`, 'err');
+  else if (p.phase === 'cancelled') icLogLine(`■ Stopped at ${p.file}`);
+}
+
+function isPathWithin(parent, child) {
+  if (!parent || !child) return false;
+  const norm = (p) => {
+    let s = String(p).replace(/[\\\/]+$/, '');
+    if (navigator.platform.toLowerCase().startsWith('win')) s = s.toLowerCase().replace(/\//g, '\\');
+    return s;
+  };
+  const a = norm(parent);
+  const b = norm(child);
+  return a === b || b.startsWith(a + (a.includes('\\') ? '\\' : '/'));
+}
+
+let icScanRecFileDir = null; // REC_FILE folder found by the last scan (for re-imports)
+
+function setIcBusy(on) {
+  isIcImporting = !!on;
+  els.importIcBtn.classList.toggle('fixing', isIcImporting);
+  els.icStopBtn.hidden = !isIcImporting;
+  els.icStopBtn.disabled = false;
+  els.icImportDoneBtn.textContent = isIcImporting ? 'Hide' : 'Close';
+  if (icTickTimer) { clearInterval(icTickTimer); icTickTimer = null; }
+  if (isIcImporting) {
+    icRunStartedAt = Date.now();
+    icTickTimer = setInterval(renderIcStatus, 1000);
+  }
+  updateIcReimportBtn();
+}
+
+async function stopIcImport() {
+  if (!isIcImporting) return;
+  els.icStopBtn.disabled = true;
+  lastIcProgress = { ...(lastIcProgress || {}), message: 'Stopping…' };
+  renderIcStatus();
+  try { await api.icImportCancel(); } catch (_e) {}
+}
+
+function updateIcReimportBtn() {
+  const anyChecked = !!els.icImportDeletedList.querySelector('input[type="checkbox"]:checked');
+  els.icReimportBtn.disabled = isIcImporting || !anyChecked;
+}
+
+// Recordings imported before whose note has since been deleted: offered,
+// unchecked, so nothing the user removed on purpose comes back by itself.
+function renderIcDeletedList(items) {
+  els.icImportDeletedList.innerHTML = '';
+  const list = Array.isArray(items) ? items : [];
+  for (const it of list) {
+    const row = document.createElement('label');
+    row.className = 'icDeletedRow';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.dataset.name = it.name;
+    const name = document.createElement('span');
+    name.className = 'icDelName';
+    name.textContent = it.name;
+    name.title = it.name;
+    const was = document.createElement('span');
+    was.className = 'icDelWas';
+    was.textContent = 'was: ' + noteTitleFromName(it.note || '');
+    was.title = was.textContent;
+    const date = document.createElement('span');
+    date.className = 'icDelDate';
+    date.textContent = it.recordedAt || '';
+    row.append(cb, name, was, date);
+    els.icImportDeletedList.appendChild(row);
+  }
+  els.icImportDeleted.hidden = list.length === 0;
+  updateIcReimportBtn();
+}
+
+function removeIcDeletedRows(imported) {
+  const done = new Set((imported || []).map(i => String(i.source || '').toLowerCase()));
+  for (const cb of [...els.icImportDeletedList.querySelectorAll('input[type="checkbox"]')]) {
+    if (done.has(String(cb.dataset.name || '').toLowerCase())) cb.closest('.icDeletedRow').remove();
+  }
+  if (!els.icImportDeletedList.children.length) els.icImportDeleted.hidden = true;
+  updateIcReimportBtn();
+}
+
+function icImportOpts() {
+  return { deepseekKey, whisperCliPath, whisperModelPath, icNotesFolder };
+}
+
+async function applyIcImportResult(result) {
+  if (!result) { els.icImportProgress.textContent = 'Import cancelled'; return; }
+  if (result.noDevice) { els.icImportProgress.textContent = result.error || 'No IC RECORDER found'; return; }
+  const imported = Array.isArray(result.imported) ? result.imported.length : 0;
+  const errors = Array.isArray(result.errors) ? result.errors.length : 0;
+  const skipped = result.skipped || 0;
+  const retried = result.retried || 0;
+  const reimported = result.reimported || 0;
+  const detail = (retried || reimported) ? ` (${retried} retried, ${reimported} re-imported)` : '';
+  const summary = `${imported} imported${detail}, ${skipped} skipped, ${errors} error${errors === 1 ? '' : 's'}`;
+  const prefix = result.cancelled ? 'Stopped' : (result.success ? 'Done' : 'Failed');
+  lastIcProgress = null;
+  els.icImportProgress.textContent = result.success ? `${prefix}: ${summary}` : `${prefix}: ${result.error || 'unknown error'} (${summary})`;
+  if (!result.success && result.error) icLogLine(`✖ ${result.error}`, 'err');
+  if (icListRefreshTimer) { clearTimeout(icListRefreshTimer); icListRefreshTimer = null; }
+  if (imported > 0 && folderPath && isPathWithin(folderPath, icNotesFolder)) {
+    await refreshNotes();
+  }
+}
+
+async function importFromIc() {
+  if (isIcImporting) { setIcImportModalOpen(true); return; } // re-open the live view
+
+  if (!deepseekKey || !whisperCliPath || !whisperModelPath || !icNotesFolder) {
+    await api.showAlert('Import from IC needs a DeepSeek API key, a Whisper CLI path, a Whisper model path and a notes folder. Set them in Preferences.');
+    openPrefsModal();
+    return;
+  }
+
+  closeMiniCal();
+  setFocusMode(false);
+  els.icImportLog.innerHTML = '';
+  renderIcDeletedList([]);
+  els.icImportProgress.textContent = 'Looking for IC RECORDER...';
+  setIcImportModalOpen(true);
+  setIcBusy(true);
+
+  const opts = icImportOpts();
+  let result = null;
+  try {
+    // 1. Read-only scan: find the recorder and classify its recordings.
+    let scan = await api.icImportScan({ icNotesFolder });
+    if (scan && scan.noDevice) {
+      const pick = await api.showConfirm('No IC RECORDER found - plug it in and try again.\n\nPick the recorder\'s REC_FILE folder manually instead?', { title: 'Import from IC', okLabel: 'Pick Folder' });
+      if (pick) {
+        const dir = await api.openFolderDialog();
+        if (dir) scan = await api.icImportScan({ icNotesFolder, recFileDir: dir });
+      }
+    }
+    if (!scan || !scan.success) {
+      result = scan || null;
+    } else {
+      icScanRecFileDir = scan.recFileDir;
+      renderIcDeletedList(scan.deleted);
+      const c = scan.counts || {};
+      els.icImportProgress.textContent = `Found ${c.total || 0} recording(s): ${c.fresh || 0} new, ${c.failed || 0} to retry, ${c.present || 0} already imported`;
+      // 2. Import new recordings and retry earlier failed imports.
+      result = await api.icImportRun({ ...opts, recFileDir: scan.recFileDir });
+    }
+  } catch (err) {
+    result = { success: false, error: String(err?.message || err) };
+  }
+
+  setIcBusy(false);
+  await applyIcImportResult(result);
+}
+
+async function reimportSelectedIc() {
+  if (isIcImporting || !icScanRecFileDir) return;
+  const boxes = [...els.icImportDeletedList.querySelectorAll('input[type="checkbox"]')];
+  const names = boxes.filter(cb => cb.checked).map(cb => cb.dataset.name);
+  if (!names.length) return;
+  for (const cb of boxes) cb.disabled = true;
+  setIcBusy(true);
+  els.icImportProgress.textContent = `Re-importing ${names.length} recording(s)...`;
+  let result = null;
+  try {
+    result = await api.icImportRun({ ...icImportOpts(), recFileDir: icScanRecFileDir, reimportNames: names, reimportOnly: true });
+  } catch (err) {
+    result = { success: false, error: String(err?.message || err) };
+  }
+  for (const cb of boxes) cb.disabled = false;
+  setIcBusy(false);
+  if (result && Array.isArray(result.imported)) removeIcDeletedRows(result.imported);
+  await applyIcImportResult(result);
+}
+
+// --- Per-note AI actions: Transcribe Audio / Format Text ---
+// Jobs run in the main process in the background. Any number of notes can
+// have a job (one per note); the map is keyed by note PATH, never by index or
+// object identity, because reloadNotes() rebuilds notes[] and only the open
+// folder is in memory. The main process reports results; this side decides
+// how to apply them (editor + undo when the note is open, disk otherwise).
+const noteAiJobs = new Map(); // noteAiKey(path) -> { jobId, kind, notePath, noteName, phase, message, startedText }
+const NOTE_KEY_CI = /^(win|mac)/i.test(navigator.platform);
+
+function noteAiKey(p) {
+  return NOTE_KEY_CI ? String(p || '').toLowerCase() : String(p || '');
+}
+
+function getOpenNote() {
+  return (currentIndex != null && notes[currentIndex]) || null;
+}
+
+function isOpenNotePath(p) {
+  const n = getOpenNote();
+  return !!n && noteAiKey(n.path) === noteAiKey(p);
+}
+
+function jobForOpenNote() {
+  const n = getOpenNote();
+  return n ? noteAiJobs.get(noteAiKey(n.path)) : null;
+}
+
+function noteAiLabel(kind) {
+  return kind === 'transcribe' ? 'Transcribe Audio' : 'Format Text';
+}
+
+function noteAiShort(job) {
+  const map = { queued: 'queued', transcode: 'converting', transcribe: 'transcribing', edit: job.kind === 'format' ? 'formatting' : 'editing', done: 'applying', error: 'failed' };
+  return map[job.phase] || job.phase;
+}
+
+// Buttons lock (and pulse) only for the note that is open AND has a job.
+function updateNoteAiButtons() {
+  const n = getOpenNote();
+  const job = (n && !n.unavailable) ? noteAiJobs.get(noteAiKey(n.path)) : null;
+  const disabled = !n || !!n.unavailable || !!job;
+  els.transcribeBtn.disabled = disabled;
+  els.formatBtn.disabled = disabled;
+  els.transcribeBtn.classList.toggle('fixing', !!job && job.kind === 'transcribe');
+  els.formatBtn.classList.toggle('fixing', !!job && job.kind === 'format');
+}
+
+function showOpenNoteJobState() {
+  const job = jobForOpenNote();
+  if (job) els.saveState.textContent = (job.message || noteAiShort(job)).toLowerCase() + '...';
+}
+
+function flashSaveState(text, ms = 2500) {
+  els.saveState.textContent = text;
+  setTimeout(() => { if (els.saveState.textContent === text) els.saveState.textContent = ''; }, ms);
+}
+
+// Replace the open note's text and bold spans with an AI result, as one undo step.
+function applyAiNoteResult(text, spans) {
+  if (currentIndex == null || !notes[currentIndex]) return;
+  const editor = els.editor;
+  flushUndoPending();
+  undoStack.push(editorState());
+  if (undoStack.length > UNDO_MAX) undoStack.shift();
+  redoStack = [];
+  editor.value = text;
+  notes[currentIndex].content = text;
+  prevEditorText = text; // spans below are already relative to the new text
+  currentFormatSpans = (spans || []).map(sp => ({ start: sp.start, end: sp.end, type: sp.type }));
+  formatDirty = true;
+  dirty = true;
+  lastUndoState = editorState();
+  editor.selectionStart = editor.selectionEnd = 0;
+  editor.scrollTop = 0;
+  renderEditorOverlay();
+  updateUndoButtons();
+  resetDirtyRegion();
+  scheduleSave();
+}
+
+function requireDeepseekKey() {
+  if (deepseekKey) return true;
+  api.showAlert('Set your DeepSeek API key in Preferences first.').then(() => openPrefsModal());
+  return false;
+}
+
+// Register the job locally, then ask the main process to run it.
+async function startNoteAiJob({ kind, n, audioPath, text }) {
+  const key = noteAiKey(n.path);
+  if (noteAiJobs.has(key)) {
+    await api.showAlert('An AI action is already running for this note.');
+    return;
+  }
+  // Snapshot for conflict detection. After flushSaveIfNeeded() the editor text
+  // equals what is on disk.
+  const startedText = kind === 'format' ? text : els.editor.value;
+  const job = { jobId: null, kind, notePath: n.path, noteName: n.name, phase: 'queued', message: 'Queued', startedText };
+  noteAiJobs.set(key, job); // before the invoke: early progress events must find it
+  updateNoteAiButtons();
+  showOpenNoteJobState();
+  renderList();
+
+  const r = await api.noteAiStart({
+    kind,
+    notePath: n.path,
+    noteName: n.name,
+    startedText,
+    audioPath,
+    text,
+    fallbackTitle: noteTitleFromName(n.name),
+    deepseekKey,
+    whisperCliPath,
+    whisperModelPath
+  });
+  if (!r || !r.success) {
+    noteAiJobs.delete(key);
+    updateNoteAiButtons();
+    renderList();
+    if (isOpenNotePath(n.path)) flashSaveState(kind === 'transcribe' ? 'transcription failed' : 'formatting failed');
+    await api.showAlert(`${noteAiLabel(kind)} failed: ${(r && r.error) || 'unknown error'}`);
+    return;
+  }
+  job.jobId = r.jobId;
+}
+
+async function transcribeCurrentNoteAudio() {
+  if (isAutoFixing || currentIndex == null || !notes[currentIndex]) return;
+  const n = notes[currentIndex];
+  if (n.unavailable) return;
+  if (noteAiJobs.has(noteAiKey(n.path))) {
+    await api.showAlert('An AI action is already running for this note.');
+    return;
+  }
+  if (!n.audio || !n.audio.path) {
+    await api.showAlert('This note has no audio attached. Use the 🔊 button to attach a recording first.');
+    return;
+  }
+  if (!requireDeepseekKey()) return;
+  if (!whisperCliPath || !whisperModelPath) {
+    await api.showAlert('Set the Whisper CLI and Whisper Model paths in Preferences first.');
+    openPrefsModal();
+    return;
+  }
+  if (els.editor.value.trim()) {
+    const ok = await api.showConfirm('This note already has text. Replace it with a fresh transcription of the attached audio?\n\n(You can undo afterwards.)', { title: 'Transcribe Audio', okLabel: 'Replace' });
+    if (!ok) return;
+  }
+
+  stopAudio();
+  await flushSaveIfNeeded();
+  if (currentIndex == null || notes[currentIndex] !== n) return; // note changed during the flush
+  await startNoteAiJob({ kind: 'transcribe', n, audioPath: n.audio.path });
+}
+
+async function formatCurrentNoteText() {
+  if (isAutoFixing || currentIndex == null || !notes[currentIndex]) return;
+  const n = notes[currentIndex];
+  if (n.unavailable) return;
+  if (noteAiJobs.has(noteAiKey(n.path))) {
+    await api.showAlert('An AI action is already running for this note.');
+    return;
+  }
+  const text = els.editor.value;
+  if (!text.trim()) {
+    await api.showAlert('This note is empty. If it has audio attached, use Transcribe Audio instead.');
+    return;
+  }
+  if (!requireDeepseekKey()) return;
+
+  await flushSaveIfNeeded();
+  if (currentIndex == null || notes[currentIndex] !== n) return;
+  await startNoteAiJob({ kind: 'format', n, text });
+}
+
+// Drop the open note's text into Uberector's inbox (editor text, so unsaved edits go too).
+async function sendCurrentNoteToUberector() {
+  const n = getOpenNote();
+  if (!n || n.unavailable) return;
+  const text = els.editor.value;
+  if (!text.trim()) {
+    await api.showAlert('This note is empty.');
+    return;
+  }
+  const r = await api.uberectorSend(uberectorFolder, text);
+  if (r && r.success) flashSaveState('sent to Uberector ✓');
+  else await api.showAlert(`Send to Uberector failed: ${(r && r.error) || 'unknown error'}`);
+}
+
+// Apply a finished job. Open note: into the editor as one undo step, asking
+// first if the user typed in it meanwhile. Not open: written to disk by the
+// main process, which refuses when the file changed since the job started.
+async function completeNoteAiJob(job, result) {
+  const label = noteAiLabel(job.kind);
+  const title = noteTitleFromName(job.noteName);
+  const okMsg = job.kind === 'transcribe' ? 'transcribed ✓' : 'formatted ✓';
+  const confirmMsg = `"${title}" was edited while ${label} was running. Replace your edits with the AI result?\n\n(You can undo afterwards.)`;
+
+  if (isOpenNotePath(job.notePath) && !getOpenNote().unavailable) {
+    const unchanged = job.startedText != null && els.editor.value === job.startedText;
+    if (!unchanged) {
+      const ok = await api.showConfirm(confirmMsg, { title: label, okLabel: 'Replace' });
+      if (!ok) { flashSaveState(`${label.toLowerCase()} result discarded`); return; }
+    }
+    if (isOpenNotePath(job.notePath)) { // the user may have switched notes during the dialog
+      applyAiNoteResult(result.text, result.spans);
+      flashSaveState(okMsg);
+      return;
+    }
+  }
+
+  const args = { notePath: job.notePath, text: result.text, spans: result.spans, expectText: job.startedText };
+  let r = await api.noteAiWriteResult(args);
+  if (r && r.conflict) {
+    const msg = r.missing
+      ? `"${title}" no longer exists on disk. Recreate it with the ${label} result?`
+      : confirmMsg;
+    const ok = await api.showConfirm(msg, { title: label, okLabel: r.missing ? 'Recreate' : 'Replace' });
+    if (!ok) { showBanner(`${label} result for "${escapeHtml(title)}" was discarded.`); return; }
+    r = await api.noteAiWriteResult({ ...args, force: true });
+  }
+  if (!r || !r.success) {
+    showBanner(`${label} could not save "${escapeHtml(title)}": ${escapeHtml((r && r.error) || 'unknown error')}`);
+    return;
+  }
+  const n = notes.find(x => noteAiKey(x.path) === noteAiKey(job.notePath));
+  if (n) {
+    n.content = result.text;
+    n.size = r.size;
+    n.lastModified = r.lastModified;
+  }
+  // If it is the open note after all (e.g. reopened during the write), refresh the editor.
+  if (isOpenNotePath(job.notePath)) {
+    applyAiNoteResult(result.text, result.spans);
+    flashSaveState(okMsg);
+    return;
+  }
+  const doneMsg = `${label} finished for "${escapeHtml(title)}".`;
+  showBanner(doneMsg);
+  setTimeout(() => { if (els.banner.innerHTML === doneMsg) hideBanner(); }, 5000);
+}
+
+async function handleNoteAiProgress(p) {
+  if (!p || !p.notePath) return;
+  const key = noteAiKey(p.notePath);
+  let job = noteAiJobs.get(key);
+  const terminal = p.phase === 'done' || p.phase === 'error';
+  if (!job) {
+    if (!terminal) return; // progress for a job this renderer does not track
+    // Completion of a job started before a renderer reload: no snapshot, so
+    // completeNoteAiJob will fall back to asking before replacing.
+    job = { jobId: p.jobId, kind: p.kind, notePath: p.notePath, noteName: p.noteName || p.notePath, phase: p.phase, message: p.message, startedText: null };
+    noteAiJobs.set(key, job);
+  }
+  const phaseChanged = job.phase !== p.phase;
+  job.phase = p.phase;
+  job.message = p.message;
+  if (isOpenNotePath(p.notePath)) showOpenNoteJobState();
+  if (!terminal) {
+    if (phaseChanged) renderList();
+    return;
+  }
+  try {
+    if (p.phase === 'error') {
+      const title = noteTitleFromName(job.noteName);
+      showBanner(`${noteAiLabel(job.kind)} failed for "${escapeHtml(title)}": ${escapeHtml(p.error || 'unknown error')}`);
+      if (isOpenNotePath(p.notePath)) flashSaveState(job.kind === 'transcribe' ? 'transcription failed' : 'formatting failed');
+    } else {
+      await completeNoteAiJob(job, p.result || {});
+    }
+  } catch (err) {
+    console.error('note-ai completion error:', err);
+    showBanner(`${noteAiLabel(job.kind)} could not finish: ${escapeHtml(String(err?.message || err))}`);
+  } finally {
+    // Only now: the auto-delete guard must hold while a confirm dialog is up.
+    noteAiJobs.delete(key);
+    updateNoteAiButtons();
+    renderList();
+  }
+}
+
+// After a renderer reload, pick up jobs still running in the main process.
+async function syncNoteAiJobs() {
+  try {
+    const r = await api.noteAiList();
+    for (const j of (r && r.jobs) || []) {
+      noteAiJobs.set(noteAiKey(j.notePath), { jobId: j.jobId, kind: j.kind, notePath: j.notePath, noteName: j.noteName, phase: j.phase, message: j.message, startedText: typeof j.startedText === 'string' ? j.startedText : null });
+    }
+  } catch (_e) {}
 }
 
 // Get CSS styles for export
@@ -4500,17 +5785,22 @@ function updatePrefsUI() {
   // Show provider selection when auto-fix is enabled (auto or manual mode)
   const fixEnabled = autoFixMode !== 'off';
   els.autoFixProviderItem.style.display = fixEnabled ? 'flex' : 'none';
-  els.providerOpenAIBtn.classList.toggle('active', autoFixProvider === 'openai');
+  els.providerDeepSeekBtn.classList.toggle('active', autoFixProvider === 'deepseek');
   els.providerLocalBtn.classList.toggle('active', autoFixProvider === 'local');
-  
-  // Show OpenAI key field when using OpenAI
-  els.openAIKeyItem.style.display = (fixEnabled && autoFixProvider === 'openai') ? 'flex' : 'none';
-  els.openAIKeyInput.value = openAIKey;
-  
+
+  // DeepSeek key is always visible: it also powers Import from IC
+  els.deepseekKeyInput.value = deepseekKey;
+
   // Show local model fields when using local LLM
   els.localModelItem.style.display = (fixEnabled && autoFixProvider === 'local') ? 'flex' : 'none';
   els.localModelStatusItem.style.display = (fixEnabled && autoFixProvider === 'local') ? 'flex' : 'none';
   els.localModelPath.value = localModelPath || '';
+
+  // IC recorder import
+  els.whisperCliPathInput.value = whisperCliPath || '';
+  els.whisperModelPathInput.value = whisperModelPath || '';
+  els.icNotesFolderInput.value = icNotesFolder || '';
+  els.uberectorFolderInput.value = uberectorFolder || '';
   
   // GitHub settings
   els.githubTokenInput.value = githubToken || '';
@@ -4555,9 +5845,9 @@ function setAutoFixProvider(provider) {
   updatePrefsUI();
 }
 
-function saveOpenAIKey(key) {
-  openAIKey = key;
-  api.savePreferences({ openAIKey: key });
+function saveDeepseekKey(key) {
+  deepseekKey = (key || '').trim();
+  api.savePreferences({ deepseekKey });
 }
 
 function saveGithubToken(token) {
@@ -4679,13 +5969,49 @@ async function browseForModel() {
   }
 }
 
-// Fix text using OpenAI API or Local LLM
+async function browseForWhisperCli() {
+  const result = await api.openWhisperCliDialog();
+  if (result) {
+    whisperCliPath = result;
+    api.savePreferences({ whisperCliPath: result });
+    updatePrefsUI();
+  }
+}
+
+async function browseForWhisperModel() {
+  const result = await api.openWhisperModelDialog();
+  if (result) {
+    whisperModelPath = result;
+    api.savePreferences({ whisperModelPath: result });
+    updatePrefsUI();
+  }
+}
+
+async function browseForIcNotesFolder() {
+  const result = await api.openFolderDialog();
+  if (result) {
+    icNotesFolder = result;
+    api.savePreferences({ icNotesFolder: result });
+    updatePrefsUI();
+  }
+}
+
+async function browseForUberectorFolder() {
+  const result = await api.openFolderDialog();
+  if (result) {
+    uberectorFolder = result;
+    api.savePreferences({ uberectorFolder: result });
+    updatePrefsUI();
+  }
+}
+
+// Fix text using DeepSeek API or Local LLM
 // isManual = true bypasses the mode check (for manual button press)
 async function fixText(isManual = false) {
   // For auto mode, only run if auto mode is enabled
   if (!isManual && autoFixMode !== 'auto') return;
   if (isAutoFixing) return;
-  if (autoFixProvider === 'openai' && !openAIKey) return;
+  if (autoFixProvider === 'deepseek' && !deepseekKey) return;
   if (autoFixProvider === 'local' && !localModelPath) return;
   if (currentIndex == null || !notes[currentIndex]) return;
   
@@ -4756,8 +6082,8 @@ async function fixText(isManual = false) {
     
     console.log('Fix starting, provider:', autoFixProvider, 'manual:', isManual, 'textLength:', textToFix.length);
     
-    if (autoFixProvider === 'openai') {
-      fixedText = await fixTextWithOpenAI(textToFix);
+    if (autoFixProvider === 'deepseek') {
+      fixedText = await fixTextWithDeepSeek(textToFix);
     } else {
       fixedText = await fixTextWithLocalLLM(textToFix);
     }
@@ -4888,37 +6214,23 @@ function updateDirtyRegion(cursorPos) {
   autoFixLastCursorPos = cursorPos;
 }
 
-async function fixTextWithOpenAI(text) {
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${openAIKey}`
-    },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      messages: [
-        {
-          role: 'system',
-          content: 'You are a text correction assistant. Fix spelling, grammar, and typos in the user\'s text. IMPORTANT: Preserve ALL line breaks, blank lines, and paragraph structure exactly as they appear. Do not merge lines or remove empty lines. Only fix the words themselves and spacing between words on the same line. Keep the exact same meaning and tone. Return ONLY the corrected text with no explanations or quotes. If the text has no errors, return it unchanged.'
-        },
-        {
-          role: 'user',
-          content: text
-        }
-      ],
-      temperature: 0.1,
-      max_tokens: 4096
-    })
+const AUTO_FIX_SYSTEM_PROMPT = 'You are a text correction assistant. Fix spelling, grammar, and typos in the user\'s text. IMPORTANT: Preserve ALL line breaks, blank lines, and paragraph structure exactly as they appear. Do not merge lines or remove empty lines. Only fix the words themselves and spacing between words on the same line. Keep the exact same meaning and tone. Return ONLY the corrected text with no explanations or quotes. If the text has no errors, return it unchanged.';
+
+// The request itself runs in the main process (deepseek-chat) so the key
+// never leaves it; see callDeepSeek in main.js.
+async function fixTextWithDeepSeek(text) {
+  const result = await api.deepseekChat({
+    apiKey: deepseekKey,
+    system: AUTO_FIX_SYSTEM_PROMPT,
+    user: text,
+    temperature: 0.1,
+    maxTokens: 4096
   });
-  
-  if (!response.ok) {
-    console.error('OpenAI API error:', response.status);
+  if (!result || !result.success) {
+    console.error('DeepSeek API error:', result && result.error);
     return null;
   }
-  
-  const data = await response.json();
-  return data.choices?.[0]?.message?.content || null;
+  return result.text || null;
 }
 
 async function fixTextWithLocalLLM(text) {
@@ -4969,7 +6281,7 @@ function scheduleAutoFix() {
   // Only schedule auto-fix in auto mode
   if (autoFixMode !== 'auto') return;
   // Check if we have the required config for the selected provider
-  if (autoFixProvider === 'openai' && !openAIKey) return;
+  if (autoFixProvider === 'deepseek' && !deepseekKey) return;
   if (autoFixProvider === 'local' && !localModelPath) return;
   
   if (autoFixTimer) clearTimeout(autoFixTimer);
@@ -4995,9 +6307,13 @@ async function loadPreferences() {
     } else {
       autoFixMode = 'off';
     }
-    autoFixProvider = prefs.autoFixProvider || 'openai';
-    openAIKey = prefs.openAIKey || '';
+    autoFixProvider = prefs.autoFixProvider === 'local' ? 'local' : 'deepseek';
+    deepseekKey = prefs.deepseekKey || '';
     localModelPath = prefs.localModelPath || '';
+    whisperCliPath = prefs.whisperCliPath || '';
+    whisperModelPath = prefs.whisperModelPath || '';
+    icNotesFolder = prefs.icNotesFolder || '';
+    uberectorFolder = prefs.uberectorFolder || '';
     githubToken = prefs.githubToken || '';
     githubRepo = prefs.githubRepo || '';
     publishingName = prefs.publishingName || '';
@@ -5129,11 +6445,14 @@ function renderList() {
     const meta = document.createElement('div');
     meta.className = 'noteMeta';
     const firstLine = (n.content || '').split(/\r?\n/)[0]?.trim() || '';
-    const excerpt = n.unavailable ? '(online-only)' : (firstLine ? firstLine.slice(0, 80) : '(empty)');
+    const excerpt = n.locked ? '(locked)' : n.unavailable ? '(online-only)' : (firstLine ? firstLine.slice(0, 80) : '(empty)');
     const canvasMark = n.canvas ? '  ·  [canvas]' : (n.image ? '  ·  [img]' : '');
     const audioMark = n.audio ? '  ·  [audio]' : '';
-    const offlineMark = n.unavailable ? '  ·  offline' : '';
-    meta.textContent = `${fmtDate(n.lastModified)}  ·  ${excerpt}${canvasMark}${audioMark}${offlineMark}`;
+    const offlineMark = n.locked ? '' : n.unavailable ? '  ·  offline' : '';
+    const aiJob = noteAiJobs.get(noteAiKey(n.path));
+    const jobMark = aiJob ? `  ·  ⏳ ${noteAiShort(aiJob)}` : '';
+    meta.textContent = `${fmtDate(n.lastModified)}  ·  ${excerpt}${canvasMark}${audioMark}${offlineMark}${jobMark}`;
+    if (aiJob) item.classList.add('aiBusy');
 
     item.appendChild(title);
     item.appendChild(meta);
@@ -5253,6 +6572,7 @@ function renderCurrent() {
   // recursion — closeCalendar() itself calls renderCurrent().
   if (calendarIsOpen) {
     calendarIsOpen = false;
+    setCalDrawMode(false);
     els.calendarView.style.display = 'none';
     hideCalOverflow();
   }
@@ -5274,16 +6594,19 @@ function renderCurrent() {
   if (n.unavailable) {
     // Online-only placeholder (e.g. Dropbox file not downloaded): show a notice
     // and keep the editor disabled so autosave can't overwrite the real file.
-    els.editor.value = 'This note is stored online-only and isn\'t available offline.\n\nConnect to the internet and let your sync service (e.g. Dropbox) download it, then reload the folder.';
+    els.editor.value = n.locked
+      ? 'This note is encrypted.\n\nUnlock the folder in Preferences > Encryption to read and edit it.'
+      : 'This note is stored online-only and isn\'t available offline.\n\nConnect to the internet and let your sync service (e.g. Dropbox) download it, then reload the folder.';
     prevEditorText = els.editor.value;
     els.editorWrap.style.display = 'flex';
     els.empty.style.display = 'none';
     setEditorEnabled(false);
-    els.saveState.textContent = 'online-only';
+    els.saveState.textContent = n.locked ? 'locked' : 'online-only';
     els.editorWrap.classList.remove('hasImage');
     dirty = false;
     resetUndoHistory();
     renderEditorOverlay();
+    updateNoteAiButtons();
     return;
   }
   els.editor.value = n.content ?? '';
@@ -5296,6 +6619,8 @@ function renderCurrent() {
   dirty = false;
   resetUndoHistory();
   renderEditorOverlay();
+  updateNoteAiButtons();
+  showOpenNoteJobState();
 }
 
 async function openFolder() {
@@ -5309,6 +6634,7 @@ async function openFolder() {
     await api.saveFolderPath(folderPath);
     setEnabled(true);
     updateFolderUI();
+    await ensureVaultUnlocked();
     await reloadNotes();
   } catch (err) {
     showBanner(`Could not open folder. ${String(err?.message || err)}`);
@@ -5320,6 +6646,7 @@ async function loadFolderFromPath(path) {
   folderPath = path;
   setEnabled(true);
   updateFolderUI();
+  await ensureVaultUnlocked();
   await reloadNotes();
 }
 
@@ -5456,6 +6783,7 @@ async function reloadNotes(preserveName = null) {
           size: file.size,
           lastModified: file.lastModified,
           unavailable: !!file.unavailable,
+          locked: !!file.locked,
           image: null,
           audio: null,
           canvas: null
@@ -5522,7 +6850,10 @@ async function reloadNotes(preserveName = null) {
     renderList();
     renderCurrent();
 
-    if (result.skippedCount > 0) {
+    const lockedCount = notes.filter(n => n.locked).length;
+    if (lockedCount > 0) {
+      showBanner('This folder is encrypted and locked. Unlock it in Preferences &gt; Encryption.');
+    } else if (result.skippedCount > 0) {
       showBanner(`${result.skippedCount} item(s) are online-only and unavailable offline. Reopen the folder once synced.`);
     }
 
@@ -5611,7 +6942,14 @@ async function autoDeleteEmptyNote(noteIndex, editorContent = null) {
     return;
   }
   const n = notes[noteIndex];
-  
+
+  // Never delete a note that has a background AI job: the notes waiting to be
+  // transcribed are exactly the empty ones, and the job will fill them in.
+  if (noteAiJobs.has(noteAiKey(n.path))) {
+    console.log('[AutoDelete] Note has an AI job running, keeping it');
+    return;
+  }
+
   // Double-check the note is actually empty (use editorContent if provided)
   if (!(await isNoteEmpty(n, editorContent))) {
     console.log('[AutoDelete] Note not empty on double-check, aborting');
@@ -5985,6 +7323,7 @@ function getFormatPath(base) {
 async function loadFormatSpans() {
   currentFormatSpans = [];
   currentDueDate = null;
+  currentIcSource = null;
   formatDirty = false;
   if (currentIndex == null || !notes[currentIndex]) { updateDueDateBtn(); return; }
   const n = notes[currentIndex];
@@ -6002,6 +7341,9 @@ async function loadFormatSpans() {
       if (parsed && typeof parsed.dueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed.dueDate)) {
         currentDueDate = parsed.dueDate;
       }
+      if (parsed && parsed.icSource && typeof parsed.icSource === 'object') {
+        currentIcSource = parsed.icSource;
+      }
     }
   } catch (e) {}
   updateDueDateBtn();
@@ -6014,7 +7356,7 @@ async function saveFormatSpans() {
   const fmtPath = getFormatPath(base);
   if (!fmtPath) return;
   try {
-    if (currentFormatSpans.length === 0 && !currentDueDate) {
+    if (currentFormatSpans.length === 0 && !currentDueDate && !currentIcSource) {
       const exists = await api.fileExists(fmtPath);
       if (exists) await api.deleteFile(fmtPath);
     } else {
@@ -6023,6 +7365,7 @@ async function saveFormatSpans() {
       if (!dirExists) await api.createFolder(dir);
       const payload = { spans: currentFormatSpans };
       if (currentDueDate) payload.dueDate = currentDueDate;
+      if (currentIcSource) payload.icSource = currentIcSource;
       await api.writeCanvasJson(fmtPath, JSON.stringify(payload));
     }
     formatDirty = false;
@@ -6047,15 +7390,147 @@ async function openCalendar() {
   const res = await api.calendarScan(rootFolderPath);
   if (!calendarIsOpen) return;  // closed while scanning
   calendarNotes = (res && res.success) ? res.notes : [];
+  calDrawings = (res && res.success && res.drawings) ? res.drawings : {};
   renderCalendar();
 }
 
 function closeCalendar() {
   if (!calendarIsOpen) return;
   calendarIsOpen = false;
+  setCalDrawMode(false);
   els.calendarView.style.display = 'none';
   hideCalOverflow();
   renderCurrent();
+}
+
+// ===== Calendar day drawings (standalone PNG per date) =====
+
+function getCalDrawingPath(ymd) {
+  return api.joinPath(rootFolderPath, '.noatformat', 'calendar', ymd + '.png');
+}
+
+function resizeCalDrawOverlay() {
+  // Backing store = grid CSS size (also blanks the canvas)
+  els.calDrawOverlay.width = els.calGrid.clientWidth;
+  els.calDrawOverlay.height = els.calGrid.clientHeight;
+}
+
+function clearCalDrawOverlay() {
+  const ctx = els.calDrawOverlay.getContext('2d');
+  ctx.clearRect(0, 0, els.calDrawOverlay.width, els.calDrawOverlay.height);
+}
+
+function setCalDrawMode(on) {
+  calDrawMode = !!on;
+  els.calDrawOverlay.classList.toggle('active', calDrawMode);
+  els.calDrawToggleBtn.classList.toggle('active', calDrawMode);
+  calStrokeCell = null;
+  calStrokeYmd = null;
+  if (calDrawMode) {
+    resizeCalDrawOverlay();
+    if (!calSignatureMark && typeof SignatureMark !== 'undefined') {
+      calSignatureMark = new SignatureMark(els.calDrawOverlay);
+    }
+    applyPenSettings();
+  }
+}
+
+function calCellAtPoint(x, y) {
+  return document.elementsFromPoint(x, y).find(el => el.classList && el.classList.contains('calCell')) || null;
+}
+
+function loadImageFromDataUrl(dataUrl) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = dataUrl;
+  });
+}
+
+function showCellDrawing(cellEl, ymd, gen) {
+  let img = cellEl.querySelector('.calDayDrawing');
+  if (!img) {
+    img = document.createElement('img');
+    img.className = 'calDayDrawing';
+    img.alt = '';
+    cellEl.appendChild(img);
+  }
+  const cached = calDrawingCache.get(ymd);
+  if (cached) {
+    img.src = cached;
+    return;
+  }
+  const p = calDrawings[ymd];
+  if (!p) return;
+  api.readImageBase64(p).then(res => {
+    if (res && res.success && res.dataUrl) {
+      calDrawingCache.set(ymd, res.dataUrl);
+      if (gen == null || gen === calRenderGen) img.src = res.dataUrl;
+    }
+  }).catch(() => {});
+}
+
+async function captureCalStroke() {
+  const overlay = els.calDrawOverlay;
+  const cellEl = calStrokeCell;
+  const ymd = calStrokeYmd;
+  calStrokeCell = null;
+  calStrokeYmd = null;
+  if (!cellEl || !ymd || !overlay.width || !overlay.height) { clearCalDrawOverlay(); return; }
+
+  const oRect = overlay.getBoundingClientRect();
+  const cRect = cellEl.getBoundingClientRect();
+  const x = Math.max(0, Math.round(cRect.left - oRect.left));
+  const y = Math.max(0, Math.round(cRect.top - oRect.top));
+  const w = Math.min(overlay.width - x, Math.round(cRect.width));
+  const h = Math.min(overlay.height - y, Math.round(cRect.height));
+  if (w <= 0 || h <= 0) { clearCalDrawOverlay(); return; }
+
+  const octx = overlay.getContext('2d');
+  const data = octx.getImageData(x, y, w, h).data;
+  let hasContent = false;
+  for (let i = 3; i < data.length; i += 4) {
+    if (data[i] > 0) { hasContent = true; break; }
+  }
+  if (!hasContent) { clearCalDrawOverlay(); return; }
+
+  const off = document.createElement('canvas');
+  off.width = w;
+  off.height = h;
+  const ctx = off.getContext('2d');
+  const existing = calDrawingCache.get(ymd);
+  if (existing) {
+    const prev = await loadImageFromDataUrl(existing);
+    if (prev) ctx.drawImage(prev, 0, 0, w, h);
+  }
+  ctx.drawImage(overlay, x, y, w, h, 0, 0, w, h);
+  clearCalDrawOverlay();
+
+  const dataUrl = off.toDataURL('image/png');
+  const p = getCalDrawingPath(ymd);
+  const res = await api.writeImageBuffer(p, dataUrl);
+  if (!res || !res.success) {
+    showBanner('Could not save calendar drawing. ' + (res && res.error ? res.error : ''));
+    return;
+  }
+  calDrawings[ymd] = p;
+  calDrawingCache.set(ymd, dataUrl);
+  if (cellEl.isConnected) showCellDrawing(cellEl, ymd, null);
+}
+
+async function deleteCalDrawingAt(clientX, clientY) {
+  const cellEl = calCellAtPoint(clientX, clientY);
+  if (!cellEl) return;
+  const ymd = cellEl.dataset.ymd;
+  if (!ymd || !calDrawings[ymd]) return;
+  const yes = await api.showConfirm('Delete the drawing on ' + ymd + '?');
+  if (!yes) return;
+  try { await api.deleteFile(calDrawings[ymd]); } catch (e) {}
+  delete calDrawings[ymd];
+  calDrawingCache.delete(ymd);
+  const img = cellEl.querySelector('.calDayDrawing');
+  if (img) img.remove();
 }
 
 function hideCalOverflow() {
@@ -6113,30 +7588,6 @@ function renderCalBoat() {
   ).join('\n');
 }
 
-// Fill a day cell's background with the newest-modified illustrated note's image.
-function applyCellBackground(cellEl, entries, gen) {
-  let best = null;
-  for (const e of entries) {
-    if (e.r.thumbPath && (!best || e.r.modified > best.modified)) best = e.r;
-  }
-  if (!best) return;
-  const img = document.createElement('img');
-  img.className = 'calCellBg';
-  img.alt = '';
-  cellEl.insertBefore(img, cellEl.firstChild);
-  const cached = calThumbCache.get(best.thumbPath);
-  if (cached) {
-    img.src = cached;
-  } else {
-    api.readImageThumbnail(best.thumbPath, 256).then(res => {
-      if (res && res.success && res.dataUrl) {
-        calThumbCache.set(best.thumbPath, res.dataUrl);
-        if (gen === calRenderGen) img.src = res.dataUrl;
-      }
-    }).catch(() => {});
-  }
-}
-
 function renderCalendar() {
   const gen = ++calRenderGen;
   hideCalOverflow();
@@ -6150,6 +7601,7 @@ function renderCalendar() {
   for (const cell of monthGridDays(year, month)) {
     const cellEl = document.createElement('div');
     cellEl.className = 'calCell' + (cell.inMonth ? '' : ' otherMonth') + (cell.ymd === today ? ' today' : '');
+    cellEl.dataset.ymd = cell.ymd;
 
     const num = document.createElement('div');
     num.className = 'calDayNum';
@@ -6173,7 +7625,7 @@ function renderCalendar() {
       });
       cellEl.appendChild(more);
     }
-    applyCellBackground(cellEl, entries, gen);
+    if (calDrawings[cell.ymd]) showCellDrawing(cellEl, cell.ymd, gen);
     if (cell.ymd === today) {
       const boat = document.createElement('pre');
       boat.id = 'calBoat';
@@ -6308,8 +7760,9 @@ async function openNoteByIndex(idx, opts = {}) {
     console.log('[AutoDelete] - has canvas:', !!(prevNote.canvas && (prevNote.canvas.jsonPath || prevNote.canvas.pngPath)));
     console.log('[AutoDelete] - has audio:', !!(prevNote.audio && prevNote.audio.path));
     
-    // Pass editor content directly to ensure we check the current state
-    if (await isNoteEmpty(notes[previousIndex], editorContent)) {
+    // Pass editor content directly to ensure we check the current state.
+    // A note with a running AI job is never auto-deleted (see autoDeleteEmptyNote).
+    if (!noteAiJobs.has(noteAiKey(prevNote.path)) && await isNoteEmpty(notes[previousIndex], editorContent)) {
       console.log('[AutoDelete] Note is empty, deleting:', prevNote.name);
       await autoDeleteEmptyNote(previousIndex, editorContent);
       // Adjust the target index if it was after the deleted note
@@ -6377,6 +7830,7 @@ async function saveCurrentNow() {
       maxSaveTimer = null;
     }
     els.saveState.textContent = `saved ${fmtDate(n.lastModified || Date.now())}`;
+    showOpenNoteJobState(); // keep a running job's phase visible over autosave
     renderList();
   } catch (err) {
     els.saveState.textContent = 'save failed';
@@ -6470,7 +7924,11 @@ async function newNote() {
 async function deleteCurrent() {
   if (currentIndex == null || !notes[currentIndex] || !folderPath) return;
   const n = notes[currentIndex];
-  
+  if (noteAiJobs.has(noteAiKey(n.path))) {
+    await api.showAlert('Wait for the running AI action on this note to finish before deleting it.');
+    return;
+  }
+
   const yes = await api.showConfirm(`Delete "${n.name}"? This removes the .txt file and all attachments from the folder.`);
   if (!yes) return;
 
@@ -6512,6 +7970,10 @@ async function moveNoteToFolder(noteName, destFolderPath) {
   if (!folderPath || destFolderPath === folderPath) return;
   const baseName = noteTitleFromName(noteName);
   const noteIdx = notes.findIndex(n => n.name === noteName);
+  if (noteIdx >= 0 && noteAiJobs.has(noteAiKey(notes[noteIdx].path))) {
+    await api.showAlert('Wait for the running AI action on this note to finish before moving it.');
+    return;
+  }
   const isCurrentNote = (noteIdx >= 0 && noteIdx === currentIndex);
   try {
     await flushSaveIfNeeded();
@@ -6648,6 +8110,30 @@ els.calendarView.addEventListener('mousedown', (e) => {
   }
 });
 
+// Calendar day drawings
+els.calDrawToggleBtn.addEventListener('click', () => setCalDrawMode(!calDrawMode));
+els.calDrawOverlay.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return;
+  calStrokeCell = calCellAtPoint(e.clientX, e.clientY);
+  calStrokeYmd = calStrokeCell ? calStrokeCell.dataset.ymd : null;
+});
+els.calDrawOverlay.addEventListener('pointerup', () => { setTimeout(captureCalStroke, 20); });
+els.calDrawOverlay.addEventListener('pointercancel', () => { setTimeout(captureCalStroke, 20); });
+els.calDrawOverlay.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  deleteCalDrawingAt(e.clientX, e.clientY);
+});
+els.calGrid.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  deleteCalDrawingAt(e.clientX, e.clientY);
+});
+document.querySelectorAll('.calColorBtn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const idx = PEN_COLORS.findIndex(c => c.hex === btn.dataset.color);
+    if (idx >= 0) { canvasPenColorIdx = idx; applyPenSettings(); }
+  });
+});
+
 // Mini calendar (due date picker)
 els.dueDateBtn.addEventListener('click', () => {
   if (miniCalIsOpen) closeMiniCal();
@@ -6681,11 +8167,11 @@ els.canvasDrawBtn.addEventListener('click', () => setCanvasDrawingMode(true));
 function updatePenSizePreview() {
   const hex = PEN_COLORS[canvasPenColorIdx].hex;
   const px = Math.max(4, Math.min(24, canvasPenSize * 4));
-  for (const id of ['penSizeDot', 'drawPenSizeDot']) {
+  for (const id of ['penSizeDot', 'drawPenSizeDot', 'calPenSizeDot']) {
     const dot = document.getElementById(id);
     if (dot) { dot.style.width = px + 'px'; dot.style.height = px + 'px'; dot.style.background = hex; }
   }
-  for (const id of ['currentColorSwatch', 'drawCurrentColorSwatch']) {
+  for (const id of ['currentColorSwatch', 'drawCurrentColorSwatch', 'calCurrentColorSwatch']) {
     const el = document.getElementById(id);
     if (el) el.style.background = hex;
   }
@@ -6693,7 +8179,7 @@ function updatePenSizePreview() {
 
 function applyPenSettings() {
   const rgb = PEN_COLORS[canvasPenColorIdx].rgb;
-  for (const sm of [canvasSignatureMark, signatureMark]) {
+  for (const sm of [canvasSignatureMark, signatureMark, calSignatureMark]) {
     if (sm && sm.context) {
       sm.context.lineWidth = canvasPenSize;
       sm.color = rgb;
@@ -6701,25 +8187,32 @@ function applyPenSettings() {
     }
   }
   updatePenSizePreview();
-  document.querySelectorAll('.colorBtn, .drawColorBtn').forEach(b => {
+  document.querySelectorAll('.colorBtn, .drawColorBtn, .calColorBtn').forEach(b => {
     b.classList.toggle('active', b.dataset.color === PEN_COLORS[canvasPenColorIdx].hex);
   });
   api.savePreferences({ penSize: canvasPenSize, penColorIdx: canvasPenColorIdx });
 }
 
-document.getElementById('penSizeUp').addEventListener('click', () => {
+// Shared pen-size stepping for all three toolbars (note canvas, draw modal, calendar)
+function stepPenSize(dir) {
   const i = PEN_SIZES.indexOf(canvasPenSize);
-  if (i < PEN_SIZES.length - 1) canvasPenSize = PEN_SIZES[i + 1];
-  else if (i === -1) canvasPenSize = PEN_SIZES.find(s => s > canvasPenSize) || PEN_SIZES[PEN_SIZES.length - 1];
+  if (dir > 0) {
+    if (i < PEN_SIZES.length - 1 && i !== -1) canvasPenSize = PEN_SIZES[i + 1];
+    else if (i === -1) canvasPenSize = PEN_SIZES.find(s => s > canvasPenSize) || PEN_SIZES[PEN_SIZES.length - 1];
+  } else {
+    if (i > 0) canvasPenSize = PEN_SIZES[i - 1];
+    else if (i === -1) canvasPenSize = [...PEN_SIZES].reverse().find(s => s < canvasPenSize) || PEN_SIZES[0];
+  }
   applyPenSettings();
-});
-
-document.getElementById('penSizeDown').addEventListener('click', () => {
-  const i = PEN_SIZES.indexOf(canvasPenSize);
-  if (i > 0) canvasPenSize = PEN_SIZES[i - 1];
-  else if (i === -1) canvasPenSize = [...PEN_SIZES].reverse().find(s => s < canvasPenSize) || PEN_SIZES[0];
-  applyPenSettings();
-});
+}
+for (const id of ['penSizeUp', 'drawPenSizeUp', 'calPenSizeUp']) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('click', () => stepPenSize(+1));
+}
+for (const id of ['penSizeDown', 'drawPenSizeDown', 'calPenSizeDown']) {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('click', () => stepPenSize(-1));
+}
 
 document.querySelectorAll('.colorBtn').forEach((btn, idx) => {
   btn.addEventListener('click', () => {
@@ -6729,19 +8222,6 @@ document.querySelectorAll('.colorBtn').forEach((btn, idx) => {
 });
 
 // Draw modal pen size and color controls
-document.getElementById('drawPenSizeUp').addEventListener('click', () => {
-  const i = PEN_SIZES.indexOf(canvasPenSize);
-  if (i < PEN_SIZES.length - 1) canvasPenSize = PEN_SIZES[i + 1];
-  else if (i === -1) canvasPenSize = PEN_SIZES.find(s => s > canvasPenSize) || PEN_SIZES[PEN_SIZES.length - 1];
-  applyPenSettings();
-});
-
-document.getElementById('drawPenSizeDown').addEventListener('click', () => {
-  const i = PEN_SIZES.indexOf(canvasPenSize);
-  if (i > 0) canvasPenSize = PEN_SIZES[i - 1];
-  else if (i === -1) canvasPenSize = [...PEN_SIZES].reverse().find(s => s < canvasPenSize) || PEN_SIZES[0];
-  applyPenSettings();
-});
 
 document.querySelectorAll('.drawColorBtn').forEach((btn, idx) => {
   btn.addEventListener('click', () => {
@@ -6755,7 +8235,7 @@ applyPenSettings();
 els.canvasAddImageBtn.addEventListener('click', addImageFromDialog);
 els.canvasDeleteObjBtn.addEventListener('click', deleteSelectedObjects);
 els.canvasClearBtn.addEventListener('click', async () => {
-  const yes = await api.showConfirm('Clear entire canvas? This cannot be undone.');
+  const yes = await api.showConfirm('Clear entire canvas? This cannot be undone.', { title: 'Clear Canvas', okLabel: 'Clear' });
   if (yes) {
     clearCanvas();
     await saveCanvasState();
@@ -6776,16 +8256,36 @@ els.exportEpubBtn.addEventListener('click', exportToEpub);
 els.exportHtmlBtn.addEventListener('click', exportToHtml);
 els.publishGithubBtn.addEventListener('click', publishToGithub);
 
+// Import from IC
+els.importIcBtn.addEventListener('click', () => importFromIc());
+els.icImportCloseBtn.addEventListener('click', closeIcImportModal);
+els.icImportDoneBtn.addEventListener('click', closeIcImportModal);
+els.icReimportBtn.addEventListener('click', () => reimportSelectedIc());
+els.icStopBtn.addEventListener('click', () => stopIcImport());
+els.icImportDeletedList.addEventListener('change', updateIcReimportBtn);
+els.icImportModal.addEventListener('mousedown', (e) => { if (e.target === els.icImportModal) closeIcImportModal(); });
+api.onIcImportProgress(handleIcImportProgress);
+
+// Per-note AI actions
+els.transcribeBtn.addEventListener('click', () => transcribeCurrentNoteAudio());
+els.formatBtn.addEventListener('click', () => formatCurrentNoteText());
+els.uberectorBtn.addEventListener('click', () => sendCurrentNoteToUberector());
+api.onNoteAiProgress(handleNoteAiProgress);
+
 els.themeLightBtn.addEventListener('click', () => applyTheme('light'));
 els.themeDarkBtn.addEventListener('click', () => applyTheme('dark'));
 els.focusStrengthSlider.addEventListener('input', (e) => applyFocusStrength(parseInt(e.target.value, 10)));
 els.autoFixOffBtn.addEventListener('click', () => setAutoFixMode('off'));
 els.autoFixAutoBtn.addEventListener('click', () => setAutoFixMode('auto'));
 els.autoFixManualBtn.addEventListener('click', () => setAutoFixMode('manual'));
-els.providerOpenAIBtn.addEventListener('click', () => setAutoFixProvider('openai'));
+els.providerDeepSeekBtn.addEventListener('click', () => setAutoFixProvider('deepseek'));
 els.providerLocalBtn.addEventListener('click', () => setAutoFixProvider('local'));
-els.openAIKeyInput.addEventListener('change', (e) => saveOpenAIKey(e.target.value));
-els.openAIKeyInput.addEventListener('blur', (e) => saveOpenAIKey(e.target.value));
+els.deepseekKeyInput.addEventListener('change', (e) => saveDeepseekKey(e.target.value));
+els.deepseekKeyInput.addEventListener('blur', (e) => saveDeepseekKey(e.target.value));
+els.browseWhisperCliBtn.addEventListener('click', () => browseForWhisperCli());
+els.browseWhisperModelBtn.addEventListener('click', () => browseForWhisperModel());
+els.browseIcNotesFolderBtn.addEventListener('click', () => browseForIcNotesFolder());
+els.browseUberectorFolderBtn.addEventListener('click', () => browseForUberectorFolder());
 
 // GitHub settings handlers
 els.githubTokenInput.addEventListener('change', (e) => saveGithubToken(e.target.value));
@@ -7018,16 +8518,20 @@ els.thumb.addEventListener('click', openLightbox);
 els.lightbox.addEventListener('click', closeLightbox);
 window.addEventListener('resize', () => {
   if (drawIsOpen) resizeDrawCanvas(true);
+  if (calendarIsOpen && calDrawMode) resizeCalDrawOverlay();
 });
 
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (vaultPwPending) { if (!vaultHwBusy) closeVaultPw(null); return; }
     if (miniCalIsOpen) { closeMiniCal(); return; }
+    if (icImportIsOpen) { closeIcImportModal(); return; }
     if (exportIsOpen && !isExporting) { closeExportModal(); return; }
     if (prefsIsOpen) { closePrefsModal(); return; }
     if (audioIsOpen) { closeAudioModal(); return; }
     if (drawIsOpen) { closeDrawModal(); return; }
     if (els.lightbox.style.display === 'flex') { closeLightbox(); return; }
+    if (calendarIsOpen && calDrawMode) { setCalDrawMode(false); return; }
     if (calendarIsOpen) { closeCalendar(); return; }
     // Same as the toolbar back button: return to the parent notes folder
     if (rootFolderPath && folderPath && folderPath !== rootFolderPath) {
@@ -7229,7 +8733,8 @@ document.addEventListener('visibilitychange', () => {
 (async function init() {
   // Load preferences first (theme, focus strength)
   await loadPreferences();
-  
+  await syncNoteAiJobs(); // jobs still running in main after a renderer reload
+
   els.status.textContent = 'No folder open';
   setEnabled(false);
   setEditorEnabled(false);

@@ -32,7 +32,7 @@ A minimalistic note taking application for creative humans that use computers ma
   - **Manual mode** - Select text and click fix to correct only the highlighted portion
   - **Auto mode** - Automatically corrects newly typed text (tracks dirty regions for efficiency)
 - **Multiple providers:**
-  - **OpenAI** - Uses GPT-4o-mini for fast, accurate corrections
+  - **DeepSeek** - Uses `deepseek-flash` for fast, accurate corrections
   - **Local LLM** - Use your own GGUF model files for offline correction
   - ** A small, fast well balanced Local LLM to use is gemma-2-2b-it-Q4_K_M.gguf
 - **Preserves formatting** - Respects line breaks, paragraphs, and document structure
@@ -40,6 +40,20 @@ A minimalistic note taking application for creative humans that use computers ma
 ### Random stuff
 - drag/drop notes from the note list into the active note- then double click the [[note name]] to go to that note
 - drag/drop files from the Operating system into the active note- then double click the path text to go to that file
+
+### Import from IC (Sony voice recorder)
+- **One-button import** - Plug in a Sony IC recorder and press the 🎙️ button
+- **Auto-detects the recorder** - Finds `IC RECORDER/REC_FILE/FOLDER*` on Windows, Mac and Linux (or pick the folder manually)
+- **Only new recordings** - A ledger in `.noatformat/ic-imports.json` remembers what was already imported. The ledger is checked against the notes folder on every import: a recording whose earlier import failed (empty, fallback-named note now gone) is retried automatically, while recordings whose finished note you deleted are listed in the import window with checkboxes so you can re-import them on purpose
+- **Local transcription** - Recordings are converted with the bundled FFmpeg and transcribed with your local whisper.cpp install
+- **DeepSeek clean-up** - The raw transcript is formatted into readable paragraphs with bold subsection titles, and a title is chosen from the content
+- **Notes with audio** - Each note is saved as `<Title> - <YYYY-MM-DD>.txt` in your transcribed notes folder with the original mp3 attached
+- **Transcribe Audio (🗣️)** - For any note with an attached recording: transcribes it with Whisper and formats it with DeepSeek, replacing the note text (one undo step)
+- **Format Text (🪄)** - Cleans up the open note with DeepSeek: readable paragraphs, fixed grammar and punctuation, bold subsection headings
+- **Send to Uberector (👁️)** - Drops the open note's text into Uberector's inbox folder as a .txt file (default `Documents/Uberector Inbox`, set in Preferences)
+- **Readability rules enforced** - Every edited note is checked: paragraphs are kept under 120 words and a bold heading appears at least every ~300 words. If DeepSeek under-formats, the text is sent back for a restructure pass, and any paragraph still too long is split at sentence boundaries
+- **Import runs in the background too** - Hide the Import from IC window at any time (Close, ✕, ESC); the 🎙️ button keeps pulsing and re-opens the live view. A Stop button aborts the current recording (nothing is written for it, it is picked up next time). Imported notes appear in the list as they land, and the status line shows DeepSeek's sub-steps with elapsed time
+- **Runs in the background** - Press either button on as many notes as you like and keep working; each note shows a ⏳ badge in the list while its job runs. Whisper runs one recording at a time, DeepSeek edits overlap. Results land in the editor if the note is open (asking first if you edited it meanwhile) or are written straight to the note file if it is not
 
 ## Keyboard Shortcuts
 
@@ -122,9 +136,12 @@ Access preferences via `Cmd/Ctrl + ,` or the app menu:
 - **Theme** - Light or Dark mode
 - **Focus Mode Strength** - Adjust how much the UI dims in focus mode
 - **Text Correction** - Off, Auto, or Manual mode
-- **Auto-Fix Provider** - OpenAI or Local LLM
-- **OpenAI API Key** - For cloud-based text correction
+- **Auto-Fix Provider** - DeepSeek or Local LLM
+- **DeepSeek API Key** - For cloud text correction and Import from IC (get one at platform.deepseek.com)
 - **Local Model Path** - Path to your GGUF model file
+- **Whisper CLI** - Path to `whisper-cli` / `whisper-cli.exe` from whisper.cpp (`brew install whisper-cpp` on Mac)
+- **Whisper Model** - Path to a ggml model file such as `ggml-large-v3-turbo.bin`
+- **Transcribed & Edited Notes Folder** - Where Import from IC saves its notes
 - **GitHub Token** - For publishing to GitHub Pages
 - **GitHub Repository** - Target repo for publishing (format: `username/repo`)
 - **Publishing Name** - Your name for published notes
@@ -142,7 +159,8 @@ The app stores its configuration in:
 - **Fabric.js** - Canvas drawing and manipulation
 - **FFmpeg** - Audio transcoding (bundled)
 - **node-llama-cpp** - Local LLM inference (optional)
-- **OpenAI API** - Cloud text correction (optional)
+- **DeepSeek API** - Cloud text correction and transcript editing (optional)
+- **whisper.cpp** - Local speech-to-text for Import from IC (user-installed, optional)
 
 ## License
 
