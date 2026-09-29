@@ -42,6 +42,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPreferences: () => ipcRenderer.invoke('get-preferences'),
   savePreferences: (prefs) => ipcRenderer.invoke('save-preferences', prefs),
   onOpenPreferences: (callback) => ipcRenderer.on('open-preferences', callback),
+
+  // Notes encryption
+  vaultStatus: (folder, opts) => ipcRenderer.invoke('vault-status', folder, opts || {}),
+  vaultEnable: (folder, password, remember) => ipcRenderer.invoke('vault-enable', folder, password, remember),
+  vaultUnlock: (folder, password, remember) => ipcRenderer.invoke('vault-unlock', folder, password, remember),
+  vaultChangePassword: (folder, oldPassword, newPassword) => ipcRenderer.invoke('vault-change-password', folder, oldPassword, newPassword),
+  vaultForgetKey: (folder) => ipcRenderer.invoke('vault-forget-key', folder),
+  vaultDisable: (folder, password) => ipcRenderer.invoke('vault-disable', folder, password),
+  onVaultProgress: (callback) => ipcRenderer.on('vault-progress', (_event, payload) => callback(payload)),
+  vaultHwUnlock: (folder, slotId, remember) => ipcRenderer.invoke('vault-hw-unlock', folder, slotId, remember),
+  vaultSlotAdd: (folder, type, password, opts) => ipcRenderer.invoke('vault-slot-add', folder, type, password, opts || {}),
+  vaultSlotRemove: (folder, slotId) => ipcRenderer.invoke('vault-slot-remove', folder, slotId),
+  vaultTouchIdSet: (folder, on) => ipcRenderer.invoke('vault-touchid-set', folder, on),
+  onVaultHwEvent: (callback) => ipcRenderer.on('vault-hw-event', (_event, payload) => callback(payload)),
+  onVaultHwPrompt: (callback) => ipcRenderer.on('vault-hw-prompt', (_event, payload) => callback(payload)),
+  vaultHwPromptReply: (id, value) => ipcRenderer.send('vault-hw-prompt-reply', id, value),
   
   // Local LLM / DeepSeek
   openModelDialog: () => ipcRenderer.invoke('open-model-dialog'),
@@ -65,7 +81,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Dialog operations
   showPrompt: (message, defaultValue) => ipcRenderer.invoke('show-prompt', message, defaultValue),
-  showConfirm: (message) => ipcRenderer.invoke('show-confirm', message),
+  showConfirm: (message, opts) => ipcRenderer.invoke('show-confirm', message, opts || {}),
   showAlert: (message) => ipcRenderer.invoke('show-alert', message),
   showSaveDialog: (options) => ipcRenderer.invoke('show-save-dialog', options),
   

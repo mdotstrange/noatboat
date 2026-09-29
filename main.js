@@ -3,7 +3,7 @@
 // Must be set before the threadpool is first used.
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';
 
-const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, shell, net } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, shell, net, protocol, safeStorage, systemPreferences } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os'); // Added for temp file handling
@@ -11,8 +11,17 @@ const os = require('os'); // Added for temp file handling
 const { spawn } = require('child_process');
 const { pathToFileURL } = require('url');
 const crypto = require('crypto');
+const vault = require('./vault');
+const yubikey = require('./hwkeys/yubikey');
+const trezor = require('./hwkeys/trezor');
 
 const fsp = fs.promises;
+
+// Encrypted audio can't be played from file://; it is served decrypted from
+// memory over noatvault:// instead (see registerVaultProtocol).
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'noatvault', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } }
+]);
 
 // Timeouts for file operations against the notes folder. Cloud-synced files
 // (Dropbox online-only placeholders) can stall indefinitely on read when offline.
@@ -140,6 +149,12 @@ function getAudioCacheDir() {
   return dir;
 }
 
+// Transcodes are plaintext; once a folder is encrypted, copies made before
+// that must go (the cache is regenerated on demand).
+function clearAudioCache() {
+  try { fs.rmSync(path.join(app.getPath('userData'), 'audio-cache'), { recursive: true, force: true }); } catch (_e) {}
+}
+
 function getFileSignature(p) {
   try {
     const st = fs.statSync(p);
@@ -176,19 +191,29 @@ function runFfmpeg(args) {
   });
 }
 
+// Transcodes of encrypted audio are plaintext, so they go in the session temp
+// dir (wiped on quit) instead of the persistent audio-cache.
+function getTranscodeOutPath(inputPath, outExt) {
+  const cached = getCachedAudioPath(inputPath, outExt);
+  if (!vault.fileIsEncryptedSync(inputPath)) return cached;
+  return path.join(vault.getSessionTmpDir(), path.basename(cached));
+}
+
 async function transcodeToWavCached(inputPath) {
-  const outPath = getCachedAudioPath(inputPath, 'wav');
+  const outPath = getTranscodeOutPath(inputPath, 'wav');
   if (fs.existsSync(outPath)) return outPath;
 
   // -vn to ignore video streams, force stereo and 44.1kHz for predictable playback
-  await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', inputPath, '-vn', '-ac', '2', '-ar', '44100', '-f', 'wav', outPath]);
+  await vault.withPlainTemp(inputPath, (src) =>
+    runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', src, '-vn', '-ac', '2', '-ar', '44100', '-f', 'wav', outPath]));
   return outPath;
 }
 
 async function transcodeToMp3DataUrl(inputPath, bitrateKbps = 128) {
-  const outPath = getCachedAudioPath(inputPath, 'mp3');
+  const outPath = getTranscodeOutPath(inputPath, 'mp3');
   if (!fs.existsSync(outPath)) {
-    await runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', inputPath, '-vn', '-ac', '2', '-ar', '44100', '-b:a', `${bitrateKbps}k`, '-f', 'mp3', outPath]);
+    await vault.withPlainTemp(inputPath, (src) =>
+      runFfmpeg(['-y', '-hide_banner', '-loglevel', 'error', '-i', src, '-vn', '-ac', '2', '-ar', '44100', '-b:a', `${bitrateKbps}k`, '-f', 'mp3', outPath]));
   }
   const buf = fs.readFileSync(outPath);
   const b64 = buf.toString('base64');
@@ -429,6 +454,8 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  vault.cleanupSessionTmpDirs();
+  registerVaultProtocol();
   createWindow();
 
   app.on('activate', () => {
@@ -442,6 +469,11 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
   }
+});
+
+app.on('will-quit', () => {
+  vault.removeSessionTmpDir();
+  trezor.dispose();
 });
 
 app.on('before-quit', async () => {
@@ -525,6 +557,424 @@ ipcMain.handle('save-preferences', async (event, prefs) => {
   saveConfig(config);
   return true;
 });
+
+// ============ Notes encryption (vault) ============
+// The password never touches disk. When "remember" is on, the vault's data key
+// is kept in config.vaultKeys[root], sealed with safeStorage (DPAPI/Keychain).
+
+function vaultConfigKey(root) {
+  return (process.platform === 'win32' || process.platform === 'darwin') ? path.resolve(root).toLowerCase() : path.resolve(root);
+}
+
+function rememberVaultKey(root, dataKey) {
+  if (!safeStorage.isEncryptionAvailable()) return false;
+  const config = loadConfig();
+  config.vaultKeys = config.vaultKeys || {};
+  config.vaultKeys[vaultConfigKey(root)] = safeStorage.encryptString(dataKey.toString('base64')).toString('base64');
+  saveConfig(config);
+  return true;
+}
+
+function forgetVaultKey(root) {
+  const config = loadConfig();
+  if (config.vaultKeys) {
+    delete config.vaultKeys[vaultConfigKey(root)];
+    saveConfig(config);
+  }
+}
+
+function forgetVaultTouchId(root) {
+  const config = loadConfig();
+  if (config.vaultTouchId && config.vaultTouchId[vaultConfigKey(root)]) {
+    delete config.vaultTouchId[vaultConfigKey(root)];
+    saveConfig(config);
+  }
+}
+
+// Long-running writers that must not overlap an encrypt/decrypt pass: a file
+// they write after the pass has visited its folder would be left in the wrong
+// state (and, after "turn off", without a key). Returns a message or null.
+function vaultJobsRunning() {
+  if (icImportRunning) return 'Wait for the IC import to finish first';
+  if (noteAiJobs.size) return 'Wait for the running AI actions on notes to finish first';
+  return null;
+}
+
+// Trezor Host Protocol pairing (newer firmware): the device pairs this
+// computer once via a code; the host key and credential live in
+// config.trezorThp, the key sealed with safeStorage where available.
+function trezorStoreGet() {
+  const c = loadConfig().trezorThp || {};
+  let staticKey = null;
+  try {
+    if (c.staticKeySealed && safeStorage.isEncryptionAvailable()) staticKey = safeStorage.decryptString(Buffer.from(c.staticKeySealed, 'base64'));
+    else if (c.staticKey) staticKey = c.staticKey;
+  } catch (e) {
+    console.warn('Stored Trezor pairing key unusable:', e.message);
+  }
+  return { staticKey, knownCredentials: Array.isArray(c.knownCredentials) ? c.knownCredentials : [] };
+}
+
+function trezorStoreSet({ staticKey, knownCredentials }) {
+  const config = loadConfig();
+  const entry = { knownCredentials: (knownCredentials || []).slice(-8) };
+  if (staticKey) {
+    if (safeStorage.isEncryptionAvailable()) entry.staticKeySealed = safeStorage.encryptString(staticKey).toString('base64');
+    else entry.staticKey = staticKey;
+  }
+  config.trezorThp = entry;
+  saveConfig(config);
+}
+trezor.setCredentialStore({ get: trezorStoreGet, set: trezorStoreSet });
+
+function touchIdSupported() {
+  try { return process.platform === 'darwin' && systemPreferences.canPromptTouchID(); } catch (_e) { return false; }
+}
+
+// Touch ID gate (macOS): the remembered key is only used after a fingerprint.
+function touchIdRequired(root) {
+  return touchIdSupported() && !!(loadConfig().vaultTouchId || {})[vaultConfigKey(root)];
+}
+
+// Unlock the vault covering folder from a remembered key, if there is one.
+// Only when asked (folder open, "Use Touch ID"), so a status refresh never
+// pops up a Touch ID prompt.
+async function tryAutoUnlock(folder, auto) {
+  vault.invalidate();
+  const st = vault.status(folder);
+  if (st.state !== 'locked' || !auto) return st;
+  const sealed = (loadConfig().vaultKeys || {})[vaultConfigKey(st.root)];
+  if (sealed && safeStorage.isEncryptionAvailable()) {
+    if (touchIdRequired(st.root)) {
+      try {
+        await systemPreferences.promptTouchID('unlock your Noat Boat notes');
+      } catch (_e) {
+        return vault.status(folder); // cancelled or failed: stay locked
+      }
+    }
+    try {
+      const dataKey = Buffer.from(safeStorage.decryptString(Buffer.from(sealed, 'base64')), 'base64');
+      // false: the folder was re-keyed, so the remembered key is useless.
+      // null: vault.json is unreadable right now (mid-sync); keep the key.
+      if (vault.unlockWithKey(st.root, dataKey) === false) forgetVaultKey(st.root);
+    } catch (e) {
+      console.warn('Remembered notes key unusable:', e.message);
+    }
+  }
+  return vault.status(folder);
+}
+
+async function vaultStatusPublic(folder, auto) {
+  const st = folder ? await tryAutoUnlock(folder, auto) : { state: 'off' };
+  const remembered = !!(st.root && (loadConfig().vaultKeys || {})[vaultConfigKey(st.root)]);
+  return {
+    state: st.state,
+    root: st.root || null,
+    remembered,
+    canRemember: safeStorage.isEncryptionAvailable(),
+    slots: st.root ? vault.listSlots(st.root) : [],
+    touchId: { supported: touchIdSupported(), required: !!(st.root && touchIdRequired(st.root)) }
+  };
+}
+
+function vaultMigrate(event, root, mode) {
+  return vault.migrateFolder(root, mode, {
+    shouldSkip: (stats) => isDatalessPlaceholder(stats) && isNetworkOffline(),
+    onProgress: (p) => { try { event.sender.send('vault-progress', { mode, done: p.done, total: p.total }); } catch (_e) {} }
+  });
+}
+
+function migrateSummary(r) {
+  return { changed: r.changed, total: r.total, skipped: r.skipped.length, failed: r.failed };
+}
+
+// opts.autoUnlock: try the remembered key (behind Touch ID when that is on).
+ipcMain.handle('vault-status', async (event, folder, opts) => {
+  return vaultStatusPublic(folder, !!(opts && opts.autoUnlock));
+});
+
+// Turn encryption on for folder: create vault.json, then encrypt everything.
+// Re-running it on an unlocked vault just finishes any skipped files.
+ipcMain.handle('vault-enable', async (event, folder, password, remember) => {
+  try {
+    const busy = vaultJobsRunning();
+    if (busy) return { success: false, error: busy };
+    vault.invalidate();
+    let st = vault.status(folder);
+    if (st.state === 'locked') return { success: false, error: 'The folder is already encrypted and locked' };
+    if (st.state === 'off') {
+      const dataKey = await vault.createVault(folder, password);
+      if (remember) rememberVaultKey(folder, dataKey);
+      st = vault.status(folder);
+      clearAudioCache();
+    }
+    const r = await vaultMigrate(event, st.root, 'encrypt');
+    return { success: true, ...migrateSummary(r) };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+ipcMain.handle('vault-unlock', async (event, folder, password, remember) => {
+  try {
+    vault.invalidate();
+    const { root, dataKey } = await vault.unlockWithPassword(folder, password);
+    if (remember) rememberVaultKey(root, dataKey); else forgetVaultKey(root);
+    return { success: true, ...(await vaultStatusPublic(folder)) };
+  } catch (e) {
+    return { success: false, wrongPassword: e.code === 'VAULT_WRONG_PASSWORD', error: e.message };
+  }
+});
+
+ipcMain.handle('vault-change-password', async (event, folder, oldPassword, newPassword) => {
+  try {
+    await vault.changePassword(folder, oldPassword, newPassword);
+    return { success: true };
+  } catch (e) {
+    return { success: false, wrongPassword: e.code === 'VAULT_WRONG_PASSWORD', error: e.message };
+  }
+});
+
+// Forget the remembered key and lock now; the next open asks for the password.
+ipcMain.handle('vault-forget-key', async (event, folder) => {
+  const st = vault.status(folder);
+  if (st.root) {
+    forgetVaultKey(st.root);
+    vault.lock(st.root);
+    dropVaultAudio();
+  }
+  return { success: true, ...(await vaultStatusPublic(folder)) };
+});
+
+// Decrypt every file and remove vault.json. The password is re-checked first.
+ipcMain.handle('vault-disable', async (event, folder, password) => {
+  try {
+    const busy = vaultJobsRunning();
+    if (busy) return { success: false, error: busy };
+    const { root } = await vault.unlockWithPassword(folder, password);
+    const r = await vaultMigrate(event, root, 'decrypt');
+    if (r.skipped.length || r.failed.length) {
+      return { success: false, ...migrateSummary(r), error: 'Some files could not be decrypted; encryption is still on. Try again once they are synced.' };
+    }
+    // Nothing may still be encrypted when vault.json goes: a file written
+    // during the pass would otherwise be lost for good.
+    const left = vault.listEncryptedFiles(root);
+    if (left.length) {
+      return { success: false, ...migrateSummary(r), error: `${left.length} file(s) were written while decrypting; encryption is still on. Run it again.` };
+    }
+    forgetVaultKey(root);
+    forgetVaultTouchId(root);
+    dropVaultAudio();
+    vault.removeVault(root);
+    return { success: true, ...migrateSummary(r) };
+  } catch (e) {
+    return { success: false, wrongPassword: e.code === 'VAULT_WRONG_PASSWORD', error: e.message };
+  }
+});
+
+// --- Hardware unlock methods (key slots) ---
+// Each slot stores a salt; the device turns it into the same secret every time
+// (YubiKey HMAC-SHA1 slot 2, Trezor cipherKeyValue). Prompts for the user
+// ("Touch your YubiKey") go to the renderer on 'vault-hw-event'.
+
+function hwNotify(event, type) {
+  return (message) => { try { event.sender.send('vault-hw-event', { type, message }); } catch (_e) {} };
+}
+
+// A device needs something typed (the Trezor pairing code): ask the renderer
+// on 'vault-hw-prompt' and wait for 'vault-hw-prompt-reply'. Resolves null
+// when the user cancels or nothing comes back.
+const hwPromptReplies = new Map(); // id -> resolve
+const HW_PROMPT_TIMEOUT_MS = 5 * 60 * 1000;
+ipcMain.on('vault-hw-prompt-reply', (event, id, value) => {
+  const resolve = hwPromptReplies.get(id);
+  if (!resolve) return;
+  hwPromptReplies.delete(id);
+  resolve(value == null ? null : String(value));
+});
+
+function hwPrompt(event, type) {
+  return (req) => new Promise((resolve) => {
+    const id = crypto.randomBytes(8).toString('hex');
+    hwPromptReplies.set(id, resolve);
+    try {
+      event.sender.send('vault-hw-prompt', { id, type, kind: req.kind, message: req.message, length: req.length || null });
+    } catch (_e) {
+      hwPromptReplies.delete(id);
+      resolve(null);
+      return;
+    }
+    setTimeout(() => { if (hwPromptReplies.delete(id)) resolve(null); }, HW_PROMPT_TIMEOUT_MS);
+  });
+}
+
+async function hwSecret(event, type, salt) {
+  const notify = hwNotify(event, type);
+  if (type === 'yubikey') {
+    notify('Looking for your YubiKey...');
+    return yubikey.challengeResponse(salt, { onTouch: () => notify('Touch your YubiKey') });
+  }
+  if (type === 'trezor') return { secret: await trezor.cipher(salt, notify, hwPrompt(event, type)) };
+  throw new Error(`Unknown key type: ${type}`);
+}
+
+function hwError(e) {
+  return { success: false, code: e.code || null, wrongPassword: e.code === 'VAULT_WRONG_PASSWORD', error: String((e && e.message) || e) };
+}
+
+ipcMain.handle('vault-hw-unlock', async (event, folder, slotId, remember) => {
+  try {
+    vault.invalidate();
+    const slot = vault.getSlot(folder, slotId);
+    if (!slot) return { success: false, error: 'That unlock method was removed' };
+    const { secret } = await hwSecret(event, slot.type, slot.salt);
+    const { root, dataKey } = vault.unlockWithSlot(folder, slotId, secret);
+    if (remember) rememberVaultKey(root, dataKey); else forgetVaultKey(root);
+    return { success: true, ...(await vaultStatusPublic(folder)) };
+  } catch (e) {
+    return hwError(e);
+  }
+});
+
+// Enroll a YubiKey or Trezor. The password is re-checked so an unlocked, unattended
+// session can't be used to add someone else's key.
+// opts.setupSlot2: program an empty Slot 2 of the YubiKey for challenge-
+// response first (the renderer asks the user before passing this).
+ipcMain.handle('vault-slot-add', async (event, folder, type, password, opts = {}) => {
+  try {
+    if (type !== 'yubikey' && type !== 'trezor') throw new Error(`Unknown key type: ${type}`);
+    const { root } = await vault.unlockWithPassword(folder, password);
+    const salt = vault.newSlotSalt(type);
+    let label;
+    let meta = {};
+    let secret;
+    if (type === 'yubikey') {
+      if (opts && opts.setupSlot2) {
+        hwNotify(event, type)('Setting up Slot 2 of your YubiKey...');
+        await yubikey.setupSlot2();
+      }
+      const r = await hwSecret(event, type, salt);
+      secret = r.secret;
+      label = r.serial ? `${r.product} #${r.serial}` : r.product;
+      meta = { serial: r.serial || null, deviceId: r.serial ? `yubikey-${r.serial}` : null };
+    } else {
+      // Check for a duplicate before asking the user to confirm on the device.
+      const d = await trezor.describe(hwNotify(event, type), hwPrompt(event, type));
+      vault.assertNotEnrolled(root, type, d.deviceId);
+      label = d.label;
+      secret = (await hwSecret(event, type, salt)).secret;
+      meta = { path: trezor.PATH, deviceId: d.deviceId };
+    }
+    const slot = vault.addSlot(root, { type, label, salt, meta }, secret);
+    return { success: true, slot, slots: vault.listSlots(root) };
+  } catch (e) {
+    return hwError(e);
+  }
+});
+
+ipcMain.handle('vault-slot-remove', async (event, folder, slotId) => {
+  try {
+    vault.removeSlot(folder, slotId);
+    return { success: true, slots: vault.listSlots(folder) };
+  } catch (e) {
+    return hwError(e);
+  }
+});
+
+// macOS: require Touch ID before the remembered key is used. Turning it on
+// asks for a fingerprint once so the user knows it works.
+ipcMain.handle('vault-touchid-set', async (event, folder, on) => {
+  try {
+    const st = vault.status(folder);
+    if (!st.root) throw new Error('This folder is not encrypted');
+    if (on) {
+      if (!touchIdSupported()) throw new Error('Touch ID is not available on this Mac');
+      await systemPreferences.promptTouchID('require Touch ID to unlock your Noat Boat notes');
+    }
+    const config = loadConfig();
+    config.vaultTouchId = config.vaultTouchId || {};
+    if (on) config.vaultTouchId[vaultConfigKey(st.root)] = true;
+    else delete config.vaultTouchId[vaultConfigKey(st.root)];
+    saveConfig(config);
+    return { success: true, ...(await vaultStatusPublic(folder)) };
+  } catch (e) {
+    return hwError(e);
+  }
+});
+
+// noatvault://audio/<token> serves a decrypted audio file from memory with
+// Range support, so <audio> can seek. Tokens are minted per file by
+// get-audio-playback-url; the renderer never passes raw paths through URLs.
+const vaultAudioTokens = new Map(); // token -> file path
+const vaultAudioCache = { path: null, sig: null, buf: null }; // last decrypted file
+
+// Forget served audio: the tokens and the decrypted copy held in memory.
+function dropVaultAudio() {
+  if (vaultAudioCache.buf) { try { vaultAudioCache.buf.fill(0); } catch (_e) {} }
+  vaultAudioCache.path = null;
+  vaultAudioCache.sig = null;
+  vaultAudioCache.buf = null;
+  vaultAudioTokens.clear();
+}
+
+function audioMimeFor(filePath) {
+  const ext = path.extname(filePath).toLowerCase().slice(1);
+  return { wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', flac: 'audio/flac', aiff: 'audio/x-aiff', aif: 'audio/x-aiff', wma: 'audio/x-ms-wma' }[ext] || 'audio/mpeg';
+}
+
+function vaultAudioUrl(filePath) {
+  const token = crypto.randomBytes(16).toString('hex');
+  vaultAudioTokens.set(token, filePath);
+  return `noatvault://audio/${token}${path.extname(filePath).toLowerCase()}`;
+}
+
+function registerVaultProtocol() {
+  protocol.handle('noatvault', async (request) => {
+    try {
+      const url = new URL(request.url);
+      const token = url.pathname.replace(/^\//, '').replace(/\.[^.]*$/, '');
+      const filePath = vaultAudioTokens.get(token);
+      if (!filePath) return new Response('Not found', { status: 404 });
+      // Never serve the in-memory copy once the vault is locked.
+      if (vault.status(path.dirname(filePath)).state !== 'unlocked') {
+        dropVaultAudio();
+        return new Response('Notes are locked', { status: 403 });
+      }
+
+      const sig = getFileSignature(filePath);
+      if (vaultAudioCache.path !== filePath || vaultAudioCache.sig !== sig) {
+        vaultAudioCache.buf = await vault.readFile(filePath);
+        vaultAudioCache.path = filePath;
+        vaultAudioCache.sig = sig;
+      }
+      const buf = vaultAudioCache.buf;
+      const headers = { 'Content-Type': audioMimeFor(filePath), 'Accept-Ranges': 'bytes' };
+
+      const m = /^bytes=(\d*)-(\d*)$/.exec(request.headers.get('Range') || '');
+      if (!m || (m[1] === '' && m[2] === '')) {
+        return new Response(buf, { status: 200, headers: { ...headers, 'Content-Length': String(buf.length) } });
+      }
+      let start, end;
+      if (m[1] === '') { // suffix range: last N bytes
+        start = Math.max(0, buf.length - Number(m[2]));
+        end = buf.length - 1;
+      } else {
+        start = Number(m[1]);
+        end = m[2] === '' ? buf.length - 1 : Math.min(Number(m[2]), buf.length - 1);
+      }
+      if (start >= buf.length || start > end) {
+        return new Response(null, { status: 416, headers: { ...headers, 'Content-Range': `bytes */${buf.length}` } });
+      }
+      const chunk = buf.subarray(start, end + 1);
+      return new Response(chunk, {
+        status: 206,
+        headers: { ...headers, 'Content-Length': String(chunk.length), 'Content-Range': `bytes ${start}-${end}/${buf.length}` }
+      });
+    } catch (e) {
+      return new Response(String(e.message || e), { status: e.code === 'VAULT_LOCKED' ? 403 : 500 });
+    }
+  });
+}
 
 // Open folder picker dialog
 ipcMain.handle('open-folder-dialog', async () => {
@@ -641,7 +1091,7 @@ async function scanFolder(folderPath, opts = {}) {
           }
           // A dataless read triggers a download, so give it the longer timeout.
           const content = readContent
-            ? await withTimeout(fsp.readFile(fullPath, 'utf8'), dataless ? LAZY_READ_TIMEOUT_MS : FILE_OP_TIMEOUT_MS, entry.name)
+            ? await withTimeout(vault.readFile(fullPath, 'utf8'), dataless ? LAZY_READ_TIMEOUT_MS : FILE_OP_TIMEOUT_MS, entry.name)
             : '';
           return {
             kind: 'file',
@@ -701,10 +1151,13 @@ async function scanFolder(folderPath, opts = {}) {
           };
         }
         return null;
-      } catch (_e) {
-        // Per-file failure (timeout, permissions, stalled hydration):
-        // isolate it so the rest of the folder still loads.
+      } catch (e) {
+        // Per-file failure (timeout, permissions, stalled hydration, locked
+        // vault): isolate it so the rest of the folder still loads.
         if (entry.isFile() && entry.name.toLowerCase().endsWith('.txt')) {
+          const locked = !!(e && e.code === 'VAULT_LOCKED');
+          let st = null;
+          if (locked) { try { st = await fsp.stat(fullPath); } catch (_e2) {} }
           return {
             kind: 'file',
             item: {
@@ -712,10 +1165,11 @@ async function scanFolder(folderPath, opts = {}) {
               type: 'text',
               path: fullPath,
               content: '',
-              size: 0,
-              created: 0,
-              lastModified: 0,
-              unavailable: true
+              size: st ? st.size : 0,
+              created: st ? st.birthtimeMs : 0,
+              lastModified: st ? st.mtimeMs : 0,
+              unavailable: true,
+              locked: locked || undefined
             }
           };
         }
@@ -801,6 +1255,7 @@ async function scanFolder(folderPath, opts = {}) {
 
 ipcMain.handle('read-folder', async (event, folderPath) => {
   try {
+    vault.invalidate(); // pick up a vault.json that synced in from elsewhere
     const r = await scanFolder(folderPath);
     return { success: true, files: r.files, folders: r.folders, skippedCount: r.skippedCount };
   } catch (e) {
@@ -824,7 +1279,7 @@ ipcMain.handle('calendar-scan', async (event, rootPath) => {
         let dueDate = null;
         try {
           const raw = await withTimeout(
-            fsp.readFile(path.join(folder, NOATFORMAT_DIR, title + '.format.json'), 'utf8'),
+            vault.readFile(path.join(folder, NOATFORMAT_DIR, title + '.format.json'), 'utf8'),
             FILE_OP_TIMEOUT_MS, f.name);
           const parsed = JSON.parse(raw);
           if (parsed && typeof parsed.dueDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(parsed.dueDate)) {
@@ -875,21 +1330,21 @@ ipcMain.handle('read-file', async (event, filePath) => {
     if (isDatalessPlaceholder(stats) && isNetworkOffline()) {
       return { success: false, unavailable: true, error: 'File is online-only and not available offline' };
     }
-    const content = await withTimeout(fsp.readFile(filePath, 'utf8'), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
+    const content = await withTimeout(vault.readFile(filePath, 'utf8'), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
     return { success: true, content: content };
   } catch (e) {
-    return { success: false, error: e.message };
+    return { success: false, locked: e.code === 'VAULT_LOCKED' || undefined, error: e.message };
   }
 });
 
 // Write a text file
 ipcMain.handle('write-file', async (event, filePath, content) => {
   try {
-    fs.writeFileSync(filePath, content, 'utf8');
+    vault.writeFileSync(filePath, content, 'utf8');
     const stats = fs.statSync(filePath);
     return { success: true, lastModified: stats.mtimeMs, size: stats.size };
   } catch (e) {
-    return { success: false, error: e.message };
+    return { success: false, locked: e.code === 'VAULT_LOCKED' || undefined, error: e.message };
   }
 });
 
@@ -897,6 +1352,11 @@ ipcMain.handle('write-file', async (event, filePath, content) => {
 // Uberector only picks a file up after the rename.
 ipcMain.handle('uberector-send', async (event, dir, text) => {
   try {
+    // Uberector reads plain files, so its inbox cannot sit inside encrypted notes.
+    vault.invalidate();
+    if (vault.findVaultRoot(dir)) {
+      return { success: false, error: 'The Uberector inbox is inside an encrypted notes folder - choose a folder outside it in Preferences' };
+    }
     await fsp.mkdir(dir, { recursive: true });
     const file = path.join(dir, `${new Date().toISOString().replace(/[:.]/g, '-')}_${Math.random().toString(36).slice(2, 6)}.txt`);
     await fsp.writeFile(file + '.tmp', text, 'utf8');
@@ -986,12 +1446,32 @@ ipcMain.handle('move-note', async (event, srcFolder, baseName, destFolder) => {
       }
     }
 
+    // Across a vault boundary (or between two vaults) the bytes are re-encoded:
+    // a plain rename would leave ciphertext in a plain folder or plaintext
+    // inside a vault. Both sides must be unlocked before anything moves.
+    vault.invalidate();
+    const srcRoot = vault.findVaultRoot(srcFolder);
+    const destRoot = vault.findVaultRoot(destFolder);
+    const sameVault = srcRoot === destRoot ||
+      (!!srcRoot && !!destRoot && vaultConfigKey(srcRoot) === vaultConfigKey(destRoot));
+    if (!sameVault) {
+      for (const r of [srcRoot, destRoot]) {
+        if (r && vault.status(r).state !== 'unlocked') throw new vault.LockedError(r);
+      }
+    }
+
     if (moves.some(m => m.destPath.startsWith(destSidecarDir))) {
       fs.mkdirSync(destSidecarDir, { recursive: true });
     }
 
     const movedFiles = [];
     for (const m of moves) {
+      if (!sameVault) {
+        vault.writeFileSync(m.destPath, vault.readFileSync(m.srcPath));
+        fs.unlinkSync(m.srcPath);
+        movedFiles.push(m.label);
+        continue;
+      }
       try {
         fs.renameSync(m.srcPath, m.destPath);
       } catch (renameErr) {
@@ -1061,7 +1541,7 @@ ipcMain.handle('read-image-base64', async (event, filePath) => {
     if (isDatalessPlaceholder(stats) && isNetworkOffline()) {
       return { success: false, unavailable: true, error: 'File is online-only and not available offline' };
     }
-    const buffer = await withTimeout(fsp.readFile(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
+    const buffer = await withTimeout(vault.readFile(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
     const ext = path.extname(filePath).toLowerCase().slice(1);
     let mimeType = 'image/png';
     if (ext === 'jpg' || ext === 'jpeg') mimeType = 'image/jpeg';
@@ -1084,7 +1564,7 @@ ipcMain.handle('read-image-thumbnail', async (event, filePath, maxWidth = 512) =
     if (isDatalessPlaceholder(stats) && isNetworkOffline()) {
       return { success: false, unavailable: true, error: 'File is online-only and not available offline' };
     }
-    const buffer = await withTimeout(fsp.readFile(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
+    const buffer = await withTimeout(vault.readFile(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
     const img = nativeImage.createFromBuffer(buffer);
     if (!img.isEmpty()) {
       const size = img.getSize();
@@ -1115,7 +1595,7 @@ ipcMain.handle('write-image-buffer', async (event, filePath, base64Data) => {
     }
     const buffer = Buffer.from(base64, 'base64');
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, buffer);
+    vault.writeFileSync(filePath, buffer);
     const stats = fs.statSync(filePath);
     return { success: true, lastModified: stats.mtimeMs, size: stats.size };
   } catch (e) {
@@ -1126,7 +1606,7 @@ ipcMain.handle('write-image-buffer', async (event, filePath, base64Data) => {
 // Copy image from source to destination
 ipcMain.handle('copy-image', async (event, srcPath, destPath) => {
   try {
-    fs.copyFileSync(srcPath, destPath);
+    vault.copyFileSync(srcPath, destPath);
     const stats = fs.statSync(destPath);
     return { success: true, lastModified: stats.mtimeMs, size: stats.size };
   } catch (e) {
@@ -1644,12 +2124,13 @@ function icLedgerPath(icNotesFolder) {
 function loadIcLedger(ledgerPath) {
   try {
     if (fs.existsSync(ledgerPath)) {
-      const parsed = JSON.parse(fs.readFileSync(ledgerPath, 'utf8'));
+      const parsed = JSON.parse(vault.readFileSync(ledgerPath, 'utf8'));
       if (parsed && typeof parsed === 'object' && parsed.imports && typeof parsed.imports === 'object') {
         return { version: 1, imports: parsed.imports };
       }
     }
   } catch (e) {
+    if (e && e.code === 'VAULT_LOCKED') throw e; // never start a fresh ledger over a locked one
     console.warn('IC import ledger unreadable, starting fresh:', e.message);
   }
   return { version: 1, imports: {} };
@@ -1658,7 +2139,7 @@ function loadIcLedger(ledgerPath) {
 function saveIcLedger(ledgerPath, ledger) {
   fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
   const tmp = ledgerPath + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(ledger, null, 2), 'utf8');
+  vault.writeFileSync(tmp, JSON.stringify(ledger, null, 2), 'utf8');
   fs.renameSync(tmp, ledgerPath);
 }
 
@@ -2067,7 +2548,8 @@ async function transcribeAudioToText(audioPath, whisperCliPath, whisperModelPath
   return runWhisperQueued(() => {
     // A stopped run that was waiting its turn never spawns whisper.
     throwIfAborted(ctl && ctl.signal);
-    return transcribeAudioToTextNow(audioPath, whisperCliPath, whisperModelPath, onPhase, ctl);
+    return vault.withPlainTemp(audioPath, (plainPath) =>
+      transcribeAudioToTextNow(plainPath, whisperCliPath, whisperModelPath, onPhase, ctl));
   });
 }
 
@@ -2078,7 +2560,9 @@ async function transcribeAudioToTextNow(audioPath, whisperCliPath, whisperModelP
   throwIfAborted(signal);
   if (!ffmpegPath) throw new Error('ffmpeg is not available; cannot convert audio');
   if (!isFileSync(audioPath)) throw new Error(`Audio file not found: ${audioPath}`);
-  const cacheDir = getIcImportCacheDir();
+  // A plaintext copy of an encrypted recording lives in the session temp dir;
+  // keep its wav and transcript there too (wiped on quit / next start).
+  const cacheDir = audioPath.startsWith(vault.getSessionTmpDir()) ? vault.getSessionTmpDir() : getIcImportCacheDir();
   const sig = getFileSignature(audioPath);
   const hash = crypto.createHash('sha1').update(`${audioPath}|${sig}|${Date.now()}`).digest('hex');
   const wavPath = path.join(cacheDir, `${hash}.wav`);
@@ -2294,10 +2778,20 @@ function recordedDateFor(rec) {
 
 // Read-only look at the recorder vs. the ledger: what is new, what failed
 // before and will be retried, and what the user deleted (offered for re-import).
+// The transcribed-notes folder may be encrypted; importing into it while it
+// is locked would fail after minutes of transcription.
+function icNotesFolderLocked(folder) {
+  vault.invalidate();
+  if (vault.status(folder).state !== 'locked') return null;
+  return { success: false, locked: true, error: 'The transcribed notes folder is encrypted and locked - unlock it in Preferences > Encryption first' };
+}
+
 ipcMain.handle('ic-import-scan', async (event, opts) => {
   const o = opts || {};
   try {
     if (!o.icNotesFolder) return { success: false, error: 'Transcribed notes folder is not set' };
+    const lockedErr = icNotesFolderLocked(o.icNotesFolder);
+    if (lockedErr) return lockedErr;
     const recFileDir = o.recFileDir || findIcRecorderRoots()[0];
     if (!recFileDir || !isDirSync(recFileDir)) {
       return { success: false, noDevice: true, error: 'No IC RECORDER found - plug it in and try again' };
@@ -2347,6 +2841,8 @@ ipcMain.handle('ic-import-run', async (event, opts) => {
   if (!o.whisperCliPath || !isFileSync(o.whisperCliPath)) return { success: false, error: `whisper-cli not found: ${o.whisperCliPath || '(not set)'}` };
   if (!o.whisperModelPath || !isFileSync(o.whisperModelPath)) return { success: false, error: `Whisper model not found: ${o.whisperModelPath || '(not set)'}` };
   if (!o.icNotesFolder) return { success: false, error: 'Transcribed notes folder is not set' };
+  const lockedErr = icNotesFolderLocked(o.icNotesFolder);
+  if (lockedErr) return lockedErr;
   if (!ffmpegPath) return { success: false, error: 'ffmpeg is not available; cannot convert recordings' };
 
   const send = (p) => { try { event.sender.send('ic-import-progress', p); } catch (_e) {} };
@@ -2408,10 +2904,10 @@ ipcMain.handle('ic-import-run', async (event, opts) => {
         const noteName = uniqueNoteName(o.icNotesFolder, `${base} - ${recordedAt}`);
         const noteBase = noteName.slice(0, -4);
 
-        fs.writeFileSync(path.join(o.icNotesFolder, noteName), text, 'utf8');
+        vault.writeFileSync(path.join(o.icNotesFolder, noteName), text, 'utf8');
         const icSource = { name: rec.name, size: rec.size, mtime: rec.mtimeMs, recordedAt, folder: rec.folder };
-        fs.writeFileSync(path.join(sidecarDir, `${noteBase}.format.json`), JSON.stringify({ spans, icSource }), 'utf8');
-        fs.copyFileSync(rec.path, path.join(sidecarDir, `${noteBase}.mp3`));
+        vault.writeFileSync(path.join(sidecarDir, `${noteBase}.format.json`), JSON.stringify({ spans, icSource }), 'utf8');
+        vault.copyFileSync(rec.path, path.join(sidecarDir, `${noteBase}.mp3`));
 
         // Replace any stale entry for this recording (failed or deleted import).
         for (const k of staleKeys.get(rec.name.toLowerCase()) || []) delete ledger.imports[k];
@@ -2556,19 +3052,21 @@ ipcMain.handle('note-ai-write-result', async (event, opts) => {
   try {
     if (!o.notePath) return { success: false, error: 'No note path given' };
     let diskText = null;
-    try { diskText = fs.readFileSync(o.notePath, 'utf8'); } catch (_e) {}
+    try { diskText = vault.readFileSync(o.notePath, 'utf8'); } catch (e) {
+      if (e.code === 'VAULT_LOCKED') return { success: false, locked: true, error: e.message };
+    }
     if (!o.force && typeof o.expectText === 'string' && (diskText === null ? '' : diskText) !== o.expectText) {
       return { success: false, conflict: true, missing: diskText === null };
     }
     fs.mkdirSync(path.dirname(o.notePath), { recursive: true });
-    fs.writeFileSync(o.notePath, String(o.text || ''), 'utf8');
+    vault.writeFileSync(o.notePath, String(o.text || ''), 'utf8');
     const st = fs.statSync(o.notePath);
 
     const base = path.basename(o.notePath).replace(/\.txt$/i, '');
     const fmtPath = path.join(path.dirname(o.notePath), NOATFORMAT_DIR, base + '.format.json');
     let existing = {};
     try {
-      const parsed = JSON.parse(fs.readFileSync(fmtPath, 'utf8'));
+      const parsed = JSON.parse(vault.readFileSync(fmtPath, 'utf8'));
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) existing = parsed;
     } catch (_e) {}
     const payload = { ...existing, spans: Array.isArray(o.spans) ? o.spans : [] };
@@ -2577,7 +3075,7 @@ ipcMain.handle('note-ai-write-result', async (event, opts) => {
       try { fs.unlinkSync(fmtPath); } catch (_e) {}
     } else {
       fs.mkdirSync(path.dirname(fmtPath), { recursive: true });
-      fs.writeFileSync(fmtPath, JSON.stringify(payload), 'utf8');
+      vault.writeFileSync(fmtPath, JSON.stringify(payload), 'utf8');
     }
     return { success: true, lastModified: st.mtimeMs, size: st.size };
   } catch (e) {
@@ -2593,7 +3091,7 @@ ipcMain.handle('read-audio-base64', async (event, filePath) => {
     if (isDatalessPlaceholder(stats) && isNetworkOffline()) {
       return { success: false, unavailable: true, error: 'File is online-only and not available offline' };
     }
-    const buffer = await withTimeout(fsp.readFile(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
+    const buffer = await withTimeout(vault.readFile(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
     const ext = path.extname(filePath).toLowerCase().slice(1);
     let mimeType = 'audio/mpeg';
     if (ext === 'wav') mimeType = 'audio/wav';
@@ -2616,7 +3114,7 @@ ipcMain.handle('write-audio-buffer', async (event, filePath, base64Data) => {
     const base64 = base64Data.replace(/^data:audio\/[^;]+;base64,/, '');
     const buffer = Buffer.from(base64, 'base64');
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, buffer);
+    vault.writeFileSync(filePath, buffer);
     const stats = fs.statSync(filePath);
     return { success: true, lastModified: stats.mtimeMs, size: stats.size };
   } catch (e) {
@@ -2645,13 +3143,20 @@ ipcMain.handle('get-audio-playback-url', async (event, filePath, options = {}) =
     const passthrough = new Set(['mp3', 'wav', 'ogg']);
     const needsTranscode = forceTranscode || !passthrough.has(ext);
 
+    // Encrypted files are served decrypted from memory over noatvault://.
+    const encrypted = vault.fileIsEncryptedSync(filePath);
+    if (encrypted && vault.status(path.dirname(filePath)).state !== 'unlocked') {
+      return { success: false, locked: true, error: 'Notes are encrypted and locked' };
+    }
+    const directUrl = () => encrypted ? vaultAudioUrl(filePath) : pathToFileURL(filePath).href;
+
     if (!needsTranscode) {
-      return { success: true, url: pathToFileURL(filePath).href, wasTranscoded: false };
+      return { success: true, url: directUrl(), wasTranscoded: false };
     }
 
     if (!ffmpegPath) {
       // No ffmpeg available; return the original file URL and let the renderer try.
-      return { success: true, url: pathToFileURL(filePath).href, wasTranscoded: false, warning: 'ffmpeg unavailable' };
+      return { success: true, url: directUrl(), wasTranscoded: false, warning: 'ffmpeg unavailable' };
     }
 
     const wavPath = await transcodeToWavCached(filePath);
@@ -2692,7 +3197,7 @@ ipcMain.handle('read-canvas-json', async (event, filePath) => {
     if (isDatalessPlaceholder(stats) && isNetworkOffline()) {
       return { success: false, unavailable: true, error: 'Canvas is online-only and not available offline' };
     }
-    const content = await withTimeout(fsp.readFile(filePath, 'utf8'), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
+    const content = await withTimeout(vault.readFile(filePath, 'utf8'), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
     return { success: true, data: content };
   } catch (e) {
     return { success: false, error: e.message };
@@ -2703,7 +3208,7 @@ ipcMain.handle('read-canvas-json', async (event, filePath) => {
 ipcMain.handle('write-canvas-json', async (event, filePath, jsonData) => {
   try {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, jsonData, 'utf8');
+    vault.writeFileSync(filePath, jsonData, 'utf8');
     const stats = fs.statSync(filePath);
     return { success: true, lastModified: stats.mtimeMs };
   } catch (e) {
@@ -2777,13 +3282,15 @@ ipcMain.handle('show-prompt', async (event, message, defaultValue) => {
 });
 
 // Show confirm dialog
-ipcMain.handle('show-confirm', async (event, message) => {
+// opts = { title, okLabel }; defaults suit the delete prompts.
+ipcMain.handle('show-confirm', async (event, message, opts = {}) => {
   const result = await dialog.showMessageBox(mainWindow, {
     type: 'question',
-    buttons: ['Cancel', 'Delete'],
+    buttons: ['Cancel', opts.okLabel || 'Delete'],
     defaultId: 0,
     cancelId: 0,
-    title: 'Confirm Delete',
+    noLink: true, // plain buttons, not Windows command links
+    title: opts.title || 'Confirm Delete',
     message: message
   });
   return result.response === 1;

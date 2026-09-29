@@ -752,6 +752,19 @@
       padding:18px;
     }
     .prefsModal.open{ display:flex; }
+    #vaultPwModal{ z-index:10002; }
+    .vaultRow{ display:flex; gap:8px; flex-wrap:wrap; }
+    .vaultRow .search{ max-width:100%; flex:1; min-width:120px; }
+    .vaultError{ font-size:12px; color:#c0392b; min-height:0; }
+    .vaultError:empty{ display:none; }
+    .vaultCheck{ display:flex; gap:6px; align-items:center; font-size:12px; color:var(--text); }
+    .vaultHwStatus{ font-size:12px; color:var(--text); font-weight:600; }
+    .vaultHwStatus:empty{ display:none; }
+    .vaultSlotList{ display:flex; flex-direction:column; border:1px solid var(--border); border-radius:8px; }
+    .vaultSlot{ display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 10px; font-size:12px; color:var(--text); }
+    .vaultSlot + .vaultSlot{ border-top:1px solid var(--border); }
+    .vaultSlot .vaultSlotMeta{ color:var(--muted); font-size:11px; }
+    .vaultSlot .btn{ padding:3px 8px; font-size:11px; }
     .prefsDialog{
       width:min(450px, 90vw);
       max-height:min(85vh, 700px);
@@ -1468,6 +1481,58 @@
           </div>
         </div>
         <div class="prefItem" style="border-top:1px solid var(--border);padding-top:20px;margin-top:8px;">
+          <label class="prefLabel">Encryption</label>
+          <div class="prefHint" id="vaultStatusText">Open a notes folder first</div>
+        </div>
+        <div class="prefItem" id="vaultOffItem" style="display:none;">
+          <label class="prefLabel">Notes Password</label>
+          <div class="vaultRow">
+            <input type="password" id="vaultNewPwInput" class="search" placeholder="Password" autocomplete="new-password">
+            <input type="password" id="vaultNewPw2Input" class="search" placeholder="Confirm password" autocomplete="new-password">
+          </div>
+          <div class="prefControl">
+            <button id="vaultEnableBtn" class="btn">Encrypt notes folder</button>
+          </div>
+          <div class="prefHint">Encrypts every note, drawing, image and recording in this folder (AES-256). Note titles stay visible as file names. Forget this password and your notes cannot be recovered.</div>
+          <div class="prefHint">The password is always your recovery method. Once the folder is encrypted you can also unlock it with a YubiKey or a Trezor (and Touch ID on a Mac) - add them here afterwards.</div>
+        </div>
+        <div class="prefItem" id="vaultLockedItem" style="display:none;">
+          <div class="prefControl">
+            <button id="vaultUnlockBtn" class="btn">Unlock notes...</button>
+          </div>
+        </div>
+        <div class="prefItem" id="vaultOnItem" style="display:none;">
+          <label class="prefLabel">Unlock Methods</label>
+          <div id="vaultSlotList" class="vaultSlotList"></div>
+          <div class="prefControl">
+            <button id="vaultAddYubiBtn" class="btn">Add YubiKey...</button>
+            <button id="vaultAddTrezorBtn" class="btn">Add Trezor...</button>
+          </div>
+          <div class="prefHint">Any one of these unlocks the notes on any computer that syncs this folder. YubiKey: uses Slot 2 in challenge-response mode; if Slot 2 is empty, Noat Boat offers to set it up (touch required). A Slot 2 that already holds something is left alone - clear it in Yubico Authenticator first. Add a second YubiKey as a backup. Trezor: you confirm on the device, and restoring its seed restores access. A Trezor with newer firmware first asks you to pair this computer: type the code it shows into the dialog.</div>
+          <label class="vaultCheck" id="vaultTouchIdRow" style="display:none;"><input type="checkbox" id="vaultTouchIdCheck"> Require Touch ID before using the remembered password</label>
+          <label class="prefLabel" style="margin-top:12px;">Change Password</label>
+          <div class="vaultRow">
+            <input type="password" id="vaultOldPwInput" class="search" placeholder="Current password" autocomplete="current-password">
+          </div>
+          <div class="vaultRow">
+            <input type="password" id="vaultChangePwInput" class="search" placeholder="New password" autocomplete="new-password">
+            <input type="password" id="vaultChangePw2Input" class="search" placeholder="Confirm new password" autocomplete="new-password">
+          </div>
+          <div class="prefControl">
+            <button id="vaultChangePwBtn" class="btn">Change password</button>
+          </div>
+          <div class="prefHint">Changing the password does not re-encrypt the notes: a computer that remembered them, or a key listed above, keeps opening them until you use "Lock &amp; forget" there or remove the key here.</div>
+          <div class="prefControl" style="margin-top:8px;">
+            <button id="vaultResumeBtn" class="btn">Encrypt new files</button>
+            <button id="vaultForgetBtn" class="btn">Lock &amp; forget</button>
+            <button id="vaultDisableBtn" class="btn">Decrypt &amp; turn off...</button>
+          </div>
+          <div class="prefHint" id="vaultRememberHint"></div>
+        </div>
+        <div class="prefItem" id="vaultMsgItem" style="display:none;">
+          <div class="prefHint" id="vaultMsg"></div>
+        </div>
+        <div class="prefItem" style="border-top:1px solid var(--border);padding-top:20px;margin-top:8px;">
           <label class="prefLabel">IC Recorder Import</label>
           <div class="prefHint" style="margin-bottom:12px;">Transcribe Sony IC recorder memos with whisper.cpp and tidy them with DeepSeek (uses the DeepSeek key above)</div>
         </div>
@@ -1559,6 +1624,33 @@
           <div class="prefHint">Your Ethereum address or ENS name for receiving tips</div>
         </div>
       </div>
+    </div>
+  </div>
+
+  <div id="vaultPwModal" class="prefsModal" aria-hidden="true">
+    <div class="prefsDialog" role="dialog" aria-modal="true" aria-labelledby="vaultPwTitle">
+      <div class="prefsTop">
+        <div class="prefsTitle" id="vaultPwTitle">Unlock Notes</div>
+        <button id="vaultPwCancelX" class="btn">✕</button>
+      </div>
+      <form class="prefsBody" id="vaultPwForm">
+        <div class="prefItem">
+          <div class="prefHint" id="vaultPwMessage" style="font-size:12px;color:var(--text);"></div>
+          <input type="password" id="vaultPwInput" class="search" style="max-width:100%;" placeholder="Password" autocomplete="current-password">
+          <div class="vaultRow" id="vaultPwHwRow" style="display:none;"></div>
+        <div class="vaultRow" id="vaultPwCodeRow" style="display:none;">
+          <input type="text" id="vaultPwCodeInput" class="search" placeholder="Code shown on the Trezor" inputmode="numeric" autocomplete="one-time-code" maxlength="6">
+          <button type="button" id="vaultPwCodeBtn" class="btn">Send code</button>
+        </div>
+          <label class="vaultCheck" id="vaultPwRememberRow"><input type="checkbox" id="vaultPwRemember" checked> Remember on this computer</label>
+          <div class="vaultHwStatus" id="vaultPwHwStatus"></div>
+          <div class="vaultError" id="vaultPwError"></div>
+        </div>
+        <div class="prefControl" style="justify-content:flex-end;">
+          <button type="button" id="vaultPwCancelBtn" class="btn">Cancel</button>
+          <button type="submit" id="vaultPwOkBtn" class="btn">Unlock</button>
+        </div>
+      </form>
     </div>
   </div>
 
@@ -1680,6 +1772,45 @@ const els = {
   audioPlayer: document.getElementById('audioPlayer'),
   prefsModal: document.getElementById('prefsModal'),
   prefsCloseBtn: document.getElementById('prefsCloseBtn'),
+  vaultStatusText: document.getElementById('vaultStatusText'),
+  vaultOffItem: document.getElementById('vaultOffItem'),
+  vaultNewPwInput: document.getElementById('vaultNewPwInput'),
+  vaultNewPw2Input: document.getElementById('vaultNewPw2Input'),
+  vaultEnableBtn: document.getElementById('vaultEnableBtn'),
+  vaultLockedItem: document.getElementById('vaultLockedItem'),
+  vaultUnlockBtn: document.getElementById('vaultUnlockBtn'),
+  vaultOnItem: document.getElementById('vaultOnItem'),
+  vaultOldPwInput: document.getElementById('vaultOldPwInput'),
+  vaultChangePwInput: document.getElementById('vaultChangePwInput'),
+  vaultChangePw2Input: document.getElementById('vaultChangePw2Input'),
+  vaultChangePwBtn: document.getElementById('vaultChangePwBtn'),
+  vaultForgetBtn: document.getElementById('vaultForgetBtn'),
+  vaultDisableBtn: document.getElementById('vaultDisableBtn'),
+  vaultResumeBtn: document.getElementById('vaultResumeBtn'),
+  vaultRememberHint: document.getElementById('vaultRememberHint'),
+  vaultMsgItem: document.getElementById('vaultMsgItem'),
+  vaultMsg: document.getElementById('vaultMsg'),
+  vaultPwModal: document.getElementById('vaultPwModal'),
+  vaultPwTitle: document.getElementById('vaultPwTitle'),
+  vaultPwForm: document.getElementById('vaultPwForm'),
+  vaultPwMessage: document.getElementById('vaultPwMessage'),
+  vaultPwInput: document.getElementById('vaultPwInput'),
+  vaultPwRememberRow: document.getElementById('vaultPwRememberRow'),
+  vaultPwRemember: document.getElementById('vaultPwRemember'),
+  vaultPwError: document.getElementById('vaultPwError'),
+  vaultPwOkBtn: document.getElementById('vaultPwOkBtn'),
+  vaultPwCancelBtn: document.getElementById('vaultPwCancelBtn'),
+  vaultPwCancelX: document.getElementById('vaultPwCancelX'),
+  vaultPwHwRow: document.getElementById('vaultPwHwRow'),
+  vaultPwCodeRow: document.getElementById('vaultPwCodeRow'),
+  vaultPwCodeInput: document.getElementById('vaultPwCodeInput'),
+  vaultPwCodeBtn: document.getElementById('vaultPwCodeBtn'),
+  vaultPwHwStatus: document.getElementById('vaultPwHwStatus'),
+  vaultSlotList: document.getElementById('vaultSlotList'),
+  vaultAddYubiBtn: document.getElementById('vaultAddYubiBtn'),
+  vaultAddTrezorBtn: document.getElementById('vaultAddTrezorBtn'),
+  vaultTouchIdRow: document.getElementById('vaultTouchIdRow'),
+  vaultTouchIdCheck: document.getElementById('vaultTouchIdCheck'),
   themeLightBtn: document.getElementById('themeLightBtn'),
   themeDarkBtn: document.getElementById('themeDarkBtn'),
   focusStrengthSlider: document.getElementById('focusStrengthSlider'),
@@ -3064,11 +3195,455 @@ function openPrefsModal() {
   closeMiniCal();
   setPrefsModalOpen(true);
   updatePrefsUI();
+  setVaultMsg('');
+  refreshVaultInfo();
 }
 
 function closePrefsModal() {
   setPrefsModalOpen(false);
 }
+
+// --- Notes encryption (vault) ---
+// State of the vault covering rootFolderPath: off | locked | unlocked.
+let vaultInfo = { state: 'off', root: null, remembered: false, canRemember: true, slots: [], touchId: {} };
+let vaultBusy = false;
+let vaultPwPending = null; // { opts, resolve } while the password dialog is open
+let vaultHwBusy = false;   // a YubiKey/Trezor request is in flight for that dialog
+let vaultHwPrompt = null;  // { id } while the main process waits for a typed value (Trezor pairing code)
+
+// autoUnlock: let the main process use the remembered key (behind Touch ID if set).
+async function refreshVaultInfo(autoUnlock = false) {
+  try {
+    vaultInfo = rootFolderPath ? await api.vaultStatus(rootFolderPath, { autoUnlock }) : { state: 'off', root: null };
+  } catch (_e) {
+    vaultInfo = { state: 'off', root: null };
+  }
+  vaultInfo.slots = vaultInfo.slots || [];
+  vaultInfo.touchId = vaultInfo.touchId || {};
+  renderVaultPrefs();
+  return vaultInfo;
+}
+
+const VAULT_SLOT_KIND = { yubikey: 'YubiKey', trezor: 'Trezor' };
+
+function renderVaultSlots() {
+  els.vaultSlotList.innerHTML = '';
+  const row = (label, meta, onRemove) => {
+    const div = document.createElement('div');
+    div.className = 'vaultSlot';
+    const text = document.createElement('div');
+    const name = document.createElement('div');
+    name.textContent = label;
+    const sub = document.createElement('div');
+    sub.className = 'vaultSlotMeta';
+    sub.textContent = meta;
+    text.append(name, sub);
+    div.appendChild(text);
+    if (onRemove) {
+      const b = document.createElement('button');
+      b.className = 'btn';
+      b.textContent = 'Remove';
+      b.disabled = vaultBusy;
+      b.addEventListener('click', onRemove);
+      div.appendChild(b);
+    }
+    els.vaultSlotList.appendChild(div);
+  };
+  row('Password', 'Always works - your recovery method');
+  for (const s of vaultInfo.slots) {
+    const added = s.createdAt ? `added ${new Date(s.createdAt).toLocaleDateString()}` : '';
+    row(s.label, [VAULT_SLOT_KIND[s.type] || s.type, added].filter(Boolean).join(' · '), () => vaultRemoveSlot(s));
+  }
+}
+
+function setVaultMsg(text) {
+  els.vaultMsg.textContent = text || '';
+  els.vaultMsgItem.style.display = text ? 'flex' : 'none';
+}
+
+function renderVaultPrefs() {
+  const st = vaultInfo.state;
+  els.vaultStatusText.textContent = !rootFolderPath ? 'Open a notes folder first'
+    : st === 'off' ? 'Off - notes in this folder are stored as plain files'
+    : st === 'locked' ? 'On - locked. Enter the password to read and edit notes'
+    : 'On - notes, drawings, images and recordings in this folder are encrypted';
+  els.vaultOffItem.style.display = (rootFolderPath && st === 'off') ? 'flex' : 'none';
+  els.vaultLockedItem.style.display = st === 'locked' ? 'flex' : 'none';
+  els.vaultOnItem.style.display = st === 'unlocked' ? 'flex' : 'none';
+  els.vaultRememberHint.textContent = vaultInfo.remembered
+    ? 'Remembered on this computer: the folder unlocks automatically. Lock & forget asks for the password next time.'
+    : 'Not remembered: you will be asked for the password each time the folder opens.';
+  for (const b of [els.vaultEnableBtn, els.vaultUnlockBtn, els.vaultChangePwBtn, els.vaultForgetBtn, els.vaultDisableBtn, els.vaultResumeBtn, els.vaultAddYubiBtn, els.vaultAddTrezorBtn]) {
+    b.disabled = vaultBusy;
+  }
+  if (st === 'unlocked') renderVaultSlots();
+  els.vaultTouchIdRow.style.display = (vaultInfo.touchId.supported && vaultInfo.remembered) ? 'flex' : 'none';
+  els.vaultTouchIdCheck.checked = !!vaultInfo.touchId.required;
+  els.vaultTouchIdCheck.disabled = vaultBusy;
+}
+
+function vaultSummary(verb, r) {
+  let msg = `${verb} ${r.changed} file(s).`;
+  if (r.skipped) msg += ` ${r.skipped} online-only file(s) were skipped - run it again once they have synced.`;
+  if (r.failed && r.failed.length) msg += ` ${r.failed.length} file(s) failed (${r.failed[0].error}).`;
+  return msg;
+}
+
+// Password dialog. opts: { title, message, okLabel, showRemember, verify, hwMethods }.
+// verify(password, remember) returns an error string to keep the dialog open.
+// hwMethods: [{ key, label, run(remember) }] - buttons that unlock without the
+// password; run returns an error string or null.
+// Resolves { password, remember } / { hw: key } or null when cancelled.
+function askVaultPassword(opts) {
+  if (vaultPwPending) closeVaultPw(null);
+  return new Promise((resolve) => {
+    els.vaultPwTitle.textContent = opts.title;
+    els.vaultPwMessage.textContent = opts.message || '';
+    els.vaultPwOkBtn.textContent = opts.okLabel || 'OK';
+    els.vaultPwOkBtn.disabled = false;
+    els.vaultPwRememberRow.style.display = opts.showRemember ? 'flex' : 'none';
+    els.vaultPwRemember.checked = true;
+    els.vaultPwInput.value = '';
+    els.vaultPwError.textContent = '';
+    els.vaultPwHwStatus.textContent = '';
+    hideVaultHwPrompt();
+    els.vaultPwHwRow.innerHTML = '';
+    for (const m of opts.hwMethods || []) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn';
+      b.textContent = m.label;
+      b.addEventListener('click', () => runVaultHwMethod(m));
+      els.vaultPwHwRow.appendChild(b);
+    }
+    els.vaultPwHwRow.style.display = (opts.hwMethods || []).length ? 'flex' : 'none';
+    vaultPwPending = { opts, resolve };
+    els.vaultPwModal.classList.add('open');
+    els.vaultPwModal.setAttribute('aria-hidden', 'false');
+    setTimeout(() => els.vaultPwInput.focus(), 0);
+  });
+}
+
+function closeVaultPw(result) {
+  if (!vaultPwPending) return;
+  cancelVaultHwPrompt();
+  const { resolve } = vaultPwPending;
+  vaultPwPending = null;
+  els.vaultPwModal.classList.remove('open');
+  els.vaultPwModal.setAttribute('aria-hidden', 'true');
+  els.vaultPwInput.value = '';
+  resolve(result);
+}
+
+els.vaultPwForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!vaultPwPending || els.vaultPwOkBtn.disabled) return;
+  const { opts } = vaultPwPending;
+  const password = els.vaultPwInput.value;
+  const remember = !!opts.showRemember && els.vaultPwRemember.checked;
+  if (!password) { els.vaultPwError.textContent = 'Enter the password.'; return; }
+  if (opts.verify) {
+    els.vaultPwOkBtn.disabled = true;
+    els.vaultPwOkBtn.textContent = 'Checking...';
+    let err = null;
+    try { err = await opts.verify(password, remember); } catch (ex) { err = String(ex?.message || ex); }
+    els.vaultPwOkBtn.disabled = false;
+    els.vaultPwOkBtn.textContent = opts.okLabel || 'OK';
+    if (err) {
+      els.vaultPwError.textContent = err;
+      els.vaultPwInput.select();
+      return;
+    }
+  }
+  closeVaultPw({ password, remember });
+});
+function setVaultPwControlsDisabled(on) {
+  els.vaultPwOkBtn.disabled = on;
+  for (const b of els.vaultPwHwRow.querySelectorAll('button')) b.disabled = on;
+}
+
+async function runVaultHwMethod(m) {
+  if (!vaultPwPending) return;
+  const pending = vaultPwPending;
+  const remember = !!pending.opts.showRemember && els.vaultPwRemember.checked;
+  els.vaultPwError.textContent = '';
+  els.vaultPwHwStatus.textContent = 'Working...';
+  setVaultPwControlsDisabled(true);
+  vaultHwBusy = true;
+  let err = null;
+  try { err = await m.run(remember); } catch (ex) { err = String(ex?.message || ex); }
+  vaultHwBusy = false;
+  if (vaultPwPending !== pending) {
+    // Dialog was closed meanwhile; the main process may still have unlocked.
+    if (!err) { await refreshVaultInfo(); await reloadNotes(); }
+    return;
+  }
+  setVaultPwControlsDisabled(false);
+  els.vaultPwHwStatus.textContent = '';
+  if (err) { els.vaultPwError.textContent = err; return; }
+  closeVaultPw({ hw: m.key });
+}
+
+// Device prompts from the main process ("Touch your YubiKey").
+api.onVaultHwEvent((p) => {
+  if (!p || !p.message) return;
+  if (vaultPwPending) els.vaultPwHwStatus.textContent = p.message;
+  else if (vaultBusy) setVaultMsg(p.message);
+});
+
+// The main process needs something typed for the device (the code a Trezor
+// shows when pairing this computer). Answered in the open password dialog;
+// with no dialog open the request is declined.
+function hideVaultHwPrompt() {
+  els.vaultPwCodeRow.style.display = 'none';
+  els.vaultPwCodeInput.value = '';
+}
+
+function cancelVaultHwPrompt() {
+  if (!vaultHwPrompt) return;
+  const { id } = vaultHwPrompt;
+  vaultHwPrompt = null;
+  hideVaultHwPrompt();
+  api.vaultHwPromptReply(id, null);
+}
+
+function sendVaultHwCode() {
+  if (!vaultHwPrompt) return;
+  const code = els.vaultPwCodeInput.value.trim();
+  if (!code) { els.vaultPwCodeInput.focus(); return; }
+  const { id } = vaultHwPrompt;
+  vaultHwPrompt = null;
+  hideVaultHwPrompt();
+  els.vaultPwHwStatus.textContent = 'Checking the code...';
+  api.vaultHwPromptReply(id, code);
+}
+
+api.onVaultHwPrompt((p) => {
+  if (!p || !p.id) return;
+  if (!vaultPwPending) { api.vaultHwPromptReply(p.id, null); return; }
+  cancelVaultHwPrompt();
+  vaultHwPrompt = { id: p.id };
+  els.vaultPwError.textContent = '';
+  els.vaultPwHwStatus.textContent = p.message || 'Enter the code shown on your Trezor';
+  els.vaultPwCodeInput.value = '';
+  els.vaultPwCodeInput.maxLength = p.length || 6;
+  els.vaultPwCodeRow.style.display = 'flex';
+  setTimeout(() => els.vaultPwCodeInput.focus(), 0);
+});
+els.vaultPwCodeBtn.addEventListener('click', sendVaultHwCode);
+els.vaultPwCodeInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); e.stopPropagation(); sendVaultHwCode(); }
+});
+
+function vaultHwError(res) {
+  if (res && res.code === 'VAULT_WRONG_KEY') return 'That key does not unlock these notes.';
+  if (res && res.wrongPassword) return 'Wrong password.';
+  return (res && res.error) || 'Something went wrong';
+}
+
+els.vaultPwCancelBtn.addEventListener('click', () => closeVaultPw(null));
+els.vaultPwCancelX.addEventListener('click', () => closeVaultPw(null));
+els.vaultPwModal.addEventListener('mousedown', (e) => { if (e.target === els.vaultPwModal && !vaultHwBusy) closeVaultPw(null); });
+
+async function promptVaultUnlock() {
+  const name = api.basename(vaultInfo.root || rootFolderPath || '');
+  const hwMethods = vaultInfo.slots.map(s => ({
+    key: s.id,
+    label: `Use ${s.label}`,
+    run: async (remember) => {
+      const res = await api.vaultHwUnlock(rootFolderPath, s.id, remember);
+      return res && res.success ? null : vaultHwError(res);
+    }
+  }));
+  // Touch ID only guards a key remembered on this Mac.
+  if (vaultInfo.touchId.required && vaultInfo.remembered) {
+    hwMethods.unshift({
+      key: 'touchid',
+      label: 'Use Touch ID',
+      run: async () => {
+        const res = await api.vaultStatus(rootFolderPath, { autoUnlock: true });
+        return res && res.state === 'unlocked' ? null : 'Touch ID did not unlock the notes.';
+      }
+    });
+  }
+  const r = await askVaultPassword({
+    title: 'Unlock Notes',
+    message: hwMethods.length
+      ? `"${name}" is encrypted. Enter its password, or use one of your keys.`
+      : `"${name}" is encrypted. Enter its password to read and edit your notes.`,
+    okLabel: 'Unlock',
+    showRemember: vaultInfo.canRemember !== false,
+    hwMethods,
+    verify: async (password, remember) => {
+      const res = await api.vaultUnlock(rootFolderPath, password, remember);
+      if (res && res.success) return null;
+      return res && res.wrongPassword ? 'Wrong password.' : `Could not unlock: ${(res && res.error) || 'unknown error'}`;
+    }
+  });
+  await refreshVaultInfo();
+  return !!r;
+}
+
+// Called whenever a notes folder is opened: auto-unlocks from a remembered
+// key (main process, behind Touch ID when set) and otherwise asks.
+async function ensureVaultUnlocked() {
+  const info = await refreshVaultInfo(true);
+  if (info.state === 'locked') await promptVaultUnlock();
+}
+
+async function vaultAddSlot(type) {
+  const kind = VAULT_SLOT_KIND[type];
+  let added = null;
+  const r = await askVaultPassword({
+    title: `Add ${kind}`,
+    message: type === 'yubikey'
+      ? 'Enter the notes password, then touch your YubiKey when it blinks. An empty Slot 2 is set up for you first.'
+      : 'Enter the notes password, then confirm "Unlock Noat Boat notes?" on your Trezor.',
+    okLabel: 'Add',
+    showRemember: false,
+    verify: async (password) => {
+      let res = await api.vaultSlotAdd(rootFolderPath, type, password);
+      if (res && res.code === 'SLOT_EMPTY') {
+        // The YubiKey is fine but Slot 2 has nothing in it: offer to program it.
+        const ok = await api.showConfirm(
+          'Slot 2 of this YubiKey is empty.\n\nSet it up now for challenge-response? Noat Boat writes a new random secret into Slot 2 (touch required to use it). Slot 1 and the other YubiKey features are not touched.',
+          { title: 'Set Up YubiKey', okLabel: 'Set up Slot 2' });
+        if (!ok) return 'Slot 2 was left empty - set it up to use this YubiKey.';
+        els.vaultPwHwStatus.textContent = 'Setting up Slot 2...';
+        res = await api.vaultSlotAdd(rootFolderPath, type, password, { setupSlot2: true });
+      }
+      if (res && res.success) { added = res.slot; return null; }
+      return vaultHwError(res);
+    }
+  });
+  await refreshVaultInfo();
+  if (r && added) setVaultMsg(`Added ${added.label}. It now unlocks these notes on any computer that syncs this folder.`);
+}
+
+async function vaultRemoveSlot(slot) {
+  const ok = await api.showConfirm(
+    `Remove "${slot.label}"? It will no longer unlock these notes.\n\nOlder copies of the folder (for example in your sync service's history) can still be opened with it.`,
+    { title: 'Remove Unlock Method', okLabel: 'Remove' });
+  if (!ok) return;
+  const res = await api.vaultSlotRemove(rootFolderPath, slot.id);
+  setVaultMsg(res && res.success ? `Removed ${slot.label}.` : vaultHwError(res));
+  await refreshVaultInfo();
+}
+
+async function vaultSetTouchId(on) {
+  vaultBusy = true;
+  renderVaultPrefs();
+  const res = await api.vaultTouchIdSet(rootFolderPath, on);
+  vaultBusy = false;
+  setVaultMsg(res && res.success
+    ? (on ? 'Touch ID is now required before the remembered password is used.' : 'Touch ID is no longer required.')
+    : `Could not change the Touch ID setting: ${vaultHwError(res)}`);
+  await refreshVaultInfo();
+}
+
+async function vaultEnable() {
+  const pw = els.vaultNewPwInput.value;
+  if (!pw) { setVaultMsg('Enter a password.'); return; }
+  if (pw.length < 8) { setVaultMsg('Use at least 8 characters.'); return; }
+  if (pw !== els.vaultNewPw2Input.value) { setVaultMsg('The passwords do not match.'); return; }
+  const name = api.basename(rootFolderPath);
+  const ok = await api.showConfirm(
+    `Encrypt every note in "${name}" and its subfolders?\n\n` +
+    'If you forget this password your notes cannot be recovered.\n\n' +
+    'Every computer that syncs this folder must run this version of Noat Boat - older versions can damage encrypted notes.',
+    { title: 'Encrypt Notes', okLabel: 'Encrypt' });
+  if (!ok) return;
+  await flushSaveIfNeeded();
+  vaultBusy = true;
+  renderVaultPrefs();
+  setVaultMsg('Encrypting...');
+  let r;
+  try { r = await api.vaultEnable(rootFolderPath, pw, true); } catch (e) { r = { success: false, error: String(e?.message || e) }; }
+  vaultBusy = false;
+  els.vaultNewPwInput.value = '';
+  els.vaultNewPw2Input.value = '';
+  setVaultMsg(r.success ? vaultSummary('Encrypted', r) : `Encryption failed: ${r.error}`);
+  await refreshVaultInfo();
+  await reloadNotes();
+}
+
+// Encrypt anything still plain (skipped online-only files, notes written by
+// other tools or older versions).
+async function vaultResume() {
+  await flushSaveIfNeeded();
+  vaultBusy = true;
+  renderVaultPrefs();
+  setVaultMsg('Checking for unencrypted files...');
+  let r;
+  try { r = await api.vaultEnable(rootFolderPath, '', false); } catch (e) { r = { success: false, error: String(e?.message || e) }; }
+  vaultBusy = false;
+  setVaultMsg(r.success ? vaultSummary('Encrypted', r) : `Encryption failed: ${r.error}`);
+  renderVaultPrefs();
+}
+
+async function vaultChangePassword() {
+  const oldPw = els.vaultOldPwInput.value;
+  const newPw = els.vaultChangePwInput.value;
+  if (!oldPw || !newPw) { setVaultMsg('Enter the current and the new password.'); return; }
+  if (newPw.length < 8) { setVaultMsg('Use at least 8 characters.'); return; }
+  if (newPw !== els.vaultChangePw2Input.value) { setVaultMsg('The new passwords do not match.'); return; }
+  vaultBusy = true;
+  renderVaultPrefs();
+  setVaultMsg('Changing password...');
+  const r = await api.vaultChangePassword(rootFolderPath, oldPw, newPw);
+  vaultBusy = false;
+  if (r.success) {
+    els.vaultOldPwInput.value = '';
+    els.vaultChangePwInput.value = '';
+    els.vaultChangePw2Input.value = '';
+  }
+  setVaultMsg(r.success ? 'Password changed. Computers that remembered these notes still open them until you use "Lock & forget" there; others will ask for the new password.'
+    : r.wrongPassword ? 'The current password is wrong.' : `Could not change the password: ${r.error}`);
+  renderVaultPrefs();
+}
+
+async function vaultForget() {
+  await flushSaveIfNeeded();
+  await api.vaultForgetKey(rootFolderPath);
+  setVaultMsg('Locked. The password is no longer stored on this computer.');
+  await refreshVaultInfo();
+  await reloadNotes();
+}
+
+async function vaultDisable() {
+  const r = await askVaultPassword({
+    title: 'Turn Off Encryption',
+    message: 'Every file in this folder will be decrypted and stored as plain files again. Enter the password to confirm.',
+    okLabel: 'Decrypt',
+    showRemember: false
+  });
+  if (!r) return;
+  await flushSaveIfNeeded();
+  vaultBusy = true;
+  renderVaultPrefs();
+  setVaultMsg('Decrypting...');
+  let res;
+  try { res = await api.vaultDisable(rootFolderPath, r.password); } catch (e) { res = { success: false, error: String(e?.message || e) }; }
+  vaultBusy = false;
+  setVaultMsg(res.success ? vaultSummary('Decrypted', res) + ' Encryption is off.'
+    : res.wrongPassword ? 'Wrong password - nothing was changed.' : `Decryption stopped: ${res.error}`);
+  await refreshVaultInfo();
+  await reloadNotes();
+}
+
+api.onVaultProgress((p) => {
+  if (!vaultBusy || !p) return;
+  setVaultMsg(`${p.mode === 'decrypt' ? 'Decrypting' : 'Encrypting'} ${p.done} / ${p.total}...`);
+});
+els.vaultEnableBtn.addEventListener('click', vaultEnable);
+els.vaultResumeBtn.addEventListener('click', vaultResume);
+els.vaultUnlockBtn.addEventListener('click', async () => { if (await promptVaultUnlock()) await reloadNotes(); });
+els.vaultChangePwBtn.addEventListener('click', vaultChangePassword);
+els.vaultForgetBtn.addEventListener('click', vaultForget);
+els.vaultDisableBtn.addEventListener('click', vaultDisable);
+els.vaultAddYubiBtn.addEventListener('click', () => vaultAddSlot('yubikey'));
+els.vaultAddTrezorBtn.addEventListener('click', () => vaultAddSlot('trezor'));
+els.vaultTouchIdCheck.addEventListener('change', () => vaultSetTouchId(els.vaultTouchIdCheck.checked));
 
 // --- Export functions ---
 let exportIsOpen = false;
@@ -3294,7 +3869,7 @@ async function importFromIc() {
     // 1. Read-only scan: find the recorder and classify its recordings.
     let scan = await api.icImportScan({ icNotesFolder });
     if (scan && scan.noDevice) {
-      const pick = await api.showConfirm('No IC RECORDER found - plug it in and try again.\n\nPick the recorder\'s REC_FILE folder manually instead?');
+      const pick = await api.showConfirm('No IC RECORDER found - plug it in and try again.\n\nPick the recorder\'s REC_FILE folder manually instead?', { title: 'Import from IC', okLabel: 'Pick Folder' });
       if (pick) {
         const dir = await api.openFolderDialog();
         if (dir) scan = await api.icImportScan({ icNotesFolder, recFileDir: dir });
@@ -3482,7 +4057,7 @@ async function transcribeCurrentNoteAudio() {
     return;
   }
   if (els.editor.value.trim()) {
-    const ok = await api.showConfirm('This note already has text. Replace it with a fresh transcription of the attached audio?\n\n(You can undo afterwards.)');
+    const ok = await api.showConfirm('This note already has text. Replace it with a fresh transcription of the attached audio?\n\n(You can undo afterwards.)', { title: 'Transcribe Audio', okLabel: 'Replace' });
     if (!ok) return;
   }
 
@@ -3538,7 +4113,7 @@ async function completeNoteAiJob(job, result) {
   if (isOpenNotePath(job.notePath) && !getOpenNote().unavailable) {
     const unchanged = job.startedText != null && els.editor.value === job.startedText;
     if (!unchanged) {
-      const ok = await api.showConfirm(confirmMsg);
+      const ok = await api.showConfirm(confirmMsg, { title: label, okLabel: 'Replace' });
       if (!ok) { flashSaveState(`${label.toLowerCase()} result discarded`); return; }
     }
     if (isOpenNotePath(job.notePath)) { // the user may have switched notes during the dialog
@@ -3554,7 +4129,7 @@ async function completeNoteAiJob(job, result) {
     const msg = r.missing
       ? `"${title}" no longer exists on disk. Recreate it with the ${label} result?`
       : confirmMsg;
-    const ok = await api.showConfirm(msg);
+    const ok = await api.showConfirm(msg, { title: label, okLabel: r.missing ? 'Recreate' : 'Replace' });
     if (!ok) { showBanner(`${label} result for "${escapeHtml(title)}" was discarded.`); return; }
     r = await api.noteAiWriteResult({ ...args, force: true });
   }
@@ -5870,10 +6445,10 @@ function renderList() {
     const meta = document.createElement('div');
     meta.className = 'noteMeta';
     const firstLine = (n.content || '').split(/\r?\n/)[0]?.trim() || '';
-    const excerpt = n.unavailable ? '(online-only)' : (firstLine ? firstLine.slice(0, 80) : '(empty)');
+    const excerpt = n.locked ? '(locked)' : n.unavailable ? '(online-only)' : (firstLine ? firstLine.slice(0, 80) : '(empty)');
     const canvasMark = n.canvas ? '  ·  [canvas]' : (n.image ? '  ·  [img]' : '');
     const audioMark = n.audio ? '  ·  [audio]' : '';
-    const offlineMark = n.unavailable ? '  ·  offline' : '';
+    const offlineMark = n.locked ? '' : n.unavailable ? '  ·  offline' : '';
     const aiJob = noteAiJobs.get(noteAiKey(n.path));
     const jobMark = aiJob ? `  ·  ⏳ ${noteAiShort(aiJob)}` : '';
     meta.textContent = `${fmtDate(n.lastModified)}  ·  ${excerpt}${canvasMark}${audioMark}${offlineMark}${jobMark}`;
@@ -6019,12 +6594,14 @@ function renderCurrent() {
   if (n.unavailable) {
     // Online-only placeholder (e.g. Dropbox file not downloaded): show a notice
     // and keep the editor disabled so autosave can't overwrite the real file.
-    els.editor.value = 'This note is stored online-only and isn\'t available offline.\n\nConnect to the internet and let your sync service (e.g. Dropbox) download it, then reload the folder.';
+    els.editor.value = n.locked
+      ? 'This note is encrypted.\n\nUnlock the folder in Preferences > Encryption to read and edit it.'
+      : 'This note is stored online-only and isn\'t available offline.\n\nConnect to the internet and let your sync service (e.g. Dropbox) download it, then reload the folder.';
     prevEditorText = els.editor.value;
     els.editorWrap.style.display = 'flex';
     els.empty.style.display = 'none';
     setEditorEnabled(false);
-    els.saveState.textContent = 'online-only';
+    els.saveState.textContent = n.locked ? 'locked' : 'online-only';
     els.editorWrap.classList.remove('hasImage');
     dirty = false;
     resetUndoHistory();
@@ -6057,6 +6634,7 @@ async function openFolder() {
     await api.saveFolderPath(folderPath);
     setEnabled(true);
     updateFolderUI();
+    await ensureVaultUnlocked();
     await reloadNotes();
   } catch (err) {
     showBanner(`Could not open folder. ${String(err?.message || err)}`);
@@ -6068,6 +6646,7 @@ async function loadFolderFromPath(path) {
   folderPath = path;
   setEnabled(true);
   updateFolderUI();
+  await ensureVaultUnlocked();
   await reloadNotes();
 }
 
@@ -6204,6 +6783,7 @@ async function reloadNotes(preserveName = null) {
           size: file.size,
           lastModified: file.lastModified,
           unavailable: !!file.unavailable,
+          locked: !!file.locked,
           image: null,
           audio: null,
           canvas: null
@@ -6270,7 +6850,10 @@ async function reloadNotes(preserveName = null) {
     renderList();
     renderCurrent();
 
-    if (result.skippedCount > 0) {
+    const lockedCount = notes.filter(n => n.locked).length;
+    if (lockedCount > 0) {
+      showBanner('This folder is encrypted and locked. Unlock it in Preferences &gt; Encryption.');
+    } else if (result.skippedCount > 0) {
       showBanner(`${result.skippedCount} item(s) are online-only and unavailable offline. Reopen the folder once synced.`);
     }
 
@@ -7652,7 +8235,7 @@ applyPenSettings();
 els.canvasAddImageBtn.addEventListener('click', addImageFromDialog);
 els.canvasDeleteObjBtn.addEventListener('click', deleteSelectedObjects);
 els.canvasClearBtn.addEventListener('click', async () => {
-  const yes = await api.showConfirm('Clear entire canvas? This cannot be undone.');
+  const yes = await api.showConfirm('Clear entire canvas? This cannot be undone.', { title: 'Clear Canvas', okLabel: 'Clear' });
   if (yes) {
     clearCanvas();
     await saveCanvasState();
@@ -7940,6 +8523,7 @@ window.addEventListener('resize', () => {
 
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    if (vaultPwPending) { if (!vaultHwBusy) closeVaultPw(null); return; }
     if (miniCalIsOpen) { closeMiniCal(); return; }
     if (icImportIsOpen) { closeIcImportModal(); return; }
     if (exportIsOpen && !isExporting) { closeExportModal(); return; }
