@@ -34,6 +34,11 @@ const KEY_LEN = 32;
 const SALT_LEN = 16;
 const NOATFORMAT_DIR = '.noatformat';
 const VAULT_FILE = 'vault.json';
+// Present while a computer encrypts or decrypts the folder, so other computers
+// sharing it (network drive) hold their writes until it is done.
+const LOCK_FILE = 'vault.lock';
+const LOCK_STALE_MS = 2 * 60 * 1000;
+const LOCK_BEAT_MS = 30 * 1000;
 const PBKDF2_ITERATIONS = 600000;
 const MIN_PASSWORD_LEN = 8;
 const MIGRATE_TMP_SUFFIX = '.noatvault-tmp';
@@ -74,10 +79,12 @@ class KeyMismatchError extends Error {
 }
 
 // A migration is rewriting the folder; writes must wait so neither side
-// clobbers the other.
+// clobbers the other. host: the other computer doing it, if not this one.
 class BusyError extends Error {
-  constructor(p) {
-    super('Notes are being encrypted or decrypted - try again in a moment');
+  constructor(p, host) {
+    super(host
+      ? `Notes are being encrypted or decrypted on ${host} - try again in a moment`
+      : 'Notes are being encrypted or decrypted - try again in a moment');
     this.code = 'VAULT_BUSY';
     this.path = p;
   }
@@ -203,8 +210,68 @@ function slotKek(type, secret, salt) {
 function writeVaultFile(root, vault) {
   const p = vaultFilePath(root);
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p + '.tmp', JSON.stringify(vault, null, 2), 'utf8');
-  fs.renameSync(p + '.tmp', p);
+  replaceFileSync(p, Buffer.from(JSON.stringify(vault, null, 2), 'utf8'));
+}
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// Write bytes to a uniquely named temp file next to p, then rename it over p,
+// so a reader on another computer sees either the old or the new file, never
+// half of one. A rename blocked by a reader (Windows sharing violation) is
+// retried briefly, then the bytes are written in place instead.
+function replaceFileSync(p, bytes) {
+  const tmp = `${p}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  fs.writeFileSync(tmp, bytes);
+  for (let i = 0; ; i++) {
+    try {
+      fs.renameSync(tmp, p);
+      return;
+    } catch (e) {
+      const busy = e && (e.code === 'EPERM' || e.code === 'EBUSY' || e.code === 'EACCES');
+      if (busy && i < 4) { sleepSync(25 * (i + 1)); continue; }
+      try {
+        if (!busy) throw e;
+        fs.writeFileSync(p, bytes);
+      } finally {
+        try { fs.unlinkSync(tmp); } catch (_e) {}
+      }
+      return;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-computer migration lock (.noatformat/vault.lock)
+
+function lockFilePath(root) {
+  return path.join(root, NOATFORMAT_DIR, LOCK_FILE);
+}
+
+// The lock of another computer (or another app instance) that is still being
+// refreshed, or null.
+function readForeignLock(root) {
+  try {
+    const l = JSON.parse(fs.readFileSync(lockFilePath(root), 'utf8'));
+    if (!l || (l.host === os.hostname() && l.pid === process.pid)) return null;
+    if (!(Date.now() - Number(l.at) < LOCK_STALE_MS)) return null; // stale: its owner died
+    return l;
+  } catch (_e) {
+    return null;
+  }
+}
+
+function writeOwnLock(root) {
+  fs.mkdirSync(path.join(root, NOATFORMAT_DIR), { recursive: true });
+  fs.writeFileSync(lockFilePath(root), JSON.stringify({ host: os.hostname(), pid: process.pid, at: Date.now() }), 'utf8');
+}
+
+function removeOwnLock(root) {
+  try {
+    const l = JSON.parse(fs.readFileSync(lockFilePath(root), 'utf8'));
+    if (l && l.host === os.hostname() && l.pid === process.pid) fs.unlinkSync(lockFilePath(root));
+  } catch (_e) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -465,6 +532,8 @@ function encodeWrite(p, data, encoding) {
   const vr = findVaultRoot(path.dirname(path.resolve(String(p))), true);
   if (!vr) return buf;
   if (migrating.has(norm(vr))) throw new BusyError(p);
+  const foreign = readForeignLock(vr);
+  if (foreign) throw new BusyError(p, foreign.host || 'another computer');
   const key = keyForRoot(vr);
   if (!key) throw new LockedError(p);
   return encryptBuf(key, buf);
@@ -484,6 +553,13 @@ async function writeFile(p, data, encoding) {
 
 function writeFileSync(p, data, encoding) {
   fs.writeFileSync(p, encodeWrite(p, data, encoding));
+}
+
+// Like writeFileSync, but replaces the file in one step (temp + rename) so a
+// reader on another computer never sees it half written. Not for .txt notes:
+// replacing a file resets its creation time, which the calendar uses.
+function writeFileAtomicSync(p, data, encoding) {
+  replaceFileSync(p, encodeWrite(p, data, encoding));
 }
 
 // Copy src (any file, usually from outside the vault) to dest, encrypting it
@@ -581,7 +657,7 @@ function listOwnedFiles(root) {
         else if (!ent.name.startsWith('.')) walk(full, inSidecar);
       } else if (ent.isFile()) {
         if (ent.name.endsWith(MIGRATE_TMP_SUFFIX) || ent.name.endsWith(PARTIAL_SUFFIX) || ent.name.endsWith('.tmp')) continue;
-        if (inSidecar && ent.name === VAULT_FILE) continue;
+        if (inSidecar && (ent.name === VAULT_FILE || ent.name === LOCK_FILE)) continue;
         if (inSidecar || /\.txt$/i.test(ent.name)) out.push(full);
       }
     }
@@ -657,7 +733,12 @@ async function migrateFolder(root, mode, opts = {}) {
   if (!key) throw new LockedError(root);
   const nr = norm(vr);
   if (migrating.has(nr)) throw new BusyError(root);
+  const foreign = readForeignLock(vr);
+  if (foreign) throw new BusyError(root, foreign.host || 'another computer');
   migrating.add(nr);
+  writeOwnLock(vr);
+  const beat = setInterval(() => { try { writeOwnLock(vr); } catch (_e) {} }, LOCK_BEAT_MS);
+  if (beat.unref) beat.unref();
   try {
     const recovered = recoverInterrupted(vr);
     const files = listOwnedFiles(vr);
@@ -687,6 +768,8 @@ async function migrateFolder(root, mode, opts = {}) {
     }
     return result;
   } finally {
+    clearInterval(beat);
+    removeOwnLock(vr);
     migrating.delete(nr);
   }
 }
@@ -701,6 +784,7 @@ function listEncryptedFiles(root) {
 module.exports = {
   MAGIC,
   MIN_PASSWORD_LEN,
+  LOCK_FILE,
   LockedError,
   WrongPasswordError,
   WrongKeyError,
@@ -733,6 +817,7 @@ module.exports = {
   readFileSync,
   writeFile,
   writeFileSync,
+  writeFileAtomicSync,
   copyFileSync,
   fileIsEncryptedSync,
   getSessionTmpDir,

@@ -5,7 +5,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test vault.test.js hwkeys/yubikey.test.js",
+    "test": "node --test vault.test.js zipwriter.test.js hwkeys/yubikey.test.js",
     "yubikey-check": "electron hwkeys/yubikey-check.js",
     "postinstall": "npx @electron/rebuild",
     "build-win": "electron-builder --win",

@@ -329,4 +329,47 @@ test('migration: an interrupted in-place rewrite is finished on the next run', a
   assert.ok(!names.some(n => n.startsWith('Crash.txt.') && n.endsWith('.noatvault-tmp')));
 });
 
+test('another computer encrypting the folder holds writes here (vault.lock); a stale lock does not', async () => {
+  const root = tempRoot();
+  await vault.createVault(root, 'password');
+  const lockPath = path.join(root, '.noatformat', vault.LOCK_FILE);
+  const note = path.join(root, 'n.txt');
+
+  fs.writeFileSync(lockPath, JSON.stringify({ host: 'OTHER-PC', pid: 1, at: Date.now() }));
+  assert.throws(() => vault.writeFileSync(note, 'x'), (e) => e.code === 'VAULT_BUSY' && /OTHER-PC/.test(e.message));
+  await assert.rejects(vault.migrateFolder(root, 'encrypt'), { code: 'VAULT_BUSY' });
+  assert.ok(!fs.existsSync(note));
+
+  fs.writeFileSync(lockPath, JSON.stringify({ host: 'OTHER-PC', pid: 1, at: Date.now() - 10 * 60 * 1000 }));
+  vault.writeFileSync(note, 'written after the other computer died');
+  assert.strictEqual(vault.readFileSync(note, 'utf8'), 'written after the other computer died');
+
+  // Our own migration holds the lock while it runs, never encrypts it, and removes it.
+  fs.unlinkSync(lockPath);
+  let seen = null;
+  await vault.migrateFolder(root, 'encrypt', { onProgress: () => { if (!seen) seen = JSON.parse(fs.readFileSync(lockPath, 'utf8')); } });
+  assert.strictEqual(seen.pid, process.pid);
+  assert.strictEqual(seen.host, os.hostname());
+  assert.ok(!fs.existsSync(lockPath), 'lock removed afterwards');
+  assert.ok(!vault.listOwnedFiles(root).some(p => p.endsWith(vault.LOCK_FILE)));
+});
+
+test('atomic writes replace the file in one step and leave no temp files', async () => {
+  const root = tempRoot();
+  const plainFile = path.join(root, 'plain.format.json');
+  vault.writeFileAtomicSync(plainFile, '{"a":1}', 'utf8');
+  vault.writeFileAtomicSync(plainFile, '{"a":2}', 'utf8');
+  assert.strictEqual(fs.readFileSync(plainFile, 'utf8'), '{"a":2}');
+
+  const enc = tempRoot();
+  await vault.createVault(enc, 'password');
+  const encFile = path.join(enc, '.noatformat', 'n.canvas.json');
+  vault.writeFileAtomicSync(encFile, '{"objects":[]}', 'utf8');
+  assert.ok(vault.isEncrypted(fs.readFileSync(encFile)));
+  assert.strictEqual(vault.readFileSync(encFile, 'utf8'), '{"objects":[]}');
+  for (const dir of [root, path.join(enc, '.noatformat')]) {
+    assert.deepStrictEqual(fs.readdirSync(dir).filter(n => n.endsWith('.tmp')), [], dir);
+  }
+});
+
 test.after(() => vault.removeSessionTmpDir());

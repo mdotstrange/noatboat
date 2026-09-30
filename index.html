@@ -1533,6 +1533,14 @@
           <div class="prefHint" id="vaultMsg"></div>
         </div>
         <div class="prefItem" style="border-top:1px solid var(--border);padding-top:20px;margin-top:8px;">
+          <label class="prefLabel">Backup</label>
+          <div class="prefControl">
+            <button id="backupNotesBtn" class="btn">Backup Notes...</button>
+          </div>
+          <div class="prefHint">Saves a .zip copy of this notes folder and its subfolders, including drawings, images and recordings. Encrypted notes stay encrypted in the backup.</div>
+          <div class="prefHint" id="backupStatus" style="color:var(--text);"></div>
+        </div>
+        <div class="prefItem" style="border-top:1px solid var(--border);padding-top:20px;margin-top:8px;">
           <label class="prefLabel">IC Recorder Import</label>
           <div class="prefHint" style="margin-bottom:12px;">Transcribe Sony IC recorder memos with whisper.cpp and tidy them with DeepSeek (uses the DeepSeek key above)</div>
         </div>
@@ -1726,7 +1734,20 @@
 <script>
 'use strict';
 
-const api = window.electronAPI;
+let dialogDepth = 0;     // native dialogs open: the disk refresh waits for them
+let notesBusyDepth = 0;  // a note switch or folder reload is in progress
+const api = (() => {
+  const raw = window.electronAPI;
+  const wrapped = { ...raw };
+  for (const k of ['showConfirm', 'showPrompt', 'showAlert', 'showSaveDialog', 'openFolderDialog']) {
+    if (typeof raw[k] !== 'function') continue;
+    wrapped[k] = async (...args) => {
+      dialogDepth++;
+      try { return await raw[k](...args); } finally { dialogDepth--; }
+    };
+  }
+  return wrapped;
+})();
 
 const els = {
   openBtn: document.getElementById('openBtn'),
@@ -1811,6 +1832,8 @@ const els = {
   vaultAddTrezorBtn: document.getElementById('vaultAddTrezorBtn'),
   vaultTouchIdRow: document.getElementById('vaultTouchIdRow'),
   vaultTouchIdCheck: document.getElementById('vaultTouchIdCheck'),
+  backupNotesBtn: document.getElementById('backupNotesBtn'),
+  backupStatus: document.getElementById('backupStatus'),
   themeLightBtn: document.getElementById('themeLightBtn'),
   themeDarkBtn: document.getElementById('themeDarkBtn'),
   focusStrengthSlider: document.getElementById('focusStrengthSlider'),
@@ -2577,14 +2600,32 @@ async function saveCanvasState() {
   try {
     // Save JSON state
     const json = JSON.stringify(fabricCanvas.toJSON(['selectable', 'hasControls']));
-    await api.writeCanvasJson(jsonPath, json);
-    
-    // Save PNG preview
+    const cOpts = n.canvasDiskJson !== undefined
+      ? { expectText: n.canvasDiskJson, notePath: n.path, conflictNoteText: n.content ?? '' }
+      : {};
+    const cres = await api.writeCanvasJson(jsonPath, json, cOpts);
     const dataUrl = fabricCanvas.toDataURL({ format: 'png', quality: 0.9 });
+    if (cres && cres.conflict) {
+      // The drawing was changed on another computer: keep this one as its own note.
+      if (cres.conflictPngPath) await api.writeImageBuffer(cres.conflictPngPath, dataUrl);
+      n.canvasDiskJson = cres.diskText;
+      canvasDirty = false;
+      showBanner(`The drawing in "${escapeHtml(noteTitleFromName(n.name))}" was changed on another computer, so it now shows that version. Your drawing was saved as the note "${escapeHtml(noteTitleFromName(api.basename(cres.conflictNotePath)))}".`);
+      if (notes[currentIndex] === n) await loadCanvasState();
+      requestDiskRefresh();
+      return;
+    }
+    if (!cres || !cres.success) {
+      updateCanvasStatus('Save failed');
+      return; // still dirty: the next save retries
+    }
+    n.canvasDiskJson = json;
+
+    // Save PNG preview
     await api.writeImageBuffer(pngPath, dataUrl);
-    
+
     n.canvas = { jsonPath, pngPath };
-    canvasDirty = false;
+canvasDirty = false;
     updateCanvasStatus('Saved');
   } catch (err) {
     console.error('Failed to save canvas:', err);
@@ -2615,6 +2656,8 @@ async function loadCanvasState() {
 
   try {
     const result = await api.readCanvasJson(jsonPath);
+    // What a save may overwrite (null: no drawing file yet; undefined: unknown).
+    n.canvasDiskJson = result && result.success ? (result.data || null) : undefined;
     if (result.success && result.data) {
       // loadFromJSON replaces all content
       await new Promise((resolve) => {
@@ -3197,6 +3240,8 @@ function openPrefsModal() {
   updatePrefsUI();
   setVaultMsg('');
   refreshVaultInfo();
+  if (!backupBusy) els.backupStatus.textContent = '';
+  renderBackupPrefs();
 }
 
 function closePrefsModal() {
@@ -3550,7 +3595,7 @@ async function vaultEnable() {
   const ok = await api.showConfirm(
     `Encrypt every note in "${name}" and its subfolders?\n\n` +
     'If you forget this password your notes cannot be recovered.\n\n' +
-    'Every computer that syncs this folder must run this version of Noat Boat - older versions can damage encrypted notes.',
+    'Every computer that syncs this folder must run this version of Noat Boat - older versions can damage encrypted notes. Close Noat Boat on your other computers until encryption has finished.',
     { title: 'Encrypt Notes', okLabel: 'Encrypt' });
   if (!ok) return;
   await flushSaveIfNeeded();
@@ -3613,7 +3658,7 @@ async function vaultForget() {
 async function vaultDisable() {
   const r = await askVaultPassword({
     title: 'Turn Off Encryption',
-    message: 'Every file in this folder will be decrypted and stored as plain files again. Enter the password to confirm.',
+    message: 'Every file in this folder will be decrypted and stored as plain files again. Close Noat Boat on your other computers first. Enter the password to confirm.',
     okLabel: 'Decrypt',
     showRemember: false
   });
@@ -3644,6 +3689,57 @@ els.vaultDisableBtn.addEventListener('click', vaultDisable);
 els.vaultAddYubiBtn.addEventListener('click', () => vaultAddSlot('yubikey'));
 els.vaultAddTrezorBtn.addEventListener('click', () => vaultAddSlot('trezor'));
 els.vaultTouchIdCheck.addEventListener('change', () => vaultSetTouchId(els.vaultTouchIdCheck.checked));
+
+// --- Backup ---
+let backupBusy = false;
+
+function renderBackupPrefs() {
+  els.backupNotesBtn.disabled = backupBusy || !rootFolderPath;
+  if (!rootFolderPath && !backupBusy) els.backupStatus.textContent = 'Open a notes folder first';
+}
+
+function formatBackupSize(n) {
+  if (!(n >= 0)) return '';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+async function backupNotes() {
+  if (!rootFolderPath || backupBusy) return;
+  backupBusy = true;
+  renderBackupPrefs();
+  els.backupStatus.textContent = 'Saving open changes...';
+  let r;
+  try {
+    // The open note and canvas go in with their latest edits.
+    await flushSaveIfNeeded();
+    if (canvasDirty && fabricCanvas) await saveCanvasState();
+    els.backupStatus.textContent = 'Choose where to save the backup...';
+    r = await api.backupNotes(rootFolderPath);
+  } catch (e) {
+    r = { success: false, error: String(e?.message || e) };
+  }
+  backupBusy = false;
+  if (r && r.canceled) {
+    els.backupStatus.textContent = '';
+  } else if (r && r.success) {
+    let msg = `Saved backup: ${api.basename(r.path)} (${r.files} file${r.files === 1 ? '' : 's'}, ${formatBackupSize(r.size)}).`;
+    if (r.encrypted) msg += ' The notes in it are encrypted - you need the notes password to open them.';
+    if (r.skipped && r.skipped.length) msg += ` ${r.skipped.length} file(s) were left out (online-only or unreadable): ${r.skipped.slice(0, 3).join(', ')}${r.skipped.length > 3 ? ', ...' : ''}`;
+    els.backupStatus.textContent = msg;
+  } else {
+    els.backupStatus.textContent = `Backup failed: ${(r && r.error) || 'unknown error'}`;
+  }
+  renderBackupPrefs();
+}
+
+api.onBackupProgress((p) => {
+  if (!backupBusy || !p) return;
+  els.backupStatus.textContent = p.phase === 'scan' ? 'Looking for files...' : `Backing up ${p.done} / ${p.total}...`;
+});
+els.backupNotesBtn.addEventListener('click', backupNotes);
 
 // --- Export functions ---
 let exportIsOpen = false;
@@ -4140,6 +4236,7 @@ async function completeNoteAiJob(job, result) {
   const n = notes.find(x => noteAiKey(x.path) === noteAiKey(job.notePath));
   if (n) {
     n.content = result.text;
+    n.diskText = result.text;
     n.size = r.size;
     n.lastModified = r.lastModified;
   }
@@ -6743,7 +6840,100 @@ async function newFolder() {
   }
 }
 
+// Note objects (with their image/audio/canvas attachments) from a folder scan.
+function notesFromScan(result, baseFolder) {
+  const notes = [];
+  const attachments = new Map();
+  const audioAttachments = new Map();
+  const canvasAttachments = new Map();
+
+  for (const file of result.files) {
+    // Sidecar files may live in .noatformat or (legacy) next to the notes;
+    // the scan reports each file's real absolute path.
+    const filePath = file.path || api.joinPath(baseFolder, file.name);
+    if (file.type === 'text') {
+      notes.push({
+        name: file.name,
+        title: noteTitleFromName(file.name),
+        path: filePath,
+        content: file.content,
+        size: file.size,
+        lastModified: file.lastModified,
+        unavailable: !!file.unavailable,
+        locked: !!file.locked,
+        // Text as last read from disk: saves only overwrite this, so an edit made
+        // on another computer meanwhile is never silently replaced.
+        diskText: (file.unavailable || file.locked) ? undefined : (file.content ?? ''),
+        image: null,
+        audio: null,
+        canvas: null
+      });
+    } else if (file.type === 'image') {
+      const baseKey = attachmentBaseKeyFromName(file.name);
+      if (!baseKey) continue;
+      const prev = attachments.get(baseKey);
+      if (!prev || file.lastModified > prev.lastModified) {
+        attachments.set(baseKey, {
+          name: file.name,
+          path: filePath,
+          lastModified: file.lastModified,
+          size: file.size,
+          unavailable: !!file.unavailable
+        });
+      }
+    } else if (file.type === 'audio') {
+      const baseKey = audioBaseKeyFromName(file.name);
+      if (!baseKey) continue;
+      const prev = audioAttachments.get(baseKey);
+      if (!prev || file.lastModified > prev.lastModified) {
+        audioAttachments.set(baseKey, {
+          name: file.name,
+          path: filePath,
+          lastModified: file.lastModified,
+          size: file.size,
+          unavailable: !!file.unavailable
+        });
+      }
+    } else if (file.type === 'canvas') {
+      // Canvas JSON files are named like "NoteName.canvas.json"
+      const baseKey = file.name.toLowerCase().replace('.canvas.json', '');
+      const prev = canvasAttachments.get(baseKey);
+      if (!prev || file.lastModified > prev.lastModified) {
+        canvasAttachments.set(baseKey, {
+          name: file.name,
+          jsonPath: filePath,
+          pngPath: file.pngPath || filePath.replace(/\.canvas\.json$/i, '.canvas.png'),
+          pngSize: file.pngSize ?? null,
+          lastModified: file.lastModified,
+          unavailable: !!file.unavailable
+        });
+      }
+    }
+  }
+
+  for (const n of notes) {
+    const baseKey = noteTitleFromName(n.name).toLowerCase();
+    const att = attachments.get(baseKey);
+    if (att) n.image = att;
+    const audioAtt = audioAttachments.get(baseKey);
+    if (audioAtt) n.audio = audioAtt;
+    const canvasAtt = canvasAttachments.get(baseKey);
+    if (canvasAtt) n.canvas = canvasAtt;
+  }
+  return notes;
+}
+
 async function reloadNotes(preserveName = null) {
+  notesBusyDepth++;
+  try {
+    return await reloadNotesNow(preserveName);
+  } finally {
+    notesBusyDepth--;
+    lastDiskRefresh = Date.now();
+  }
+}
+
+async function reloadNotesNow(preserveName = null) {
   if (!folderPath) return;
 
   const q = els.searchInput.value || '';
@@ -6766,80 +6956,7 @@ async function reloadNotes(preserveName = null) {
       subfolders = result.folders;
     }
 
-    const attachments = new Map();
-    const audioAttachments = new Map();
-    const canvasAttachments = new Map();
-
-    for (const file of result.files) {
-      // Sidecar files may live in .noatformat or (legacy) next to the notes;
-      // the scan reports each file's real absolute path.
-      const filePath = file.path || api.joinPath(folderPath, file.name);
-      if (file.type === 'text') {
-        notes.push({
-          name: file.name,
-          title: noteTitleFromName(file.name),
-          path: filePath,
-          content: file.content,
-          size: file.size,
-          lastModified: file.lastModified,
-          unavailable: !!file.unavailable,
-          locked: !!file.locked,
-          image: null,
-          audio: null,
-          canvas: null
-        });
-      } else if (file.type === 'image') {
-        const baseKey = attachmentBaseKeyFromName(file.name);
-        if (!baseKey) continue;
-        const prev = attachments.get(baseKey);
-        if (!prev || file.lastModified > prev.lastModified) {
-          attachments.set(baseKey, {
-            name: file.name,
-            path: filePath,
-            lastModified: file.lastModified,
-            size: file.size,
-            unavailable: !!file.unavailable
-          });
-        }
-      } else if (file.type === 'audio') {
-        const baseKey = audioBaseKeyFromName(file.name);
-        if (!baseKey) continue;
-        const prev = audioAttachments.get(baseKey);
-        if (!prev || file.lastModified > prev.lastModified) {
-          audioAttachments.set(baseKey, {
-            name: file.name,
-            path: filePath,
-            lastModified: file.lastModified,
-            size: file.size,
-            unavailable: !!file.unavailable
-          });
-        }
-      } else if (file.type === 'canvas') {
-        // Canvas JSON files are named like "NoteName.canvas.json"
-        const baseKey = file.name.toLowerCase().replace('.canvas.json', '');
-        const prev = canvasAttachments.get(baseKey);
-        if (!prev || file.lastModified > prev.lastModified) {
-          canvasAttachments.set(baseKey, {
-            name: file.name,
-            jsonPath: filePath,
-            pngPath: file.pngPath || filePath.replace(/\.canvas\.json$/i, '.canvas.png'),
-            pngSize: file.pngSize ?? null,
-            lastModified: file.lastModified,
-            unavailable: !!file.unavailable
-          });
-        }
-      }
-    }
-
-    for (const n of notes) {
-      const baseKey = noteTitleFromName(n.name).toLowerCase();
-      const att = attachments.get(baseKey);
-      if (att) n.image = att;
-      const audioAtt = audioAttachments.get(baseKey);
-      if (audioAtt) n.audio = audioAtt;
-      const canvasAtt = canvasAttachments.get(baseKey);
-      if (canvasAtt) n.canvas = canvasAtt;
-    }
+    notes = notesFromScan(result, folderPath);
 
     if (preserveName) {
       const idx = notes.findIndex(n => n.name.toLowerCase() === String(preserveName).toLowerCase());
@@ -6955,10 +7072,18 @@ async function autoDeleteEmptyNote(noteIndex, editorContent = null) {
     console.log('[AutoDelete] Note not empty on double-check, aborting');
     return;
   }
-  
+
+  // Another computer sharing the folder may have written to this note since
+  // it was loaded here: check what is on disk before deleting anything.
+  if (await noteHasContentOnDisk(n)) {
+    console.log('[AutoDelete] Note has content on disk (another computer?), keeping it');
+    requestDiskRefresh();
+    return;
+  }
+
   try {
     console.log('[AutoDelete] Deleting file:', n.path);
-    // Delete the note file silently
+// Delete the note file silently
     await api.deleteFile(n.path);
     
     // Delete any orphaned canvas files just in case
@@ -7718,6 +7843,16 @@ function renderMiniCal() {
 }
 
 async function openNoteByIndex(idx, opts = {}) {
+  notesBusyDepth++;
+  try {
+    return await openNoteByIndexNow(idx, opts);
+  } finally {
+    notesBusyDepth--;
+    checkOpenNoteOnDisk(); // another computer may have changed it since the last scan
+  }
+}
+
+async function openNoteByIndexNow(idx, opts = {}) {
   const { focusEditor = true, focusMode = true, keepListNav = false, searchQuery = '' } = (opts || {});
   if (idx == null || !notes[idx]) return;
   closeLightbox();
@@ -7811,7 +7946,12 @@ async function saveCurrentNow() {
 
   try {
     if (dirty) {
-      const result = await api.writeFile(n.path, n.content ?? '');
+      const content = n.content ?? '';
+      const result = await api.writeFile(n.path, content, typeof n.diskText === 'string' ? { expectText: n.diskText } : {});
+      if (result && result.conflict) {
+        await takeDiskVersionAfterConflict(n, result);
+        return;
+      }
       if (!result.success) {
         els.saveState.textContent = 'save failed';
         showBanner(`Save failed. ${result.error}`);
@@ -7819,7 +7959,9 @@ async function saveCurrentNow() {
       }
       n.size = result.size;
       n.lastModified = result.lastModified;
-      dirty = false;
+      n.diskText = content;
+      // Typing during the write leaves the note dirty so the next save picks it up.
+      if ((n.content ?? '') === content) dirty = false;
     }
     if (formatDirty) {
       await saveFormatSpans();
@@ -7896,7 +8038,12 @@ async function newNote() {
   try {
     await flushSaveIfNeeded();
     const notePath = api.joinPath(folderPath, name);
-    const result = await api.writeFile(notePath, '');
+    const result = await api.writeFile(notePath, '', { expectText: null });
+    if (result && result.conflict) {
+      // Another computer just created a note with this name: open that one.
+      await reloadNotes(name);
+      return;
+    }
     if (!result.success) {
       showBanner(`Could not create note. ${result.error}`);
       return;
@@ -7907,6 +8054,7 @@ async function newNote() {
       title: noteTitleFromName(name),
       path: notePath,
       content: '',
+      diskText: '',
       size: result.size,
       lastModified: result.lastModified,
       image: null,
@@ -8715,6 +8863,217 @@ window.addEventListener('blur', () => {
     saveCanvasState();
   }
 });
+
+// ---- Another computer may be editing the same folder (network drive) ----
+// Nothing notifies this window of changes made elsewhere, so: the open note
+// is checked (size/date, then text) every few seconds and when the window
+// comes back; the note list is rescanned lightly now and then. Saves carry the
+// text they expect to replace (see saveCurrentNow), so a change that slips
+// through becomes a conflict copy instead of being overwritten.
+const DISK_CHECK_MS = 15000;
+const DISK_REFRESH_MS = 60000;
+const DISK_REFRESH_ON_FOCUS_MS = 10000;
+let lastDiskRefresh = 0;
+let diskRefreshRunning = false;
+let diskCheckRunning = false;
+let diskCheckAgain = false; // a check was asked for while one was running
+
+function notesBusy() {
+  return notesBusyDepth > 0 || dialogDepth > 0 || isSaving || vaultBusy || backupBusy || !!vaultPwPending;
+}
+
+function requestDiskRefresh() {
+  lastDiskRefresh = 0;
+  setTimeout(() => refreshNotesFromDisk(), 0);
+}
+
+// Show text from disk in the editor, keeping the caret roughly in place.
+function applyDiskTextToEditor(text) {
+  const pos = Math.min(els.editor.selectionStart || 0, text.length);
+  els.editor.value = text;
+  prevEditorText = text;
+  try { els.editor.setSelectionRange(pos, pos); } catch (_e) {}
+  resetDirtyRegion();
+  resetUndoHistory();
+  renderEditorOverlay();
+}
+
+// A save found the note changed on another computer. Main kept this window's
+// text as a conflict copy (when there was any); show the disk version.
+async function takeDiskVersionAfterConflict(n, r) {
+  const text = r.diskText ?? '';
+  n.content = text;
+  n.diskText = text;
+  if (r.lastModified) n.lastModified = r.lastModified;
+  if (r.size != null) n.size = r.size;
+  if (notes[currentIndex] === n) {
+    dirty = false;
+    applyDiskTextToEditor(text);
+    await loadFormatSpans();
+    renderEditorOverlay();
+  }
+  els.saveState.textContent = 'changed on another computer';
+  if (r.conflictPath) {
+    showBanner(`"${escapeHtml(noteTitleFromName(n.name))}" was changed on another computer, so it now shows that version. What you typed here was saved as the note "${escapeHtml(noteTitleFromName(api.basename(r.conflictPath)))}".`);
+  }
+  requestDiskRefresh();
+}
+
+// Pick up an edit made on another computer to the open note (only while it
+// has no unsaved changes here).
+async function checkOpenNoteOnDisk() {
+  if (diskCheckRunning) { diskCheckAgain = true; return; }
+  if (currentIndex == null) return;
+  const n = notes[currentIndex];
+  if (!n || n.unavailable || typeof n.diskText !== 'string') return;
+  if (dirty || formatDirty || notesBusy()) return;
+  diskCheckRunning = true;
+  try {
+    const st = await api.noteDiskState(n.path);
+    if (!st || !st.exists) return;
+    if (st.lastModified === n.lastModified && st.size === n.size) return;
+    const r = await api.readFile(n.path);
+    if (!r || !r.success) return;
+    if (notes[currentIndex] !== n || dirty || formatDirty || notesBusy()) return;
+    n.lastModified = r.lastModified ?? st.lastModified;
+    n.size = r.size ?? st.size;
+    if (r.content === n.diskText) return;
+    n.content = r.content;
+    n.diskText = r.content;
+    applyDiskTextToEditor(r.content);
+    await loadFormatSpans();
+    renderEditorOverlay();
+    renderList();
+    flashSaveState('updated from another computer');
+  } catch (_e) {
+  } finally {
+    diskCheckRunning = false;
+    if (diskCheckAgain) { diskCheckAgain = false; setTimeout(checkOpenNoteOnDisk, 0); }
+  }
+}
+
+// Is there text, an image, audio or a drawing on disk for this note now?
+async function noteHasContentOnDisk(n) {
+  try {
+    const disk = await api.noteDiskContent(n.path);
+    if (!disk || !disk.exists) return false;
+    if (disk.unreadable || (disk.text || '').trim()) {
+      if (!disk.unreadable) { n.content = disk.text; n.diskText = disk.text; }
+      return true;
+    }
+    if (disk.attachments.some(a => a.kind === 'image' || a.kind === 'audio')) return true;
+    for (const a of disk.attachments.filter(x => x.kind === 'canvas')) {
+      const c = await api.readCanvasJson(a.path);
+      try {
+        const data = c && c.success && c.data ? JSON.parse(c.data) : null;
+        if (data && Array.isArray(data.objects) && data.objects.length) return true;
+      } catch (_e) {
+        return true; // unreadable drawing: keep the note
+      }
+    }
+    return false;
+  } catch (_e) {
+    return true; // can't tell: keep the note
+  }
+}
+
+// Merge a light rescan into the note list: new notes appear, notes deleted
+// elsewhere disappear (except the open one), and notes changed elsewhere get
+// their new text. Unsaved edits here are never replaced.
+async function refreshNotesFromDisk({ minAgeMs = DISK_REFRESH_MS } = {}) {
+  if (!folderPath || diskRefreshRunning || notesBusy()) return;
+  if (Date.now() - lastDiskRefresh < minAgeMs) return;
+  diskRefreshRunning = true;
+  lastDiskRefresh = Date.now();
+  const scanned = folderPath;
+  try {
+    const result = await api.readFolder(scanned, { readContent: false });
+    if (!result || !result.success || folderPath !== scanned) return;
+    const fresh = notesFromScan(result, scanned);
+    const oldByKey = new Map(notes.map(x => [noteAiKey(x.path), x]));
+
+    // Read the notes that are new, changed or no longer unavailable.
+    const texts = new Map();
+    for (const f of fresh) {
+      if (f.unavailable || f.locked) continue;
+      const old = oldByKey.get(noteAiKey(f.path));
+      if (old && old === notes[currentIndex]) continue; // the open note: checkOpenNoteOnDisk
+      if (old && !old.unavailable && old.lastModified === f.lastModified && old.size === f.size) continue;
+      const r = await api.readFile(f.path);
+      if (r && r.success) texts.set(noteAiKey(f.path), r.content);
+    }
+    if (folderPath !== scanned || notesBusy()) return;
+
+    const current = currentIndex != null ? notes[currentIndex] : null;
+    const merged = [];
+    let changed = false;
+    for (const f of fresh) {
+      const key = noteAiKey(f.path);
+      const old = oldByKey.get(key);
+      oldByKey.delete(key);
+      const text = texts.get(key);
+      if (!old) {
+        if (!(f.unavailable || f.locked)) {
+          if (text === undefined) continue; // unreadable right now: next round
+          f.content = text;
+          f.diskText = text;
+        }
+        merged.push(f);
+        changed = true;
+        continue;
+      }
+      if (old !== current) {
+        if (text !== undefined && (old.content === old.diskText || old.unavailable)) {
+          if (old.content !== text || old.unavailable) changed = true;
+          old.content = text;
+          old.diskText = text;
+          old.unavailable = false;
+          old.locked = false;
+          old.lastModified = f.lastModified;
+          old.size = f.size;
+        } else if ((f.unavailable || f.locked) && !old.unavailable) {
+          old.unavailable = f.unavailable;
+          old.locked = f.locked;
+          changed = true;
+        }
+        if ((old.image && old.image.path) !== (f.image && f.image.path) ||
+            (old.audio && old.audio.path) !== (f.audio && f.audio.path) ||
+            (old.canvas && old.canvas.jsonPath) !== (f.canvas && f.canvas.jsonPath)) changed = true;
+        old.image = f.image;
+        old.audio = f.audio;
+        old.canvas = f.canvas;
+      }
+      merged.push(old);
+    }
+    let currentGone = false;
+    for (const old of oldByKey.values()) {
+      if (old === current) { merged.push(old); currentGone = true; } else changed = true;
+    }
+    const foldersChanged = JSON.stringify(result.folders || []) !== JSON.stringify(subfolders || []);
+    notes = merged;
+    currentIndex = current ? notes.indexOf(current) : null;
+    if (currentIndex === -1) currentIndex = null;
+    if (result.folders) subfolders = result.folders;
+    if (changed || foldersChanged) renderList();
+    if (currentGone && !current.goneWarned) {
+      current.goneWarned = true;
+      showBanner(`"${escapeHtml(noteTitleFromName(current.name))}" was deleted or renamed on another computer. It stays open here; typing in it saves it again.`);
+    }
+  } catch (_e) {
+  } finally {
+    diskRefreshRunning = false;
+  }
+  checkOpenNoteOnDisk();
+}
+
+function diskTick(minAgeMs) {
+  if (document.hidden) return;
+  checkOpenNoteOnDisk();
+  refreshNotesFromDisk({ minAgeMs });
+}
+setInterval(() => diskTick(DISK_REFRESH_MS), DISK_CHECK_MS);
+window.addEventListener('focus', () => diskTick(DISK_REFRESH_ON_FOCUS_MS));
+document.addEventListener('visibilitychange', () => { if (!document.hidden) diskTick(DISK_REFRESH_ON_FOCUS_MS); });
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
