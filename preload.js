@@ -6,12 +6,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getSavedFolder: () => ipcRenderer.invoke('get-saved-folder'),
   saveFolderPath: (folderPath) => ipcRenderer.invoke('save-folder-path', folderPath),
   openFolderDialog: () => ipcRenderer.invoke('open-folder-dialog'),
-  readFolder: (folderPath) => ipcRenderer.invoke('read-folder', folderPath),
+  readFolder: (folderPath, opts) => ipcRenderer.invoke('read-folder', folderPath, opts || {}),
   calendarScan: (rootPath) => ipcRenderer.invoke('calendar-scan', rootPath),
   
   // File operations
   readFile: (filePath) => ipcRenderer.invoke('read-file', filePath),
-  writeFile: (filePath, content) => ipcRenderer.invoke('write-file', filePath, content),
+  writeFile: (filePath, content, opts) => ipcRenderer.invoke('write-file', filePath, content, opts || {}),
+  noteDiskState: (filePath) => ipcRenderer.invoke('note-disk-state', filePath),
+  noteDiskContent: (notePath) => ipcRenderer.invoke('note-disk-content', notePath),
   deleteFile: (filePath) => ipcRenderer.invoke('delete-file', filePath),
   moveNote: (srcFolder, baseName, destFolder) => ipcRenderer.invoke('move-note', srcFolder, baseName, destFolder),
   fileExists: (filePath) => ipcRenderer.invoke('file-exists', filePath),
@@ -35,7 +37,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Canvas operations
   readCanvasJson: (filePath) => ipcRenderer.invoke('read-canvas-json', filePath),
-  writeCanvasJson: (filePath, jsonData) => ipcRenderer.invoke('write-canvas-json', filePath, jsonData),
+  writeCanvasJson: (filePath, jsonData, opts) => ipcRenderer.invoke('write-canvas-json', filePath, jsonData, opts || {}),
   deleteCanvasFiles: (basePath) => ipcRenderer.invoke('delete-canvas-files', basePath),
   
   // Preferences
@@ -84,6 +86,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   showConfirm: (message, opts) => ipcRenderer.invoke('show-confirm', message, opts || {}),
   showAlert: (message) => ipcRenderer.invoke('show-alert', message),
   showSaveDialog: (options) => ipcRenderer.invoke('show-save-dialog', options),
+
+  // Backup
+  backupNotes: (folder) => ipcRenderer.invoke('backup-notes', folder),
+  onBackupProgress: (callback) => ipcRenderer.on('backup-progress', (_event, payload) => callback(payload)),
   
   // Export operations
   exportPdf: (savePath, notesData, isDark) => ipcRenderer.invoke('export-pdf', savePath, notesData, isDark),

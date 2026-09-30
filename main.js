@@ -12,6 +12,7 @@ const { spawn } = require('child_process');
 const { pathToFileURL } = require('url');
 const crypto = require('crypto');
 const vault = require('./vault');
+const zipwriter = require('./zipwriter');
 const yubikey = require('./hwkeys/yubikey');
 const trezor = require('./hwkeys/trezor');
 
@@ -1091,7 +1092,7 @@ async function scanFolder(folderPath, opts = {}) {
           }
           // A dataless read triggers a download, so give it the longer timeout.
           const content = readContent
-            ? await withTimeout(vault.readFile(fullPath, 'utf8'), dataless ? LAZY_READ_TIMEOUT_MS : FILE_OP_TIMEOUT_MS, entry.name)
+            ? await withTimeout(readNoteStable(fullPath), dataless ? LAZY_READ_TIMEOUT_MS : FILE_OP_TIMEOUT_MS, entry.name)
             : '';
           return {
             kind: 'file',
@@ -1253,10 +1254,12 @@ async function scanFolder(folderPath, opts = {}) {
   }
 }
 
-ipcMain.handle('read-folder', async (event, folderPath) => {
+// opts.readContent:false skips note contents (the periodic refresh reads only
+// the notes whose size or date changed).
+ipcMain.handle('read-folder', async (event, folderPath, opts) => {
   try {
     vault.invalidate(); // pick up a vault.json that synced in from elsewhere
-    const r = await scanFolder(folderPath);
+    const r = await scanFolder(folderPath, { readContent: !(opts && opts.readContent === false) });
     return { success: true, files: r.files, folders: r.folders, skippedCount: r.skippedCount };
   } catch (e) {
     return { success: false, error: e.message };
@@ -1330,22 +1333,142 @@ ipcMain.handle('read-file', async (event, filePath) => {
     if (isDatalessPlaceholder(stats) && isNetworkOffline()) {
       return { success: false, unavailable: true, error: 'File is online-only and not available offline' };
     }
-    const content = await withTimeout(vault.readFile(filePath, 'utf8'), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
-    return { success: true, content: content };
+    const content = await withTimeout(readNoteStable(filePath), LAZY_READ_TIMEOUT_MS, path.basename(filePath));
+    return { success: true, content: content, lastModified: stats.mtimeMs, size: stats.size };
   } catch (e) {
     return { success: false, locked: e.code === 'VAULT_LOCKED' || undefined, error: e.message };
   }
 });
 
-// Write a text file
-ipcMain.handle('write-file', async (event, filePath, content) => {
+// ---- Sharing one notes folder between computers (network drive) ----
+// Nothing coordinates two Noat Boat windows on different computers, so every
+// save says what it expects to replace and backs off when the file changed.
+
+const sleepMs = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Read a note as text, retrying when it looks mid-write (another computer
+// saving it right now): its size or date moved during the read, or an
+// encrypted note failed to decrypt. The last attempt returns what it read.
+async function readNoteStable(p) {
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt) await sleepMs(150 * attempt);
+    const before = await fsp.stat(p); // ENOENT propagates
+    let text;
+    try {
+      text = await vault.readFile(p, 'utf8');
+    } catch (e) {
+      if (e.code === 'VAULT_LOCKED' || e.code === 'ENOENT') throw e;
+      lastErr = e;
+      continue;
+    }
+    let after = null;
+    try { after = await fsp.stat(p); } catch (_e) {}
+    if (attempt === 2 || (after && after.size === before.size && after.mtimeMs === before.mtimeMs)) return text;
+  }
+  throw lastErr || new Error('The note kept changing while it was read');
+}
+
+function safeHostName() {
+  return (os.hostname() || 'another computer').replace(/[\\/:*?"<>|]/g, '_');
+}
+
+// A free "<name> (conflict from <this computer> <date time>).<ext>" next to filePath.
+function conflictCopyPath(filePath) {
+  const dir = path.dirname(filePath);
+  const ext = path.extname(filePath);
+  const base = path.basename(filePath, ext);
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}${pad(d.getMinutes())}`;
+  let candidate = path.join(dir, `${base} (conflict from ${safeHostName()} ${stamp})${ext}`);
+  for (let i = 2; fs.existsSync(candidate); i++) {
+    candidate = path.join(dir, `${base} (conflict from ${safeHostName()} ${stamp} ${i})${ext}`);
+  }
+  return candidate;
+}
+
+// Current text of filePath, or null when it does not exist.
+async function readTextOrNull(filePath, reader) {
   try {
-    vault.writeFileSync(filePath, content, 'utf8');
+    return await reader(filePath);
+  } catch (e) {
+    if (e && e.code === 'ENOENT') return null;
+    throw e;
+  }
+}
+
+// Did the file change since this window last saw it? expect: the text it last
+// read or wrote, or null for "it did not exist". A string expectation with the
+// file now missing is not a conflict: saving just recreates it.
+function changedSince(expect, disk) {
+  return expect === null ? disk !== null : (disk !== null && disk !== expect);
+}
+
+// Write a text file.
+// opts.expectText: the text this window last read or wrote (null: the file
+// must not exist yet). When the file was changed on another computer since,
+// nothing is overwritten: this text is kept as a conflict copy next to it and
+// the current disk text is returned, so the window can show it.
+ipcMain.handle('write-file', async (event, filePath, content, opts) => {
+  try {
+    const o = opts || {};
+    const text = String(content == null ? '' : content);
+    if (o.expectText !== undefined) {
+      const disk = await readTextOrNull(filePath, readNoteStable);
+      if (changedSince(o.expectText, disk) && disk !== text) {
+        let conflictPath = null;
+        if (text.trim()) {
+          conflictPath = conflictCopyPath(filePath);
+          vault.writeFileSync(conflictPath, text, 'utf8');
+        }
+        const st = fs.statSync(filePath);
+        return { success: false, conflict: true, conflictPath, diskText: disk, lastModified: st.mtimeMs, size: st.size };
+      }
+    }
+    vault.writeFileSync(filePath, text, 'utf8');
     const stats = fs.statSync(filePath);
     return { success: true, lastModified: stats.mtimeMs, size: stats.size };
   } catch (e) {
-    return { success: false, locked: e.code === 'VAULT_LOCKED' || undefined, error: e.message };
+    return { success: false, locked: e.code === 'VAULT_LOCKED' || undefined, busy: e.code === 'VAULT_BUSY' || undefined, error: e.message };
   }
+});
+
+// Size and date of a note, to notice cheaply that another computer changed it.
+ipcMain.handle('note-disk-state', async (event, filePath) => {
+  try {
+    const st = await fsp.stat(filePath);
+    return { exists: true, lastModified: st.mtimeMs, size: st.size };
+  } catch (_e) {
+    return { exists: false };
+  }
+});
+
+// What is on disk for a note right now: its text and any image, audio or
+// drawing files, wherever they live (.noatformat or next to the note). Used
+// before deleting a note that looks empty here, in case another computer has
+// filled it meanwhile.
+ipcMain.handle('note-disk-content', async (event, notePath) => {
+  const out = { exists: false, text: '', unreadable: false, attachments: [] };
+  try {
+    out.text = await readNoteStable(notePath);
+    out.exists = true;
+  } catch (e) {
+    if (e && e.code !== 'ENOENT') { out.exists = true; out.unreadable = true; }
+  }
+  const dir = path.dirname(notePath);
+  const baseKey = path.basename(notePath).replace(/\.txt$/i, '').toLowerCase();
+  for (const d of [dir, path.join(dir, NOATFORMAT_DIR)]) {
+    let names = [];
+    try { names = await fsp.readdir(d); } catch (_e) { continue; }
+    for (const name of names) {
+      const info = sidecarInfo(name);
+      if (info && info.baseKey === baseKey && info.kind !== 'canvasPng') {
+        out.attachments.push({ kind: info.kind, path: path.join(d, name) });
+      }
+    }
+  }
+  return out;
 });
 
 // Send a note to Uberector's inbox. Written as .tmp then renamed:
@@ -2138,9 +2261,7 @@ function loadIcLedger(ledgerPath) {
 
 function saveIcLedger(ledgerPath, ledger) {
   fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
-  const tmp = ledgerPath + '.tmp';
-  vault.writeFileSync(tmp, JSON.stringify(ledger, null, 2), 'utf8');
-  fs.renameSync(tmp, ledgerPath);
+  vault.writeFileAtomicSync(ledgerPath, JSON.stringify(ledger, null, 2), 'utf8');
 }
 
 function icImportKey(rec) {
@@ -2906,7 +3027,7 @@ ipcMain.handle('ic-import-run', async (event, opts) => {
 
         vault.writeFileSync(path.join(o.icNotesFolder, noteName), text, 'utf8');
         const icSource = { name: rec.name, size: rec.size, mtime: rec.mtimeMs, recordedAt, folder: rec.folder };
-        vault.writeFileSync(path.join(sidecarDir, `${noteBase}.format.json`), JSON.stringify({ spans, icSource }), 'utf8');
+        vault.writeFileAtomicSync(path.join(sidecarDir, `${noteBase}.format.json`), JSON.stringify({ spans, icSource }), 'utf8');
         vault.copyFileSync(rec.path, path.join(sidecarDir, `${noteBase}.mp3`));
 
         // Replace any stale entry for this recording (failed or deleted import).
@@ -3075,7 +3196,7 @@ ipcMain.handle('note-ai-write-result', async (event, opts) => {
       try { fs.unlinkSync(fmtPath); } catch (_e) {}
     } else {
       fs.mkdirSync(path.dirname(fmtPath), { recursive: true });
-      vault.writeFileSync(fmtPath, JSON.stringify(payload), 'utf8');
+      vault.writeFileAtomicSync(fmtPath, JSON.stringify(payload), 'utf8');
     }
     return { success: true, lastModified: st.mtimeMs, size: st.size };
   } catch (e) {
@@ -3204,15 +3325,38 @@ ipcMain.handle('read-canvas-json', async (event, filePath) => {
   }
 });
 
-// Write canvas JSON
-ipcMain.handle('write-canvas-json', async (event, filePath, jsonData) => {
+// Write canvas JSON (also used for .format.json sidecars). Replaced in one
+// step so another computer never reads half of it.
+// opts.expectText / opts.notePath / opts.conflictNoteText: when the drawing was
+// changed on another computer since this window loaded it, this window's
+// drawing is kept as a new note "<title> (conflict from ...)" holding
+// conflictNoteText, and the current disk JSON is returned.
+ipcMain.handle('write-canvas-json', async (event, filePath, jsonData, opts) => {
   try {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    vault.writeFileSync(filePath, jsonData, 'utf8');
+    const o = opts || {};
+    const json = String(jsonData);
+    if (o.expectText !== undefined && o.notePath) {
+      const disk = await readTextOrNull(filePath, (p) => vault.readFile(p, 'utf8'));
+      if (changedSince(o.expectText, disk) && disk !== json) {
+        const conflictNotePath = conflictCopyPath(o.notePath);
+        vault.writeFileSync(conflictNotePath, String(o.conflictNoteText || ''), 'utf8');
+        const cbase = path.basename(conflictNotePath).replace(/\.txt$/i, '');
+        vault.writeFileAtomicSync(path.join(path.dirname(filePath), `${cbase}.canvas.json`), json, 'utf8');
+        return {
+          success: false,
+          conflict: true,
+          diskText: disk,
+          conflictNotePath,
+          conflictPngPath: path.join(path.dirname(filePath), `${cbase}.canvas.png`)
+        };
+      }
+    }
+    vault.writeFileAtomicSync(filePath, json, 'utf8');
     const stats = fs.statSync(filePath);
     return { success: true, lastModified: stats.mtimeMs };
   } catch (e) {
-    return { success: false, error: e.message };
+    return { success: false, busy: e.code === 'VAULT_BUSY' || undefined, error: e.message };
   }
 });
 
@@ -3317,6 +3461,108 @@ ipcMain.handle('create-folder', async (event, folderPath) => {
     return { success: true };
   } catch (e) {
     return { success: false, error: e.message };
+  }
+});
+
+// ============ Backup ============
+// Zip the whole notes folder. Files are copied byte for byte, so an encrypted
+// folder stays encrypted in the backup; .noatformat/vault.json goes with it,
+// so unzipping and unlocking with the password restores everything.
+let backupRunning = false;
+
+function backupSkipDir(name) {
+  return name.startsWith('.') && name !== NOATFORMAT_DIR; // .git, .dropbox.cache, ...
+}
+
+function backupSkipFile(name) {
+  const lower = name.toLowerCase();
+  return name.startsWith('.') || lower === 'desktop.ini' || lower === 'thumbs.db' ||
+    lower.endsWith('.tmp') || lower.endsWith('.partial') || lower.endsWith('.noatvault-tmp');
+}
+
+// Files to back up under root, named "<FolderName>/<relative path>".
+// Online-only placeholders are skipped while offline (reading them would
+// stall); symlinks are not followed.
+async function listBackupEntries(root, excludePaths) {
+  const entries = [];
+  const skipped = [];
+  const offline = isNetworkOffline();
+  const top = path.basename(path.resolve(root)) || 'Notes';
+  const excluded = new Set(excludePaths.map(p => vaultConfigKey(p)));
+  const walk = async (dir, rel) => {
+    let items = [];
+    try { items = await fsp.readdir(dir, { withFileTypes: true }); } catch (_e) { return; }
+    for (const ent of items) {
+      const full = path.join(dir, ent.name);
+      const relName = rel ? `${rel}/${ent.name}` : ent.name;
+      if (ent.isSymbolicLink()) continue;
+      if (ent.isDirectory()) {
+        if (!backupSkipDir(ent.name)) await walk(full, relName);
+        continue;
+      }
+      if (!ent.isFile() || backupSkipFile(ent.name) || excluded.has(vaultConfigKey(full))) continue;
+      let st;
+      try {
+        st = await withTimeout(fsp.stat(full), FILE_OP_TIMEOUT_MS, ent.name);
+      } catch (e) {
+        skipped.push({ name: relName, error: String((e && e.message) || e) });
+        continue;
+      }
+      if (offline && isDatalessPlaceholder(st)) {
+        skipped.push({ name: relName, error: 'online-only' });
+        continue;
+      }
+      entries.push({ name: `${top}/${relName}`, path: full, mtime: st.mtime });
+    }
+  };
+  await walk(path.resolve(root), '');
+  return { entries, skipped };
+}
+
+function backupDefaultName(folder) {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const base = (path.basename(path.resolve(folder)) || 'Notes').replace(/[\\/:*?"<>|]/g, '_');
+  return `${base} backup ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}.zip`;
+}
+
+// Ask where to save, then zip folder there. Progress on 'backup-progress'.
+ipcMain.handle('backup-notes', async (event, folder) => {
+  if (backupRunning) return { success: false, error: 'A backup is already running' };
+  if (!folder || !isDirSync(folder)) return { success: false, error: 'Open a notes folder first' };
+  backupRunning = true;
+  try {
+    const pick = await dialog.showSaveDialog(mainWindow, {
+      title: 'Save Notes Backup',
+      defaultPath: path.join(app.getPath('documents'), backupDefaultName(folder)),
+      filters: [{ name: 'Zip archive', extensions: ['zip'] }]
+    });
+    if (pick.canceled || !pick.filePath) return { success: false, canceled: true };
+    let outPath = pick.filePath;
+    if (!/\.zip$/i.test(outPath)) outPath += '.zip';
+
+    const send = (p) => { try { event.sender.send('backup-progress', p); } catch (_e) {} };
+    send({ done: 0, total: 0, phase: 'scan' });
+    const { entries, skipped } = await listBackupEntries(folder, [outPath, outPath + zipwriter.PARTIAL_SUFFIX]);
+    if (!entries.length) return { success: false, error: 'There are no files to back up in this folder' };
+
+    const r = await zipwriter.writeZip(outPath, entries, {
+      onProgress: (p) => send({ done: p.done, total: p.total, phase: 'zip' })
+    });
+    vault.invalidate();
+    return {
+      success: true,
+      path: outPath,
+      files: r.files,
+      bytes: r.bytes,
+      size: r.size,
+      skipped: [...skipped, ...r.skipped].map(s => s.name),
+      encrypted: vault.status(folder).state !== 'off'
+    };
+  } catch (e) {
+    return { success: false, error: String((e && e.message) || e) };
+  } finally {
+    backupRunning = false;
   }
 });
 
