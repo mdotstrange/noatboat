@@ -818,6 +818,7 @@ module.exports = {
   writeFile,
   writeFileSync,
   writeFileAtomicSync,
+  replaceFileSync,
   copyFileSync,
   fileIsEncryptedSync,
   getSessionTmpDir,

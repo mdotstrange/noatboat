@@ -3,7 +3,7 @@
 // Must be set before the threadpool is first used.
 process.env.UV_THREADPOOL_SIZE = process.env.UV_THREADPOOL_SIZE || '16';
 
-const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, shell, net, protocol, safeStorage, systemPreferences } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, nativeImage, Menu, shell, net, protocol, safeStorage, systemPreferences, utilityProcess } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os'); // Added for temp file handling
@@ -13,6 +13,8 @@ const { pathToFileURL } = require('url');
 const crypto = require('crypto');
 const vault = require('./vault');
 const zipwriter = require('./zipwriter');
+const syncignore = require('./syncignore');
+const syncEngine = require('./sync-engine');
 const yubikey = require('./hwkeys/yubikey');
 const trezor = require('./hwkeys/trezor');
 
@@ -319,7 +321,7 @@ function loadConfig() {
 
 function saveConfig(config) {
   try {
-    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf8');
+    vault.replaceFileSync(configPath, JSON.stringify(config, null, 2));
   } catch (e) {
     console.error('Error saving config:', e);
   }
@@ -458,6 +460,7 @@ app.whenReady().then(() => {
   vault.cleanupSessionTmpDirs();
   registerVaultProtocol();
   createWindow();
+  startSync();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -475,6 +478,26 @@ app.on('window-all-closed', () => {
 app.on('will-quit', () => {
   vault.removeSessionTmpDir();
   trezor.dispose();
+});
+
+// One last sync before quitting (bounded, so quitting never hangs on the drive).
+let syncQuitDone = false;
+app.on('before-quit', (event) => {
+  if (syncQuitDone || !syncConfig()) return;
+  event.preventDefault();
+  syncQuitDone = true;
+  (async () => {
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        await withTimeout(mainWindow.webContents.executeJavaScript(
+          'typeof flushSaveIfNeeded === "function" ? flushSaveIfNeeded().then(() => null) : null', true), 2000, 'Saving');
+      }
+    } catch (_e) {}
+    await Promise.race([runSync(), sleepMs(SYNC_QUIT_MS)]);
+  })().finally(() => {
+    stopSync();
+    app.quit();
+  });
 });
 
 app.on('before-quit', async () => {
@@ -495,7 +518,7 @@ app.on('before-quit', async () => {
 // Get saved folder path
 ipcMain.handle('get-saved-folder', async () => {
   const config = loadConfig();
-  return config.lastFolder || null;
+  return toLocalPath(config.lastFolder) || null;
 });
 
 // Save folder path to config
@@ -678,11 +701,20 @@ async function vaultStatusPublic(folder, auto) {
   };
 }
 
-function vaultMigrate(event, root, mode) {
-  return vault.migrateFolder(root, mode, {
-    shouldSkip: (stats) => isDatalessPlaceholder(stats) && isNetworkOffline(),
-    onProgress: (p) => { try { event.sender.send('vault-progress', { mode, done: p.done, total: p.total }); } catch (_e) {} }
-  });
+// Sync waits while a folder is encrypted or decrypted, then sends the result
+// to the network drive in one go.
+async function vaultMigrate(event, root, mode) {
+  syncPauseDepth++;
+  try {
+    if (syncRunning) await syncRunning;
+    return await vault.migrateFolder(root, mode, {
+      shouldSkip: (stats) => isDatalessPlaceholder(stats) && isNetworkOffline(),
+      onProgress: (p) => { try { event.sender.send('vault-progress', { mode, done: p.done, total: p.total }); } catch (_e) {} }
+    });
+  } finally {
+    syncPauseDepth--;
+    scheduleSyncSoon(1000);
+  }
 }
 
 function migrateSummary(r) {
@@ -982,6 +1014,8 @@ ipcMain.handle('open-folder-dialog', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openDirectory', 'createDirectory']
   });
+  // With sync on, the network folder opens as its local copy.
+  if (!result.canceled && result.filePaths.length) result.filePaths[0] = toLocalPath(result.filePaths[0]);
   
   if (result.canceled || result.filePaths.length === 0) {
     return null;
@@ -1084,7 +1118,7 @@ async function scanFolder(folderPath, opts = {}) {
                 path: fullPath,
                 content: '',
                 size: stats.size,
-                created: stats.birthtimeMs,
+                created: syncCreatedFor(fullPath, stats.birthtimeMs),
                 lastModified: stats.mtimeMs,
                 unavailable: true
               }
@@ -1102,7 +1136,7 @@ async function scanFolder(folderPath, opts = {}) {
               path: fullPath,
               content: content,
               size: stats.size,
-              created: stats.birthtimeMs,
+              created: syncCreatedFor(fullPath, stats.birthtimeMs),
               lastModified: stats.mtimeMs
             }
           };
@@ -3464,21 +3498,352 @@ ipcMain.handle('create-folder', async (event, folderPath) => {
   }
 });
 
+// ============ Sync with a network drive ============
+// With sync on, this computer works on its own copy of the notes
+// (config.sync.localRoot) and sync-host.js keeps it in step with the network
+// folder (shareRoot) whenever that is reachable, so the notes open and save
+// the same away from home. See sync-engine.js for how files are compared.
+
+const SYNC_INTERVAL_MS = 60 * 1000;
+const SYNC_AFTER_SAVE_MS = 5000;
+const SYNC_ON_FOCUS_MS = 30 * 1000;
+const SYNC_SILENCE_MS = 45 * 1000; // no word from the sync process: the drive is stuck
+const SYNC_QUIT_MS = 8000;
+
+let syncCfg; // undefined: not read yet
+let syncChild = null;
+let syncSeq = 0;
+const syncWaiters = new Map(); // request id -> { resolve, timer, quiet, onProgress }
+let syncRunning = null;        // promise of the pass in progress
+let syncAgain = false;         // a pass was asked for while one was running
+let syncPauseDepth = 0;        // encrypt/decrypt in progress
+let syncSoonTimer = null;
+let syncIntervalTimer = null;
+let syncLastAttempt = 0;
+let syncCreated = null;        // creation dates from the manifest, loaded on demand
+const syncStatus = { state: 'idle', lastSynced: 0, error: null, busyHost: null, conflicts: [] };
+
+function syncConfig() {
+  if (syncCfg === undefined) {
+    const c = loadConfig().sync;
+    syncCfg = c && c.shareRoot && c.localRoot && c.machineId ? c : null;
+  }
+  return syncCfg;
+}
+
+function syncMachineId() {
+  const config = loadConfig();
+  if (!config.syncMachineId) {
+    config.syncMachineId = crypto.randomUUID();
+    saveConfig(config);
+  }
+  return config.syncMachineId;
+}
+
+// One manifest per local copy + network folder pair, so a manifest can never
+// be applied to a different folder (it would read as "everything deleted").
+function syncManifestPath(c) {
+  const pair = crypto.createHash('sha1').update(`${vaultConfigKey(c.localRoot)}|${vaultConfigKey(c.shareRoot)}`).digest('hex').slice(0, 12);
+  return path.join(app.getPath('userData'), 'sync', `${c.machineId}-${pair}.json`);
+}
+
+// p under fromRoot -> the same place under toRoot, or null.
+function rebasePath(p, fromRoot, toRoot) {
+  if (!p) return null;
+  const abs = path.resolve(p);
+  const from = path.resolve(fromRoot);
+  const k = vaultConfigKey(abs);
+  const kf = vaultConfigKey(from);
+  if (k === kf) return path.resolve(toRoot);
+  if (!k.startsWith(kf.endsWith(path.sep) ? kf : kf + path.sep)) return null;
+  return path.join(toRoot, abs.slice(from.length));
+}
+
+// A path in the network folder -> the same place in this computer's copy.
+function toLocalPath(p) {
+  const c = syncConfig();
+  return (c && rebasePath(p, c.shareRoot, c.localRoot)) || p;
+}
+
+// Note creation dates survive copying between computers through the sync
+// manifest (copying a file resets its creation date on disk).
+function syncCreatedFor(fullPath, fallback) {
+  const c = syncConfig();
+  if (!c) return fallback;
+  const rel = syncEngine.relOf(c.localRoot, fullPath);
+  if (!rel) return fallback;
+  if (!syncCreated) syncCreated = syncEngine.loadManifest(syncManifestPath(c)).created || {};
+  const t = syncCreated[syncEngine.keyOf(rel)];
+  return t > 0 ? t : fallback;
+}
+
+function syncStatusPublic() {
+  const c = syncConfig();
+  // A conflict is listed until its copy is deleted or renamed.
+  syncStatus.conflicts = syncStatus.conflicts.filter(p => fs.existsSync(p));
+  return {
+    enabled: !!c,
+    shareRoot: c ? c.shareRoot : null,
+    localRoot: c ? c.localRoot : null,
+    running: !!syncRunning,
+    state: syncStatus.state,
+    lastSynced: syncStatus.lastSynced,
+    error: syncStatus.error,
+    busyHost: syncStatus.busyHost,
+    conflicts: syncStatus.conflicts.slice()
+  };
+}
+
+function sendSyncStatus(extra) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try { mainWindow.webContents.send('sync-status', { ...syncStatusPublic(), ...(extra || {}) }); } catch (_e) {}
+}
+
+function syncProcess() {
+  if (syncChild) return syncChild;
+  const child = utilityProcess.fork(path.join(__dirname, 'sync-host.js'), [], { serviceName: 'Noat Boat Sync' });
+  child.on('message', (msg) => {
+    const w = msg && syncWaiters.get(msg.id);
+    if (!w) return;
+    if (msg.type === 'progress') {
+      w.quiet();
+      if (w.onProgress) w.onProgress(msg);
+    } else if (msg.type === 'result') {
+      syncWaiters.delete(msg.id);
+      clearTimeout(w.timer);
+      w.resolve(msg.result || { state: 'error', error: 'No result' });
+    }
+  });
+  child.on('exit', () => {
+    if (syncChild === child) syncChild = null;
+    for (const w of syncWaiters.values()) {
+      clearTimeout(w.timer);
+      w.resolve({ state: 'offline', error: 'The network drive stopped answering' });
+    }
+    syncWaiters.clear();
+  });
+  syncChild = child;
+  return child;
+}
+
+function killSyncProcess() {
+  const child = syncChild;
+  syncChild = null;
+  if (child) { try { child.kill(); } catch (_e) {} }
+}
+
+// Send a request to the sync process. A request that goes silent for
+// silenceMs is stuck on the drive: the process is killed and the request
+// counts as offline.
+function syncRequest(msg, { silenceMs = SYNC_SILENCE_MS, onProgress } = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try { child = syncProcess(); } catch (e) {
+      resolve({ state: 'error', error: `Sync could not start: ${e.message}` });
+      return;
+    }
+    const id = ++syncSeq;
+    const w = { resolve, onProgress, timer: null };
+    w.quiet = () => {
+      clearTimeout(w.timer);
+      w.timer = setTimeout(() => {
+        if (!syncWaiters.delete(id)) return;
+        resolve({ state: 'offline', error: 'The network drive stopped answering' });
+        killSyncProcess();
+      }, silenceMs);
+    };
+    syncWaiters.set(id, w);
+    w.quiet();
+    child.postMessage({ ...msg, id });
+  });
+}
+
+function syncPassOpts(c) {
+  return { localRoot: c.localRoot, shareRoot: c.shareRoot, manifestPath: syncManifestPath(c), machineId: c.machineId, hostName: safeHostName() };
+}
+
+// Run a pass now (or right after the one in progress).
+function runSync() {
+  const c = syncConfig();
+  if (!c) return Promise.resolve(null);
+  if (syncRunning || syncPauseDepth > 0) {
+    syncAgain = true;
+    return syncRunning || Promise.resolve(null);
+  }
+  syncLastAttempt = Date.now();
+  syncRunning = (async () => {
+    sendSyncStatus({ running: true });
+    const r = await syncRequest({ type: 'sync', opts: syncPassOpts(c) });
+    if (syncConfig() !== c) return r; // turned off meanwhile
+    syncCreated = null;
+    syncStatus.state = r.state;
+    syncStatus.error = r.error || null;
+    syncStatus.busyHost = r.busyHost || null;
+    if (r.lastSynced) syncStatus.lastSynced = r.lastSynced;
+    const toLocal = (rel) => path.join(c.localRoot, ...rel.split('/'));
+    for (const rel of r.conflicts || []) {
+      const p = toLocal(rel);
+      if (!syncStatus.conflicts.includes(p)) syncStatus.conflicts.push(p);
+    }
+    if (r.errors && r.errors.length) console.warn('Sync problems:', r.errors);
+    return r;
+  })().catch((e) => {
+    syncStatus.state = 'error';
+    syncStatus.error = String((e && e.message) || e);
+    return null;
+  });
+  const pass = syncRunning;
+  pass.then((r) => {
+    syncRunning = null;
+    // changed: files arrived or went here, so the window rescans.
+    const changed = !!(r && ((r.pulled && r.pulled.length) || (r.deleted && r.deleted.length) || (r.conflicts && r.conflicts.length)));
+    sendSyncStatus({ running: false, changed });
+    if (syncAgain && syncPauseDepth === 0) {
+      syncAgain = false;
+      scheduleSyncSoon(1000);
+    }
+  });
+  return pass;
+}
+
+function scheduleSyncSoon(ms) {
+  if (!syncConfig()) return;
+  clearTimeout(syncSoonTimer);
+  syncSoonTimer = setTimeout(() => { syncSoonTimer = null; runSync(); }, ms);
+}
+
+function startSync() {
+  const c = syncConfig();
+  if (!c) return;
+  try { syncStatus.lastSynced = syncEngine.loadManifest(syncManifestPath(c)).lastSynced || 0; } catch (_e) {}
+  if (!syncIntervalTimer) syncIntervalTimer = setInterval(runSync, SYNC_INTERVAL_MS);
+  if (mainWindow && !mainWindow.__syncFocusHooked) {
+    mainWindow.__syncFocusHooked = true;
+    mainWindow.on('focus', () => {
+      if (Date.now() - syncLastAttempt > SYNC_ON_FOCUS_MS) scheduleSyncSoon(500);
+    });
+  }
+  scheduleSyncSoon(1500);
+}
+
+function stopSync() {
+  clearInterval(syncIntervalTimer);
+  syncIntervalTimer = null;
+  clearTimeout(syncSoonTimer);
+  syncSoonTimer = null;
+  killSyncProcess();
+}
+
+ipcMain.handle('sync-status', async () => syncStatusPublic());
+
+ipcMain.handle('sync-now', async () => {
+  await runSync();
+  if (syncRunning) await syncRunning; // the pass asked for after a running one
+  return syncStatusPublic();
+});
+
+// After a save: sync a few seconds later, once typing has settled.
+ipcMain.on('sync-soon', () => scheduleSyncSoon(SYNC_AFTER_SAVE_MS));
+
+// Turn sync on for the network folder shareRoot: pick a local folder, copy
+// everything into it, then switch the app over to it.
+ipcMain.handle('sync-setup', async (event, shareRoot) => {
+  try {
+    if (syncConfig()) return { success: false, error: 'Sync is already on' };
+    if (!shareRoot) return { success: false, error: 'Open the notes folder on the network drive first' };
+    shareRoot = path.resolve(shareRoot);
+    const name = (path.basename(shareRoot) || 'Notes').replace(/[\\/:*?"<>|]/g, '_');
+    const suggested = path.join(app.getPath('documents'), 'Noat Boat', name);
+    let made = false;
+    try {
+      if (!fs.existsSync(suggested)) { fs.mkdirSync(suggested, { recursive: true }); made = true; }
+    } catch (_e) {}
+    const pick = await dialog.showOpenDialog(mainWindow, {
+      title: 'Where should this computer keep its copy of the notes?',
+      buttonLabel: 'Keep Copy Here',
+      defaultPath: suggested,
+      properties: ['openDirectory', 'createDirectory', 'promptToCreate']
+    });
+    const localRoot = (!pick.canceled && pick.filePaths[0]) ? path.resolve(pick.filePaths[0]) : null;
+    if (made && vaultConfigKey(localRoot || '') !== vaultConfigKey(suggested)) {
+      try { fs.rmdirSync(suggested); } catch (_e) {}
+    }
+    if (!localRoot) return { success: false, canceled: true };
+    if (rebasePath(localRoot, shareRoot, shareRoot) || rebasePath(shareRoot, localRoot, localRoot)) {
+      return { success: false, error: 'The local copy must be outside the network folder (and the other way round).' };
+    }
+
+    const cfg = { shareRoot, localRoot, machineId: syncMachineId() };
+    const prep = await syncRequest({ type: 'setup', localRoot, shareRoot }, { silenceMs: 20000 });
+    if (prep.state !== 'ok') return { success: false, error: prep.error || 'The network folder could not be reached' };
+
+    // First full copy. Big folders take a while; progress keeps it alive.
+    const first = await syncRequest({ type: 'sync', opts: syncPassOpts(cfg) }, {
+      onProgress: (p) => { try { event.sender.send('sync-progress', p); } catch (_e) {} }
+    });
+    if (first.state !== 'ok') {
+      return { success: false, error: first.error || (first.state === 'busy' ? `${first.busyHost} is syncing right now; try again in a minute.` : 'The first copy did not finish') };
+    }
+
+    // Switch over: the app opens the local copy from now on.
+    const config = loadConfig();
+    config.sync = cfg;
+    config.lastFolder = rebasePath(config.lastFolder, shareRoot, localRoot) || localRoot;
+    if (config.icNotesFolder) config.icNotesFolder = rebasePath(config.icNotesFolder, shareRoot, localRoot) || config.icNotesFolder;
+    // A remembered encryption key (and Touch ID choice) goes with the folder.
+    for (const field of ['vaultKeys', 'vaultTouchId']) {
+      const map = config[field];
+      if (!map) continue;
+      for (const k of Object.keys(map)) {
+        const moved = rebasePath(k, shareRoot, localRoot);
+        if (moved && map[vaultConfigKey(moved)] === undefined) map[vaultConfigKey(moved)] = map[k];
+      }
+    }
+    saveConfig(config);
+    syncCfg = cfg;
+    syncCreated = null;
+    syncStatus.state = 'ok';
+    syncStatus.error = null;
+    syncStatus.lastSynced = first.lastSynced || Date.now();
+    syncStatus.conflicts = (first.conflicts || []).map(rel => path.join(localRoot, ...rel.split('/')));
+    startSync();
+    sendSyncStatus();
+    return { success: true, localRoot, folder: config.lastFolder, conflicts: syncStatus.conflicts.length };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+// Turn sync off: one last pass if the drive is there, then the app goes back
+// to the network folder. The local copy stays where it is.
+ipcMain.handle('sync-disable', async () => {
+  const c = syncConfig();
+  if (!c) return { success: true };
+  const r = await runSync();
+  if (syncRunning) await syncRunning;
+  stopSync();
+  const config = loadConfig();
+  delete config.sync;
+  config.lastFolder = rebasePath(config.lastFolder, c.localRoot, c.shareRoot) || c.shareRoot;
+  if (config.icNotesFolder) config.icNotesFolder = rebasePath(config.icNotesFolder, c.localRoot, c.shareRoot) || config.icNotesFolder;
+  saveConfig(config);
+  syncCfg = null;
+  syncCreated = null;
+  syncStatus.state = 'idle';
+  syncStatus.error = null;
+  syncStatus.conflicts = [];
+  sendSyncStatus();
+  return { success: true, folder: config.lastFolder, lastPass: r ? r.state : null };
+});
+
 // ============ Backup ============
 // Zip the whole notes folder. Files are copied byte for byte, so an encrypted
 // folder stays encrypted in the backup; .noatformat/vault.json goes with it,
 // so unzipping and unlocking with the password restores everything.
 let backupRunning = false;
 
-function backupSkipDir(name) {
-  return name.startsWith('.') && name !== NOATFORMAT_DIR; // .git, .dropbox.cache, ...
-}
-
-function backupSkipFile(name) {
-  const lower = name.toLowerCase();
-  return name.startsWith('.') || lower === 'desktop.ini' || lower === 'thumbs.db' ||
-    lower.endsWith('.tmp') || lower.endsWith('.partial') || lower.endsWith('.noatvault-tmp');
-}
+const backupSkipDir = syncignore.skipDir;   // .git, .dropbox.cache, ...
+const backupSkipFile = syncignore.skipFile; // hidden files, temp files
 
 // Files to back up under root, named "<FolderName>/<relative path>".
 // Online-only placeholders are skipped while offline (reading them would
