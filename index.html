@@ -307,6 +307,18 @@
       font-family:var(--mono);
       white-space:nowrap;
     }
+    .syncState{
+      font-size:12px;
+      color:var(--muted);
+      font-family:var(--mono);
+      white-space:nowrap;
+      background:none;
+      border:none;
+      padding:0 0 0 12px;
+      cursor:pointer;
+    }
+    .syncState:hover{ color:var(--text); }
+    .syncState.warn{ color:#c0392b; }
     .empty{
       padding:20px;
       color:var(--muted);
@@ -1241,6 +1253,7 @@
       <div class="editorHeader">
         <div id="currentTitle" class="currentTitle">No note selected</div>
         <div id="saveState" class="saveState"></div>
+        <button id="syncState" class="syncState" style="display:none;"></button>
       </div>
       <div id="empty" class="empty">
         <div id="splashScreen" class="splashScreen" style="display:none;">
@@ -1531,6 +1544,17 @@
         </div>
         <div class="prefItem" id="vaultMsgItem" style="display:none;">
           <div class="prefHint" id="vaultMsg"></div>
+        </div>
+        <div class="prefItem" style="border-top:1px solid var(--border);padding-top:20px;margin-top:8px;">
+          <label class="prefLabel">Sync</label>
+          <div class="prefHint" id="syncPrefStatus" style="color:var(--text);"></div>
+          <div class="prefControl" style="gap:8px;">
+            <button id="syncSetupBtn" class="btn">Keep a local copy...</button>
+            <button id="syncNowBtn" class="btn">Sync now</button>
+            <button id="syncDisableBtn" class="btn">Turn off sync...</button>
+          </div>
+          <div class="prefHint">For a notes folder on a network drive that several computers use. This computer keeps its own copy of the notes and works on it, also when the drive can't be reached (away from home), and syncs with the drive whenever it can: every minute, after you type, and before quitting. A note changed on two computers between syncs keeps both versions, the other one as a "(conflict from ...)" note. Deleted files go to .noatsync/trash for 30 days.</div>
+          <div class="prefHint" id="syncPrefMsg" style="color:var(--text);"></div>
         </div>
         <div class="prefItem" style="border-top:1px solid var(--border);padding-top:20px;margin-top:8px;">
           <label class="prefLabel">Backup</label>
@@ -3242,6 +3266,8 @@ function openPrefsModal() {
   refreshVaultInfo();
   if (!backupBusy) els.backupStatus.textContent = '';
   renderBackupPrefs();
+  if (!syncSetupBusy) syncPrefMsg('');
+  refreshSyncInfo();
 }
 
 function closePrefsModal() {
@@ -3740,6 +3766,208 @@ api.onBackupProgress((p) => {
   els.backupStatus.textContent = p.phase === 'scan' ? 'Looking for files...' : `Backing up ${p.done} / ${p.total}...`;
 });
 els.backupNotesBtn.addEventListener('click', backupNotes);
+
+// --- Sync with a network drive ---
+// With sync on, the open folder is this computer's copy of the notes; main
+// syncs it with the network folder and reports here on 'sync-status'.
+let syncInfo = { enabled: false, conflicts: [] };
+let syncSetupBusy = false;
+const syncEls = {
+  state: document.getElementById('syncState'),
+  prefStatus: document.getElementById('syncPrefStatus'),
+  prefMsg: document.getElementById('syncPrefMsg'),
+  setupBtn: document.getElementById('syncSetupBtn'),
+  nowBtn: document.getElementById('syncNowBtn'),
+  disableBtn: document.getElementById('syncDisableBtn')
+};
+
+function syncPrefMsg(text) {
+  syncEls.prefMsg.textContent = text || '';
+}
+
+function syncAgo(t) {
+  if (!t) return 'never';
+  const s = Math.round((Date.now() - t) / 1000);
+  if (s < 60) return 'just now';
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h} h ago`;
+  return fmtDate(t);
+}
+
+function syncConflictNotes() {
+  return (syncInfo.conflicts || []).filter(p => /\.txt$/i.test(p));
+}
+
+function renderSyncState() {
+  const el = syncEls.state;
+  if (!syncInfo.enabled) {
+    el.style.display = 'none';
+    return;
+  }
+  const conflicts = syncConflictNotes();
+  let text, tip, warn = false;
+  if (syncInfo.running) {
+    text = 'syncing…';
+    tip = 'Syncing with the network drive';
+  } else if (conflicts.length) {
+    text = `${conflicts.length} sync conflict${conflicts.length === 1 ? '' : 's'}`;
+    tip = `Changed on two computers - both versions kept. Click to open: ${conflicts.map(p => api.basename(p).replace(/\.txt$/i, '')).join(', ')}. Delete the conflict note once you have merged it.`;
+    warn = true;
+  } else if (syncInfo.state === 'offline') {
+    text = `offline · synced ${syncAgo(syncInfo.lastSynced)}`;
+    tip = `The network drive can't be reached. Notes save on this computer and sync when it is back.\n${syncInfo.shareRoot}`;
+  } else if (syncInfo.state === 'busy') {
+    text = `waiting for ${syncInfo.busyHost || 'another computer'}`;
+    tip = `${syncInfo.busyHost || 'Another computer'} is syncing; this one tries again in a minute.`;
+  } else if (syncInfo.state === 'error') {
+    text = 'sync stopped';
+    tip = syncInfo.error || 'Sync stopped';
+    warn = true;
+  } else {
+    text = `synced ${syncAgo(syncInfo.lastSynced)}`;
+    tip = `Synced with ${syncInfo.shareRoot}. Click to sync now.`;
+  }
+  el.textContent = text;
+  el.title = tip;
+  el.classList.toggle('warn', warn);
+  el.style.display = '';
+}
+
+function renderSyncPrefs() {
+  const on = !!syncInfo.enabled;
+  syncEls.setupBtn.style.display = on ? 'none' : '';
+  syncEls.nowBtn.style.display = on ? '' : 'none';
+  syncEls.disableBtn.style.display = on ? '' : 'none';
+  syncEls.setupBtn.disabled = syncSetupBusy || !rootFolderPath;
+  syncEls.nowBtn.disabled = syncSetupBusy || !!syncInfo.running;
+  syncEls.disableBtn.disabled = syncSetupBusy;
+  let status;
+  if (on) {
+    status = `On. This computer's copy: ${syncInfo.localRoot}\nNetwork folder: ${syncInfo.shareRoot}\nLast synced: ${syncAgo(syncInfo.lastSynced)}`;
+    if (syncInfo.state === 'offline') status += ' (the network drive can\'t be reached right now)';
+    if (syncInfo.state === 'error' && syncInfo.error) status += `\nProblem: ${syncInfo.error}`;
+  } else {
+    status = rootFolderPath ? `Off. Notes are read and saved directly in ${rootFolderPath}` : 'Open the notes folder on the network drive first';
+  }
+  syncEls.prefStatus.textContent = status;
+  syncEls.prefStatus.style.whiteSpace = 'pre-line';
+}
+
+async function refreshSyncInfo() {
+  try { syncInfo = await api.syncStatus(); } catch (_e) {}
+  renderSyncState();
+  renderSyncPrefs();
+}
+
+api.onSyncStatus((s) => {
+  if (!s) return;
+  const before = new Set(syncConflictNotes());
+  syncInfo = s;
+  renderSyncState();
+  renderSyncPrefs();
+  const fresh = syncConflictNotes().filter(p => !before.has(p));
+  if (fresh.length) {
+    showBanner(`Sync: ${fresh.length === 1 ? 'a note was' : `${fresh.length} notes were`} changed on two computers. Both versions are kept - the other one as "${escapeHtml(api.basename(fresh[0]).replace(/\.txt$/i, ''))}"${fresh.length > 1 ? ' and more' : ''}.`);
+  }
+  // Files arrived from the network drive: show them now rather than at the
+  // next disk check.
+  if (s.changed && rootFolderPath) {
+    requestDiskRefresh();
+    checkOpenNoteOnDisk();
+  }
+});
+
+api.onSyncProgress((p) => {
+  if (!syncSetupBusy || !p) return;
+  if (p.phase === 'copy') syncPrefMsg(`Copying notes to this computer... ${p.done} / ${p.total}`);
+  else if (p.phase === 'compare') syncPrefMsg(`Comparing... ${p.done} / ${p.total}`);
+  else syncPrefMsg('Looking through the network folder...');
+});
+
+async function syncSetup() {
+  if (!rootFolderPath || syncSetupBusy) return;
+  syncSetupBusy = true;
+  notesBusyDepth++; // no disk polling while the folder is switched over
+  renderSyncPrefs();
+  let r;
+  try {
+    syncPrefMsg('Saving open changes...');
+    await flushSaveIfNeeded();
+    if (canvasDirty && fabricCanvas) await saveCanvasState();
+    syncPrefMsg('Choose a folder on this computer for the copy (an empty one)...');
+    r = await api.syncSetup(rootFolderPath);
+  } catch (e) {
+    r = { success: false, error: String(e?.message || e) };
+  } finally {
+    syncSetupBusy = false;
+    notesBusyDepth--;
+  }
+  if (r && r.canceled) {
+    syncPrefMsg('');
+  } else if (r && r.success) {
+    syncPrefMsg(`Done. Noat Boat now works on the copy in ${r.localRoot} and syncs it with the network drive.${r.conflicts ? ` ${r.conflicts} note(s) differed and were kept as conflict notes.` : ''}`);
+    await loadFolderFromPath(r.localRoot);
+    if (r.folder && r.folder !== r.localRoot) {
+      folderPath = r.folder;
+      updateFolderUI();
+      await reloadNotes();
+    }
+  } else {
+    syncPrefMsg(`Sync was not turned on: ${(r && r.error) || 'unknown error'}`);
+  }
+  await refreshSyncInfo();
+}
+
+async function syncDisable() {
+  const ok = await api.showConfirm(
+    `Turn off sync?\n\nNoat Boat syncs one last time if the network drive is there, then opens the notes directly from ${syncInfo.shareRoot} again. This computer's copy stays in ${syncInfo.localRoot}.`,
+    { title: 'Turn Off Sync', okLabel: 'Turn Off' });
+  if (!ok) return;
+  syncSetupBusy = true;
+  renderSyncPrefs();
+  syncPrefMsg('Syncing one last time...');
+  try {
+    await flushSaveIfNeeded();
+    if (canvasDirty && fabricCanvas) await saveCanvasState();
+    const r = await api.syncDisable();
+    syncPrefMsg(r && r.lastPass && r.lastPass !== 'ok'
+      ? 'Sync is off. The last sync did not reach the network drive, so recent changes are only in this computer\'s copy.'
+      : 'Sync is off.');
+    syncSetupBusy = false;
+    if (r && r.folder && await api.fileExists(r.folder)) await loadFolderFromPath(r.folder);
+  } catch (e) {
+    syncPrefMsg(`Could not turn sync off: ${String(e?.message || e)}`);
+  } finally {
+    syncSetupBusy = false;
+  }
+  await refreshSyncInfo();
+}
+
+async function syncNowClicked() {
+  await flushSaveIfNeeded();
+  syncInfo = { ...syncInfo, running: true };
+  renderSyncState();
+  renderSyncPrefs();
+  syncInfo = await api.syncNow();
+  renderSyncState();
+  renderSyncPrefs();
+}
+
+syncEls.state.addEventListener('click', async () => {
+  const conflicts = syncConflictNotes();
+  if (conflicts.length) {
+    const p = conflicts[0];
+    await openCalendarEntry({ folder: api.dirname(p), name: api.basename(p) });
+    return;
+  }
+  syncNowClicked();
+});
+syncEls.setupBtn.addEventListener('click', syncSetup);
+syncEls.nowBtn.addEventListener('click', syncNowClicked);
+syncEls.disableBtn.addEventListener('click', syncDisable);
+setInterval(renderSyncState, 30000); // keep "synced N min ago" current
 
 // --- Export functions ---
 let exportIsOpen = false;
@@ -7962,6 +8190,7 @@ async function saveCurrentNow() {
       n.diskText = content;
       // Typing during the write leaves the note dirty so the next save picks it up.
       if ((n.content ?? '') === content) dirty = false;
+      if (syncInfo.enabled) api.syncSoon();
     }
     if (formatDirty) {
       await saveFormatSpans();
@@ -9100,6 +9329,8 @@ document.addEventListener('visibilitychange', () => {
   renderList();
   renderCurrent();
   try { resizeDrawCanvas(false); clearCanvasWhite(); } catch (_e) {}
+
+  await refreshSyncInfo();
 
   // Auto-load saved folder
   try {

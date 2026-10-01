@@ -90,6 +90,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Backup
   backupNotes: (folder) => ipcRenderer.invoke('backup-notes', folder),
   onBackupProgress: (callback) => ipcRenderer.on('backup-progress', (_event, payload) => callback(payload)),
+
+  // Sync with a network drive (local copy)
+  syncStatus: () => ipcRenderer.invoke('sync-status'),
+  syncNow: () => ipcRenderer.invoke('sync-now'),
+  syncSetup: (shareRoot) => ipcRenderer.invoke('sync-setup', shareRoot),
+  syncDisable: () => ipcRenderer.invoke('sync-disable'),
+  syncSoon: () => ipcRenderer.send('sync-soon'),
+  onSyncStatus: (callback) => ipcRenderer.on('sync-status', (_event, payload) => callback(payload)),
+  onSyncProgress: (callback) => ipcRenderer.on('sync-progress', (_event, payload) => callback(payload)),
   
   // Export operations
   exportPdf: (savePath, notesData, isDark) => ipcRenderer.invoke('export-pdf', savePath, notesData, isDark),
